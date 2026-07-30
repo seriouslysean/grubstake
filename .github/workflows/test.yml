@@ -1,0 +1,42 @@
+name: test
+
+# The suite exists so a fix cannot silently break an earlier fix, which only holds if something
+# other than memory runs it. This is the merge gate: offline only, seconds, no network, so
+# nothing green depends on GitHub being reachable. The download tier is network.yml, on tags.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Both platforms report, because "it broke on the other one" is the answer worth having.
+      fail-fast: false
+      matrix:
+        # The name a required status check is matched by, so it holds the alias and not the
+        # runner label: renaming a label would leave the ruleset waiting on a check forever.
+        include:
+          # /bin/sh is dash here, so run.sh and grubstake.sh both execute under it.
+          - platform: linux
+            runner: ubuntu-latest
+          # /bin/sh is bash here, which is the other shell the script claims to support.
+          - platform: macos
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suite asserts the script parses under dash; macOS ships none, and without one that
+      # assertion fails for a missing interpreter rather than for the thing it guards.
+      - name: install dash
+        if: runner.os == 'macOS'
+        run: brew install dash
+
+      - name: offline suite
+        run: test/run.sh

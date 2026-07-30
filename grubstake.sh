@@ -8,8 +8,11 @@ set -eu
 
 GRUBSTAKE_VERSION="0.3.2"
 GRUBSTAKE_MIN_VERSION="0.3.0"   # every earlier release has a known blocking defect
-GRUBSTAKE_REPO="https://github.com/seriouslysean/grubstake"
-GRUBSTAKE_RAW="https://raw.githubusercontent.com/seriouslysean/grubstake"
+# Named so cmd_update can tell an override apart from the default it is comparing against.
+GRUBSTAKE_REPO_DEFAULT="https://github.com/seriouslysean/grubstake"
+GRUBSTAKE_RAW_DEFAULT="https://raw.githubusercontent.com/seriouslysean/grubstake"
+GRUBSTAKE_REPO="${GRUBSTAKE_REPO:-$GRUBSTAKE_REPO_DEFAULT}"
+GRUBSTAKE_RAW="${GRUBSTAKE_RAW:-$GRUBSTAKE_RAW_DEFAULT}"
 
 # ---------------------------------------------------------------------------- output
 
@@ -286,6 +289,139 @@ verify_tool() {
     [ -x "$(tool_bin "$_tool" "$_sha")" ] || die "$_tool $2: not installed (run: grubstake ensure)"
 }
 
+# ---------------------------------------------------------------------------- hooks
+# hooks/ is the reviewable source; install and doctor read these copies so neither needs the network.
+# Quoted heredocs because an expanded `$` here would corrupt the hook the test compares byte for byte.
+
+embedded_hook() {
+    case "$1" in
+        pre-commit|post-commit) : ;;
+        *)                      die "unknown hook: $1" ;;
+    esac
+    case "$1" in
+        pre-commit)
+            cat <<'GST_EMBED_PRE_COMMIT' | sed -e '1d' -e '$d'
+# gst-embedded-hook-begin: pre-commit
+#!/bin/sh
+# grubstake pre-commit spine. Verifies pinned tools, lints staged Swift, then runs repo-local
+# gates. Repo-specific checks belong in .githooks/pre-commit.d/, not in this file, which is
+# overwritten whenever the hooks are reinstalled.
+
+set -eu
+
+ROOT="$(git rev-parse --show-toplevel)"
+GRUBSTAKE="$ROOT/grubstake.sh"
+
+[ -x "$GRUBSTAKE" ] || {
+    echo "[pre-commit] grubstake.sh missing or not executable at repo root" >&2
+    exit 1
+}
+
+# Only verify tools when something this spine gates is staged. A cold cache should not refuse a
+# docs-only commit, and a repo with no pins has nothing to verify.
+STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
+[ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
+
+# Only lint if the repo pinned swiftlint. A repo that does not use it should not be blocked by
+# the shared spine; its own gates in pre-commit.d decide. One line per tool, so grep is enough.
+if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.tools" 2>/dev/null; then
+    SWIFTLINT="$("$GRUBSTAKE" path swiftlint)" || exit 1
+    # Verify and refuse rather than format-and-restage: re-adding after a fix folds unrelated
+    # hunks into a partial `git add -p` and re-stages a working-tree deletion of a file staged
+    # as new. The developer fixes and re-stages; the hook never touches the index.
+    #
+    # Known limitation: SwiftLint reads the working tree, so this checks the current contents of
+    # files whose paths are staged, not the staged blobs. Linting a temp copy would break config
+    # resolution, and stashing the remainder to lint the index is what strands work in the tools
+    # that do it. The divergence is warned about below, and CI lints the committed tree.
+    OUT=$(git diff --cached --name-only -z --diff-filter=ACMR -- '*.swift' \
+        | xargs -0 "$SWIFTLINT" lint --strict --quiet 2>&1) && RC=0 || RC=$?
+    if [ "$RC" -ne 0 ]; then
+        # SwiftLint exits non-zero with this message when every staged path is excluded by config.
+        if ! echo "$OUT" | grep -q "No lintable files found"; then
+            echo "$OUT" >&2
+            echo "[pre-commit] swiftlint failed on working-tree contents of staged Swift paths." >&2
+            echo "[pre-commit] fix, re-stage, retry." >&2
+            exit 1
+        fi
+    fi
+    [ -n "$OUT" ] && echo "$OUT"
+
+    # Fires on exactly the case the retry loop creates: lint fails, the file is fixed, the commit
+    # is retried without re-staging, and the stale blob commits while the hook reads clean bytes.
+    # Advisory only, since a divergence is legitimate under `git add -p`.
+    if git status --porcelain -- '*.swift' | grep -q '^[ACMR]M'; then
+        echo "[pre-commit] warning: staged Swift files have unstaged edits. Lint read the working" >&2
+        echo "[pre-commit] tree, not what is being committed. Re-stage if the fix belongs here." >&2
+    fi
+fi
+
+for gate in "$ROOT"/.githooks/pre-commit.d/*; do
+    [ -e "$gate" ] || continue
+    # A gate that lost its exec bit must not look like one that passed.
+    [ -x "$gate" ] || { echo "[pre-commit] gate not executable: $gate" >&2; exit 1; }
+    "$gate" || { echo "[pre-commit] gate failed: $(basename "$gate")" >&2; exit 1; }
+done
+
+exit 0
+# gst-embedded-hook-end: pre-commit
+GST_EMBED_PRE_COMMIT
+            ;;
+        post-commit)
+            cat <<'GST_EMBED_POST_COMMIT' | sed -e '1d' -e '$d'
+# gst-embedded-hook-begin: post-commit
+#!/bin/sh
+# grubstake post-commit: report that a newer grubstake exists. Notify only. It never updates,
+# never blocks, and never fails a commit.
+#
+# post-commit rather than pre-commit on purpose: nothing here should sit in the path that gates a
+# commit. The synchronous cost is one file read; the network refresh is backgrounded and only
+# runs once per TTL, so an offline machine stays silent instead of stalling.
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+GRUBSTAKE="$ROOT/grubstake.sh"
+[ -x "$GRUBSTAKE" ] || exit 0
+
+CACHE="$(git rev-parse --git-dir)/grubstake-latest"   # inside .git, so it needs no gitignore entry
+TTL=86400
+
+CURRENT="$("$GRUBSTAKE" version 2>/dev/null)" || exit 0
+
+now=$(date +%s)
+stamp=0
+[ -f "$CACHE" ] && stamp=$(sed -n 1p "$CACHE" 2>/dev/null || echo 0)
+case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
+
+if [ $((now - stamp)) -gt "$TTL" ]; then
+    # Backgrounded and detached: a slow or unreachable network must not extend a commit.
+    (
+        latest=$(git ls-remote --tags --refs https://github.com/seriouslysean/grubstake 'v*' 2>/dev/null \
+            | awk '{print $2}' | sed 's|refs/tags/v||' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
+        [ -n "$latest" ] && printf '%s\n%s\n' "$now" "$latest" > "$CACHE"
+    ) >/dev/null 2>&1 &
+fi
+
+LATEST=$(sed -n 2p "$CACHE" 2>/dev/null) || exit 0
+[ -n "$LATEST" ] || exit 0
+[ "$LATEST" = "$CURRENT" ] && exit 0
+
+# Only speak when the cached latest is genuinely newer than what is installed.
+newest=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
+[ "$newest" = "$LATEST" ] || exit 0
+
+echo "[grubstake] $LATEST available (pinned $CURRENT) -- run: ./grubstake.sh update"
+exit 0
+# gst-embedded-hook-end: post-commit
+GST_EMBED_POST_COMMIT
+            ;;
+        # A pattern reaching here means the two case lists in this function have drifted: without
+        # this arm the case falls through, the pipeline still exits 0, and install writes an empty hook.
+        *)  die "no embedded copy for hook: $1" ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------- commands
 
 add_one() {
@@ -386,6 +522,16 @@ cmd_doctor() {
     printf 'cache      %s\n' "$(cache_root)"
     printf 'hooksPath  %s\n' "$(git -C "$_root" config core.hooksPath || echo '(unset)')"
     printf 'pins       %s\n' "$(pins_file)"
+    for _hook in pre-commit post-commit; do
+        _installed="$_root/.githooks/$_hook"
+        if [ ! -f "$_installed" ]; then
+            printf '  %-12s not installed\n' "$_hook"
+        elif embedded_hook "$_hook" | cmp -s - "$_installed"; then
+            printf '  %-12s ok\n' "$_hook"
+        else
+            printf '  %-12s DRIFTED from the embedded copy (rm it and run: grubstake install)\n' "$_hook"
+        fi
+    done
     for _tool in $(pinned_tools); do
         _ver="$(pin_version "$_tool")"
         # Assign, do not test: a die inside $( ) would only kill the subshell.
@@ -410,8 +556,7 @@ cmd_legacy_replace() {
     chmod +x "$_staged"
     mv -f "$_staged" "$_installed"
     log "updated to $_version"
-    "$_installed" ensure || die "updated to $_version, but ensure failed. Run it again before committing."
-    log "review the diff, then commit"
+    log "review the diff, then run: ./grubstake.sh ensure"
 }
 
 cmd_install() {
@@ -429,8 +574,7 @@ cmd_install() {
             log "$_hook: already present, leaving it alone"
             continue
         fi
-        curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$GRUBSTAKE_RAW/v$GRUBSTAKE_VERSION/hooks/$_hook" -o "$_dest.tmp" \
-            || { rm -f "$_dest.tmp"; die "cannot fetch $_hook for v$GRUBSTAKE_VERSION"; }
+        embedded_hook "$_hook" > "$_dest.tmp"
         chmod +x "$_dest.tmp"
         mv "$_dest.tmp" "$_dest"
         log "$_hook: installed"
@@ -479,6 +623,12 @@ cmd_update() {
     # shellcheck disable=SC2064
     trap "rm -f '$_tmp'" EXIT HUP INT TERM
 
+    # Silent on the common path; an overridden source is the one case a reader cannot infer from
+    # the rest of the output, since fetch_release never repeats the host it pulled from.
+    if [ "$GRUBSTAKE_REPO" != "$GRUBSTAKE_REPO_DEFAULT" ] || [ "$GRUBSTAKE_RAW" != "$GRUBSTAKE_RAW_DEFAULT" ]; then
+        log "release source overridden: repo=$GRUBSTAKE_REPO raw=$GRUBSTAKE_RAW"
+    fi
+
     if [ -n "$_pinned" ]; then
         _pinned="${_pinned#v}"
         echo "$_pinned" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || die "not a release version: $_pinned"
@@ -515,8 +665,7 @@ cmd_update() {
     trap - EXIT HUP INT TERM
 
     log "updated to $_target"
-    "$_self" ensure || die "updated to $_target, but ensure failed. Run it again before committing."
-    log "review the diff, then commit"
+    log "review the diff, then run: ./grubstake.sh ensure"
 }
 
 # ---------------------------------------------------------------------------- entry

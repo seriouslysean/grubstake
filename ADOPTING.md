@@ -14,7 +14,7 @@ point of this migration is to change the mechanism, not the versions.
 ## Phase 1: pin the tools, change nothing else
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v0.3.0/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v0.3.1/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
 ./grubstake.sh version   # confirm it matches the tag you asked for
 ```
@@ -53,14 +53,20 @@ chain yet. CI is still installing tools the old way at this point, and a repo wh
 resolves from a directory CI populates will go red the moment that branch disappears.
 
 ```sh
-if _gs=$(./grubstake.sh path swiftlint 2>/dev/null); then
-    echo "$_gs"
+if [ -x ./grubstake.sh ] && [ -f grubstake.tools ]; then
+    ./grubstake.sh path swiftlint || exit 1      # a real failure stays fatal
 elif [ -x "./tools/swiftlint" ]; then
     echo "./tools/swiftlint"
 elif command -v swiftlint >/dev/null 2>&1; then
     command -v swiftlint
 fi
 ```
+
+Branch on whether grubstake is **set up**, never on whether it **succeeded**. Suppressing its exit
+status falls through to an unpinned binary on exactly the failures it exists to raise: a hash
+mismatch, a malformed pins file, an unreachable download. A machine with the tool on `PATH` will
+then lint with whatever version it happens to have, and exit 0. A half-migrated repo is the unsafe
+state, so delete the remaining branches the moment phase 3 lands.
 
 Resolve from the repository root, before anything changes directory. That is the failure this
 exists to prevent: a tool manager that reads its manifest relative to the working directory drops
@@ -94,8 +100,19 @@ In CI, replace whatever downloads the tools with:
 ./grubstake.sh ensure
 ```
 
-Cache the tool directory keyed on `grubstake.tools`, since that file is the version source and a
-change to it should invalidate the cache. `ensure` re-verifies on a cache hit, so a poisoned cache
+Cache the tool directory keyed on **both** `grubstake.tools` and `grubstake.sh`:
+
+```yaml
+key: grubstake-${{ runner.os }}-${{ hashFiles('grubstake.tools', 'grubstake.sh') }}
+```
+
+The pins decide which versions; the script decides the cache layout. Keying on pins alone means a
+grubstake upgrade that changes the layout restores an unchanged key, misses every lookup,
+re-downloads everything, and then saves nothing because the key already existed. The job stays
+green and pays that cost on every run until someone happens to edit a pin.
+
+Avoid a `restore-keys` prefix, or expect the cache to grow: entries are never unlinked, so a prefix
+hit restores the old layout and saves it alongside the new one. `ensure` re-verifies on a cache hit, so a poisoned cache
 fails at install rather than during lint, and the conditional "only install on cache miss" step can
 go.
 
@@ -103,11 +120,15 @@ If you add `ensure` to an existing bootstrap script, put it after anything that 
 network. Under `set -e` a failed download aborts every later step, and a fresh clone can end up
 half-configured in a way the repo's own validation then reports as drift.
 
-**Prove the gate still fails, per tool.** Inject a violation, confirm the failure, revert. Do it
-once for each tool, not once overall: a whitespace violation may be owned by the formatter and
-ignored by the linter, which proves nothing about the linter while looking like proof. Pick a rule
-you have confirmed that repo's config actually enforces. Line length is a good default, since it is
-almost always on and trivially injected.
+**Prove the gate still fails, once per gate.** Inject a violation, confirm the failure, revert. Do
+it separately for each tool that can reject input, not once overall: a whitespace violation may be
+owned by the formatter and ignored by the linter, which proves nothing about the linter while
+looking like proof. Pick a rule you have confirmed that repo's config actually enforces. Line
+length is a good default, since it is almost always on and trivially injected.
+
+Some pinned tools reject nothing. An output formatter has no gate to prove, and no wording makes
+one provable. Report a pinned tool that nothing invokes, or that no gate depends on, as a finding
+rather than as a gap in the proof: it is being downloaded on every cold cache for no reason.
 
 ## Phase 4: hooks, only if the repo wants them
 

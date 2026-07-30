@@ -6,7 +6,7 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="0.1.5"
+GRUBSTAKE_VERSION="0.2.0"
 GRUBSTAKE_REPO="https://github.com/seriouslysean/grubstake"
 GRUBSTAKE_RAW="https://raw.githubusercontent.com/seriouslysean/grubstake"
 
@@ -130,10 +130,37 @@ pinned_tools() {
     grep -vE '^[[:space:]]*(#|$)' "$(pins_file)" | awk '{print $1}'
 }
 
+# grubstake.tools is hand-editable and merge-conflict-prone. Reject a malformed file loudly
+# instead of letting a duplicate line, a CRLF, or a conflict marker fail somewhere downstream.
+validate_pins() {
+    _f="$(pins_file)"
+    [ -f "$_f" ] || return 0
+    grep -q "$(printf '\r')" "$_f" && die "grubstake.tools has CRLF line endings"
+    grep -qE '^(<<<<<<<|=======|>>>>>>>)' "$_f" && die "grubstake.tools has unresolved conflict markers"
+    _n=0
+    while IFS= read -r _l; do
+        _n=$((_n + 1))
+        case "$_l" in ''|\#*) continue ;; esac
+        set -- $_l
+        [ $# -eq 4 ] || die "grubstake.tools:$_n expected 4 fields, got $#"
+        known_tools | grep -qw "$1" || die "grubstake.tools:$_n unknown tool: $1"
+        echo "$2" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || die "grubstake.tools:$_n bad version: $2"
+        for _h in "$3" "$4"; do
+            [ "$_h" = "-" ] || echo "$_h" | grep -qE '^[0-9a-f]{64}$' \
+                || die "grubstake.tools:$_n sha256 must be 64 hex chars or -, got: $_h"
+        done
+    done < "$_f"
+    _dupes="$(pinned_tools | LC_ALL=C sort | uniq -d)"
+    [ -z "$_dupes" ] || die "grubstake.tools pins a tool more than once: $_dupes"
+}
+
 # ---------------------------------------------------------------------------- install tools
 
 tool_dir()  { echo "$(cache_root)/$1/$2"; }
 tool_bin()  { echo "$(tool_dir "$1" "$2")/$1"; }
+# Digest of the installed binary, recorded at install. The pin covers the archive; this covers
+# what a later run actually executes, which is a mutable file in the user's home.
+tool_stamp() { echo "$(tool_dir "$1" "$2")/.grubstake-sha256"; }
 
 # Hash proves what arrived. Version check proves what is inside it.
 install_tool() {
@@ -151,7 +178,12 @@ install_tool() {
 
     _dest="$(tool_dir "$_tool" "$_ver")"
     _bin="$(tool_bin "$_tool" "$_ver")"
-    [ -x "$_bin" ] && return 0
+    # An unstamped binary is reinstalled rather than stamped: stamping whatever is already on
+    # disk would bless a poisoned cache, and a cache from before stamps existed is unproven.
+    if [ -x "$_bin" ] && [ -f "$(tool_stamp "$_tool" "$_ver")" ]; then
+        return 0
+    fi
+    rm -rf "$_dest"
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     # shellcheck disable=SC2064
@@ -193,6 +225,7 @@ install_tool() {
     trap - EXIT HUP INT TERM
     # set -e is suppressed when this runs from a || branch, so assert instead of assuming.
     [ -x "$_bin" ] || die "$_tool $_ver: install incomplete"
+    sha256_file "$_bin" > "$(tool_stamp "$_tool" "$_ver")"
     log "$_tool $_ver: installed"
 }
 
@@ -208,6 +241,14 @@ verify_tool() {
     [ -n "$_url" ] || return 0
     _bin="$(tool_bin "$_tool" "$_ver")"
     [ -x "$_bin" ] || die "$_tool $_ver: not installed (run: grubstake ensure)"
+
+    # Re-hash what is on disk. A tampered binary that prints the right version is otherwise
+    # indistinguishable from the real one, and the cache is shared across repos.
+    _stamp="$(tool_stamp "$_tool" "$_ver")"
+    [ -f "$_stamp" ] || die "$_tool $_ver: no install digest recorded (run: grubstake ensure)"
+    _now="$(sha256_file "$_bin")"
+    [ "$_now" = "$(cat "$_stamp")" ] || die "$_tool $_ver: cached binary does not match its install digest"
+
     _got="$(reported_version "$_bin" "$_tool")"
     [ "$_got" = "$_ver" ] || die "$_tool: binary reports ${_got:-nothing}, pinned $_ver"
 }
@@ -238,15 +279,24 @@ add_one() {
     done
 
     _pins="$(pins_file)"
+    _lock="$_pins.lock"
+    _pt="$_pins.$$.tmp"
+    # mkdir is the portable atomic lock. Two agents adding pins otherwise write from stale reads.
+    _waited=0
+    while ! mkdir "$_lock" 2>/dev/null; do
+        _waited=$((_waited + 1))
+        [ "$_waited" -gt 50 ] && die "grubstake.tools is locked by another run ($_lock)"
+        sleep 0.1 2>/dev/null || sleep 1
+    done
     # shellcheck disable=SC2064
-    trap "rm -rf '$_tmp' '$_pins.tmp'" EXIT HUP INT TERM
+    trap "rm -rf '$_tmp' '$_pt' '$_lock'" EXIT HUP INT TERM
     [ -f "$_pins" ] || printf '# grubstake pins: name version sha256-darwin sha256-linux\n' > "$_pins"
-    _new="$(grep -v -E "^$_tool[[:space:]]" "$_pins" 2>/dev/null || true)"
-    printf '%s\n' "$_new" | grep -v '^$' > "$_pins.tmp" || true
+    grep -v -E "^$_tool[[:space:]]" "$_pins" 2>/dev/null | grep -v '^$' > "$_pt" || true
     # shellcheck disable=SC2086
-    printf '%s %s%s\n' "$_tool" "$_ver" "$_shas" >> "$_pins.tmp"
-    sort -o "$_pins.tmp" "$_pins.tmp"
-    mv "$_pins.tmp" "$_pins"
+    printf '%s %s%s\n' "$_tool" "$_ver" "$_shas" >> "$_pt"
+    LC_ALL=C sort -o "$_pt" "$_pt"
+    mv "$_pt" "$_pins"
+    rmdir "$_lock" 2>/dev/null || true
 
     rm -rf "$_tmp"
     trap - EXIT HUP INT TERM
@@ -263,6 +313,7 @@ cmd_add() {
 }
 
 cmd_ensure() {
+    validate_pins
     _any=0
     for _tool in $(pinned_tools); do
         _any=1
@@ -273,6 +324,7 @@ cmd_ensure() {
 }
 
 cmd_check() {
+    validate_pins
     for _tool in $(pinned_tools); do
         verify_tool "$_tool" "$(pin_version "$_tool")"
     done
@@ -281,8 +333,11 @@ cmd_check() {
 
 cmd_path() {
     [ $# -ge 1 ] || die "usage: grubstake path <tool>"
+    validate_pins
     known_tools | grep -qw "$1" || die "unknown tool: $1"
     _ver="$(pin_version "$1")" || die "$1 is not pinned"
+    _url="$(tool_url "$1" "$_ver" "$(platform)")"
+    [ -n "$_url" ] || die "$1 is not published for $(platform)"
     _bin="$(tool_bin "$1" "$_ver")"
     [ -x "$_bin" ] || install_tool "$1" "$_ver" >&2
     verify_tool "$1" "$_ver"
@@ -290,6 +345,7 @@ cmd_path() {
 }
 
 cmd_doctor() {
+    validate_pins
     _root="$(repo_root)"
     printf 'grubstake  %s\n' "$GRUBSTAKE_VERSION"
     printf 'repo       %s\n' "$_root"
@@ -313,6 +369,11 @@ cmd_doctor() {
 
 cmd_install() {
     _root="$(repo_root)"
+    # Check before writing anything: refusing after creating files is a half-adopted repo.
+    _existing="$(git -C "$_root" config core.hooksPath || true)"
+    if [ -n "$_existing" ] && [ "$_existing" != ".githooks" ]; then
+        die "core.hooksPath is already '$_existing'; move those hooks into .githooks first"
+    fi
     mkdir -p "$_root/.githooks"
 
     for _hook in pre-commit post-commit; do
@@ -328,10 +389,6 @@ cmd_install() {
         log "$_hook: installed"
     done
 
-    _existing="$(git -C "$_root" config core.hooksPath || true)"
-    if [ -n "$_existing" ] && [ "$_existing" != ".githooks" ]; then
-        die "core.hooksPath is already '$_existing'; move those hooks into .githooks first"
-    fi
     git -C "$_root" config core.hooksPath .githooks
     log "hooksPath: .githooks"
 

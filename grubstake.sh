@@ -6,7 +6,7 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="0.3.0"
+GRUBSTAKE_VERSION="0.3.1"
 GRUBSTAKE_MIN_VERSION="0.3.0"   # every earlier release has a known blocking defect
 GRUBSTAKE_REPO="https://github.com/seriouslysean/grubstake"
 GRUBSTAKE_RAW="https://raw.githubusercontent.com/seriouslysean/grubstake"
@@ -24,7 +24,7 @@ grubstake: pinned, verified build tooling for iOS repos.
   grubstake install            adopt this repo: write config, wire hooks, install tools
   grubstake update [<tag>]     fetch a newer grubstake, replace this script, leave the diff
   grubstake ensure             install and verify every pinned tool
-  grubstake check              re-verify installed tools against their pins
+  grubstake check              confirm every pinned tool is installed for this platform
   grubstake add <tool>@<ver>   pin a tool: download, hash, record it
   grubstake path <tool>        absolute path to a pinned tool
   grubstake doctor             report install health
@@ -184,7 +184,8 @@ with_lock() {
         [ "$_w" -gt 50 ] && die "cache entry locked by another run: $_lk (stale? rmdir it)"
         sleep 0.1 2>/dev/null || sleep 1
     done
-    "$@"; _rc=$?
+    # `cmd; rc=$?` does not survive set -e: the shell exits at cmd and never reaches the rmdir.
+    if "$@"; then _rc=0; else _rc=$?; fi
     rmdir "$_lk" 2>/dev/null || true
     return $_rc
 }
@@ -192,8 +193,16 @@ with_lock() {
 # A published entry is never unlinked: another repo may be executing from it. The loser of a race
 # discards its own staging, and both copies are identical by construction.
 # The lock exists because `mv dir existing-dir` nests rather than fails, and macOS mv has no -T.
+# Read-only comes after publishing, never before: unlinking needs write permission on the
+# containing directory, so hardening the staging first is what stops the loser cleaning up.
 publish_dir() {
-    if [ -e "$2" ]; then rm -rf "$1"; else mv "$1" "$2"; fi
+    if [ -e "$2" ]; then
+        chmod -R u+w "$1" 2>/dev/null || true
+        rm -rf "$1"
+    else
+        mv "$1" "$2"
+        chmod -R a-w "$2" 2>/dev/null || true
+    fi
 }
 
 # The pinned hash, checked here against the bytes that arrived, is the trust root. Everything
@@ -254,7 +263,6 @@ install_tool() {
     _reported="$(reported_version "$_staging/$_tool" "$_tool")"
     [ "$_reported" = "$_ver" ] || die "$_tool: archive contains ${_reported:-nothing}, pinned $_ver"
 
-    chmod -R a-w "$_staging" 2>/dev/null || true
     mkdir -p "$(dirname "$_dest")"
     with_lock "$_dest.lock" publish_dir "$_staging" "$_dest"
 
@@ -392,6 +400,20 @@ cmd_doctor() {
     done
 }
 
+# An older release fetched this script and handed off with: __replace-self <installed> <version>.
+# It is already running from the temp copy, so finish the job the way that release expected.
+cmd_legacy_replace() {
+    _installed="$1"
+    _version="${2:-$GRUBSTAKE_VERSION}"
+    _staged="$(mktemp "$(dirname "$_installed")/.grubstake.XXXXXX")" || die "cannot stage beside $_installed"
+    cp "$0" "$_staged"
+    chmod +x "$_staged"
+    mv -f "$_staged" "$_installed"
+    log "updated to $_version"
+    "$_installed" ensure || die "updated to $_version, but ensure failed. Run it again before committing."
+    log "review the diff, then commit"
+}
+
 cmd_install() {
     _root="$(repo_root)"
     # Check before writing anything: refusing after creating files is a half-adopted repo.
@@ -505,6 +527,10 @@ main() {
     shift
 
     case "$_cmd" in
+        # Compatibility only: releases before 0.3.0 end their update by exec'ing the fetched
+        # script with this verb. Removing it stranded every existing adopter, because it is a
+        # protocol only OLD clients speak and so is the one thing that cannot be fixed forward.
+        __replace-self) cmd_legacy_replace "$@" ;;
         install)        cmd_install "$@" ;;
         update)         cmd_update "$@" ;;
         ensure)         cmd_ensure "$@" ;;

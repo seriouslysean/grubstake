@@ -318,6 +318,44 @@ sed -i.bak 's/^GRUBSTAKE_VERSION=.*/GRUBSTAKE_VERSION="0.0.1"/' "$r/target.sh" &
 _v=$( "$r/target.sh" version 2>/dev/null )
 [ "$_v" = "$(gs "$(new_repo)" version)" ] && pass || fail "the shim did not replace the target (got '$_v')"
 
+it "the legacy handoff verb replaces the script and stops, without running the replacement"
+# cmd_legacy_replace copies the running script onto the target and, in the code this test exists
+# to catch, immediately execs "$_installed" ensure -- the same defect just fixed in cmd_update
+# above, running bytes before anyone has reviewed the diff. The replacement is a copy of $0 rather
+# than a fetch, so the marker has to live in the invoking script itself, gated on an "ensure"
+# argument: cmd_legacy_replace is called directly with (target, version), the way extract_fns'
+# callers do below, so that argument is never present on the first run -- only the auto-ensure
+# this test is watching for would supply it. log/die/cmd_legacy_replace come from $GS via sed, the
+# same technique extract_fns uses, so the real function body runs rather than a reimplementation.
+r=$(new_repo)
+_fn="$(sed -n '/^cmd_legacy_replace() {/,/^}/p' "$GS")"
+printf '%s\n' "$_fn" | grep -q '^cmd_legacy_replace() {$' \
+    || fixture_die "extract cmd_legacy_replace: no line-anchored '{' in $GS (reformatted?)"
+_closes="$(printf '%s\n' "$_fn" | grep -c '^}$' | tr -d ' ')"
+[ "$_closes" = 1 ] || fixture_die "extract cmd_legacy_replace: $_closes closing braces, expected 1 (truncated)"
+_helpers="$(grep -E '^(log|die)\(\)' "$GS")"
+[ -n "$_helpers" ] || fixture_die "extract log/die: neither found in $GS"
+{
+    printf '#!/bin/sh\nset -eu\n'
+    printf '[ "${1:-}" = ensure ] && { [ -n "${GST_TEST_MARKER:-}" ] && touch "$GST_TEST_MARKER"; exit 0; }\n'
+    printf '%s\n' "$_helpers"
+    printf '%s\n' "$_fn"
+    printf 'cmd_legacy_replace "$@"\n'
+} > "$r/t.sh"
+chmod +x "$r/t.sh"
+_marker="$r/EXECUTED"
+_out=$( cd "$r" && GST_TEST_MARKER="$_marker" "$r/t.sh" "$r/target.sh" 9.9.9 2>&1 ); _rc=$?
+# cmp, not the marker alone: a fixture that dies before ever reaching cmd_legacy_replace (a bad
+# extraction, a broken mktemp) also leaves no marker, and that must read as a harness failure, not
+# as proof the auto-ensure is gone.
+if ! cmp -s "$r/t.sh" "$r/target.sh" 2>/dev/null; then
+    fail "the shim did not replace the target, so cmd_legacy_replace never ran (rc $_rc): $_out"
+elif [ -f "$_marker" ]; then
+    fail "the replaced script executed before any diff existed to review: $_out"
+else
+    pass
+fi
+
 it "a target that is not a release version is rejected"
 r=$(new_repo); expect_fail "$r" update ../main
 
@@ -343,7 +381,9 @@ it "the previous release can update to this one"
 # this report a failure when the real cause was "nothing to compare against". A test that cannot
 # tell "I could not run" from "the thing is broken" gets ignored the first time it goes red.
 if [ "$NETWORK" = 1 ]; then
-    _repo="$(sed -n 's/^GRUBSTAKE_REPO="\(.*\)"/\1/p' "$GS")"
+    # The named default is the source of truth; a plain literal assignment is the fallback shape.
+    _repo="$(sed -n 's/^GRUBSTAKE_REPO_DEFAULT="\(.*\)"$/\1/p' "$GS")"
+    [ -n "$_repo" ] || _repo="$(sed -n 's/^GRUBSTAKE_REPO="\(.*\)"$/\1/p' "$GS")"
     _prev=$(git ls-remote --tags --refs "$_repo" 'v*' 2>/dev/null \
         | awk '{print $2}' | sed 's|refs/tags/v||' \
         | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
@@ -421,6 +461,93 @@ it "release versions sort newest first"
 top=$(printf '0.2.0\n0.10.0\n0.9.9\n' | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
 [ "$top" = "0.10.0" ] && pass || fail "sorted to $top, expected 0.10.0"
 
+# A local stand-in for GRUBSTAKE_REPO/GRUBSTAKE_RAW: a bare repo carrying one annotated release tag,
+# plus a raw-fetch tree laid out the same way raw.githubusercontent.com is (v<version>/grubstake.sh).
+# gpgsign is disabled for both the commit and the tag, for the same reason new_hook_repo disables it
+# for commits: a globally configured signing key would block the tag too, and a fixture that cannot
+# be built is not a test result.
+new_update_fixture() {
+    _uf="$(mktemp -d "$ROOT/update-fixture.XXXXXX")" || fixture_die "cannot create an update fixture dir"
+    git init -q --bare "$_uf/repo.git" || fixture_die "cannot init the fixture release repo"
+    _uw="$(mktemp -d "$ROOT/update-fixture-work.XXXXXX")" || fixture_die "cannot create a work dir for the fixture release"
+    ( cd "$_uw" \
+      && git init -q . \
+      && git config user.email test@example.invalid \
+      && git config user.name "grubstake suite" \
+      && git config commit.gpgsign false \
+      && git config tag.gpgSign false \
+      && printf 'fixture release\n' > README.md \
+      && git add README.md \
+      && git commit -q -m release \
+      && git tag -a v9.9.9 -m "fixture release 9.9.9" \
+      && git push -q "$_uf/repo.git" HEAD:refs/heads/main --tags ) \
+        || fixture_die "cannot seed the fixture release repo in $_uf"
+    mkdir -p "$_uf/raw/v9.9.9" || fixture_die "cannot create the fixture raw tree in $_uf"
+    # Declares the version fetch_release's grep demands, and marks its own execution unconditionally
+    # -- on any argument, including "ensure", the argument an auto-run handoff would supply -- so
+    # the test can tell replaced-but-not-run apart from replaced-and-run.
+    printf '#!/bin/sh\nGRUBSTAKE_VERSION="9.9.9"\n[ -n "${GST_TEST_MARKER:-}" ] && touch "$GST_TEST_MARKER"\nexit 0\n' \
+        > "$_uf/raw/v9.9.9/grubstake.sh" || fixture_die "cannot write the fixture release script"
+    echo "$_uf"
+}
+
+it "update replaces the script and stops, without running the fetched code"
+# GRUBSTAKE_REPO and GRUBSTAKE_RAW are env-overridable so update can be pointed at a local
+# fixture instead of the real grubstake repo.
+#
+# curl and git are shimmed to allow only file:// targets and to fail everything else outright,
+# rather than trusting this sandbox's real reachability. That keeps the test offline and fast
+# whether or not the override lands: unfixed, the hardcoded https:// targets get refused by the
+# shim instead of making a live call (or hanging, on a sandbox with no egress at all) before
+# release_tags gives up and update dies -- never reaching the fixture, let alone running it.
+_realcurl="$(command -v curl)" || fixture_die "no curl on PATH"
+_realgit="$(command -v git)" || fixture_die "no git on PATH"
+_shims="$(mktemp -d "$ROOT/update-shims.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shims"
+cat > "$_shims/curl" <<SHIM
+#!/bin/sh
+for a in "\$@"; do
+    case "\$a" in
+        file://*) exec "$_realcurl" "\$@" ;;
+    esac
+done
+echo "curl: network blocked in test" >&2
+exit 6
+SHIM
+cat > "$_shims/git" <<SHIM
+#!/bin/sh
+if [ "\${1:-}" = "ls-remote" ]; then
+    _ok=1
+    for a in "\$@"; do
+        case "\$a" in file://*) _ok=0 ;; esac
+    done
+    if [ "\$_ok" = 1 ]; then
+        echo "git: network blocked in test" >&2
+        exit 128
+    fi
+fi
+exec "$_realgit" "\$@"
+SHIM
+chmod +x "$_shims/curl" "$_shims/git"
+
+f=$(new_update_fixture)
+r=$(new_repo)
+_marker="$r/EXECUTED"
+_out=$( cd "$r" && PATH="$_shims:$PATH" \
+    GRUBSTAKE_CACHE="$r/.cache" GST_TEST_MARKER="$_marker" \
+    GRUBSTAKE_REPO="file://$f/repo.git" GRUBSTAKE_RAW="file://$f/raw" \
+    ./grubstake.sh update 2>&1 )
+
+if ! grep -q '^GRUBSTAKE_VERSION="9.9.9"' "$r/grubstake.sh" 2>/dev/null; then
+    fail "update did not replace the script with the fetched release: $_out"
+elif [ -f "$_marker" ]; then
+    fail "the fetched script executed before any diff existed to review: $_out"
+else
+    case "$_out" in
+        *ensure*) pass ;;
+        *) fail "did not tell the user to run ensure: $_out" ;;
+    esac
+fi
+
 # ---------------------------------------------------------------------------- install
 
 printf '\ninstall\n'
@@ -429,6 +556,54 @@ it "install refuses a foreign hooksPath without writing anything first"
 r=$(new_repo); ( cd "$r" && git config core.hooksPath .other-hooks )
 gs_rc "$r" install
 if [ -d "$r/.githooks" ]; then fail "left .githooks behind after refusing"; else pass; fi
+
+# The gst-embedded-hook-begin/end: <name> marker lines are the extraction interface this test and
+# grubstake.sh's own install share, so renaming or reformatting either side breaks both silently.
+# grubstake.sh must strip both marker lines when it writes the installed hook: if they reach
+# .githooks/pre-commit, the installed file no longer matches hooks/pre-commit byte for byte, and
+# the drift test below would then flag every clean install as drifted forever.
+extract_embedded_hook() {
+    sed -n "/^# gst-embedded-hook-begin: $1\$/,/^# gst-embedded-hook-end: $1\$/p" "$GS" | sed '1d;$d'
+}
+
+it "the embedded copy of each hook in grubstake.sh cannot drift from hooks/"
+# hooks/ is the reviewable source; grubstake.sh must ship its own verbatim copy so install needs no
+# network. Two copies of the same ~105 lines is exactly how they silently diverge, which is what
+# this test would catch. Unlike extract_fns below, an empty extraction here is not a harness
+# fault: a hook missing from grubstake.sh must fail this test, not abort the run, since a missing
+# embedded copy is exactly the drift this test exists to catch.
+#
+# cmp, not a $(...) string compare: command substitution strips trailing newlines from both sides,
+# which would let an embedded copy missing (or carrying an extra) trailing newline compare equal
+# and pass a test named for byte identity.
+_bad=""
+for _hook in pre-commit post-commit; do
+    _got="$(mktemp "$ROOT/embedded.XXXXXX")" || fixture_die "cannot create a scratch file for $_hook extraction"
+    extract_embedded_hook "$_hook" > "$_got"
+    cmp -s "$_got" "$HOOKS/$_hook" || _bad="$_bad $_hook"
+done
+[ -z "$_bad" ] && pass || fail "embedded copy differs from (or is missing for) hooks/:$_bad"
+
+it "install adopts a repo with no network access"
+# Shadowing curl, rather than trusting this sandbox's real reachability (which has open egress to
+# GitHub -- v0.3.2/hooks/pre-commit already resolves there), is what makes this test fail today for
+# the right reason instead of passing by accident. A curl that always fails forces install down
+# exactly the path a genuinely offline developer takes.
+r=$(new_repo)
+_shims="$(mktemp -d "$ROOT/no-net.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+_hp=$( cd "$r" && git config core.hooksPath 2>/dev/null )
+if [ "$_rc" -ne 0 ]; then
+    fail "install failed with no network (rc $_rc): $_out"
+elif [ ! -x "$r/.githooks/pre-commit" ] || [ ! -x "$r/.githooks/post-commit" ]; then
+    fail "a hook is missing or not executable after an offline install: $_out"
+elif [ "$_hp" != ".githooks" ]; then
+    fail "core.hooksPath was not set to .githooks (got '$_hp'): $_out"
+else
+    pass
+fi
 
 # ---------------------------------------------------------------------------- hooks
 #
@@ -664,6 +839,32 @@ else
         *"[grubstake]"*) fail "spoke with no cached answer: $_out" ;;
         *) pass ;;
     esac
+fi
+
+it "doctor reports a hook that has drifted from grubstake's copy"
+# ADOPTING says install writes hooks once and leaves them alone, so a fix landing in hooks/ (like
+# #29) never reaches an already-adopted repo through update. doctor is the only place left that can
+# surface the gap. new_hook_repo is used here rather than `grubstake.sh install`: unshimmed,
+# install reaches the real network in this sandbox, and shimmed (as in the offline-install test
+# above) it dies before writing anything -- neither seeds a hook to corrupt. Copying hooks/ by hand,
+# the way new_hook_repo already does for the rest of this section, is the offline equivalent.
+#
+# Compares clean output against drifted output rather than grepping the drifted output alone for
+# "pre-commit": doctor prints a status line per hook, so a healthy repo's own "pre-commit  ok" line
+# would satisfy a bare substring match and pass whether or not drift detection actually works.
+# Diffing against a known-clean baseline is what makes this specific to the corruption.
+r=$(new_hook_repo)
+_clean=$(gs "$r" doctor)
+printf '# corrupted for test\n' >> "$r/.githooks/pre-commit"
+_drift=$(gs "$r" doctor)
+if [ "$_clean" = "$_drift" ]; then
+    fail "doctor's output did not change at all once pre-commit was corrupted: $_drift"
+elif ! printf '%s\n' "$_drift" | grep -q "pre-commit"; then
+    fail "doctor's output changed, but never named pre-commit: $_drift"
+elif [ "$(printf '%s\n' "$_clean" | grep post-commit)" != "$(printf '%s\n' "$_drift" | grep post-commit)" ]; then
+    fail "corrupting pre-commit also changed what doctor said about post-commit: $_drift"
+else
+    pass
 fi
 
 # ---------------------------------------------------------------------------- add

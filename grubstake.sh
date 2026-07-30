@@ -6,7 +6,7 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="0.1.0"
+GRUBSTAKE_VERSION="0.1.1"
 GRUBSTAKE_REPO="https://github.com/seriouslysean/grubstake"
 GRUBSTAKE_RAW="https://raw.githubusercontent.com/seriouslysean/grubstake"
 
@@ -38,7 +38,8 @@ USAGE
 platform() {
     case "$(uname -s)" in
         Darwin) echo darwin ;;
-        Linux)  echo linux ;;
+        Linux)  [ "$(uname -m)" = x86_64 ] || die "unsupported arch: $(uname -m)"
+                echo linux ;;
         *)      die "unsupported platform: $(uname -s)" ;;
     esac
 }
@@ -104,7 +105,6 @@ tool_version_args() {
 known_tools() { echo "swiftlint swiftformat xcbeautify periphery"; }
 
 # ---------------------------------------------------------------------------- pins
-#
 # Not JSON: greppable, diffable, no parser needed.
 # Columns: name version sha256-darwin sha256-linux ("-" when absent).
 
@@ -185,12 +185,14 @@ install_tool() {
     cp -R "$(dirname "$_found")"/. "$_staging"/
     [ "$_member" = "$_tool" ] || mv "$_staging/$_member" "$_staging/$_tool"
     chmod +x "$_staging/$_tool"
-    rm -rf "$_dest"
     mkdir -p "$(dirname "$_dest")"
-    mv "$_staging" "$_dest"
+    # Losing a race is fine; clobbering a live install is not.
+    mv "$_staging" "$_dest" 2>/dev/null || rm -rf "$_staging"
 
     rm -rf "$_tmp"
     trap - EXIT HUP INT TERM
+    # set -e is suppressed when this runs from a || branch, so assert instead of assuming.
+    [ -x "$_bin" ] || die "$_tool $_ver: install incomplete"
     log "$_tool $_ver: installed"
 }
 
@@ -201,7 +203,9 @@ reported_version() {
 verify_tool() {
     _tool="$1"
     _ver="$2"
-    [ -n "$(tool_url "$_tool" "$_ver" "$(platform)")" ] || return 0
+    # Assign, do not test: a die inside $( ) kills only the subshell and check would pass.
+    _url="$(tool_url "$_tool" "$_ver" "$(platform)")"
+    [ -n "$_url" ] || return 0
     _bin="$(tool_bin "$_tool" "$_ver")"
     [ -x "$_bin" ] || die "$_tool $_ver: not installed (run: grubstake ensure)"
     _got="$(reported_version "$_bin" "$_tool")"
@@ -235,6 +239,8 @@ cmd_add() {
     done
 
     _pins="$(pins_file)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$_tmp' '$_pins.tmp'" EXIT HUP INT TERM
     [ -f "$_pins" ] || printf '# grubstake pins: name version sha256-darwin sha256-linux\n' > "$_pins"
     _new="$(grep -v -E "^$_tool[[:space:]]" "$_pins" 2>/dev/null || true)"
     printf '%s\n' "$_new" | grep -v '^$' > "$_pins.tmp" || true
@@ -268,9 +274,11 @@ cmd_check() {
 
 cmd_path() {
     [ $# -ge 1 ] || die "usage: grubstake path <tool>"
+    known_tools | grep -qw "$1" || die "unknown tool: $1"
     _ver="$(pin_version "$1")" || die "$1 is not pinned"
     _bin="$(tool_bin "$1" "$_ver")"
     [ -x "$_bin" ] || install_tool "$1" "$_ver" >&2
+    verify_tool "$1" "$_ver"
     echo "$_bin"
 }
 
@@ -284,7 +292,9 @@ cmd_doctor() {
     printf 'pins       %s\n' "$(pins_file)"
     for _tool in $(pinned_tools); do
         _ver="$(pin_version "$_tool")"
-        if [ -z "$(tool_url "$_tool" "$_ver" "$(platform)")" ]; then
+        # Assign, do not test: a die inside $( ) would only kill the subshell.
+        _url="$(tool_url "$_tool" "$_ver" "$(platform)")"
+        if [ -z "$_url" ]; then
             printf '  %-12s %-10s n/a on %s\n' "$_tool" "$_ver" "$(platform)"
         elif [ -x "$(tool_bin "$_tool" "$_ver")" ]; then
             printf '  %-12s %-10s installed\n' "$_tool" "$_ver"
@@ -305,13 +315,16 @@ cmd_install() {
             continue
         fi
         curl -fsSL "$GRUBSTAKE_RAW/v$GRUBSTAKE_VERSION/hooks/$_hook" -o "$_dest.tmp" \
-            || curl -fsSL "$GRUBSTAKE_RAW/main/hooks/$_hook" -o "$_dest.tmp" \
-            || die "cannot fetch $_hook"
+            || { rm -f "$_dest.tmp"; die "cannot fetch $_hook for v$GRUBSTAKE_VERSION"; }
         chmod +x "$_dest.tmp"
         mv "$_dest.tmp" "$_dest"
         log "$_hook: installed"
     done
 
+    _existing="$(git -C "$_root" config core.hooksPath || true)"
+    if [ -n "$_existing" ] && [ "$_existing" != ".githooks" ]; then
+        die "core.hooksPath is already '$_existing'; move those hooks into .githooks first"
+    fi
     git -C "$_root" config core.hooksPath .githooks
     log "hooksPath: .githooks"
 
@@ -328,7 +341,8 @@ cmd_install() {
 latest_tag() {
     git ls-remote --tags --refs "$GRUBSTAKE_REPO" 'v*' 2>/dev/null \
         | awk '{print $2}' | sed 's|refs/tags/v||' \
-        | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+        | LC_ALL=C sort -t. -k1,1n -k2,2n -k3,3n | tail -1
 }
 
 cmd_update() {
@@ -336,6 +350,7 @@ cmd_update() {
     [ -n "$_target" ] || _target="$(latest_tag)"
     [ -n "$_target" ] || die "cannot resolve a release tag from $GRUBSTAKE_REPO"
     _target="${_target#v}"
+    echo "$_target" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || die "not a release version: $_target"
 
     if [ "$_target" = "$GRUBSTAKE_VERSION" ]; then
         log "already on $GRUBSTAKE_VERSION"
@@ -350,7 +365,8 @@ cmd_update() {
     log "fetching $_target"
     curl -fsSL "$GRUBSTAKE_RAW/v$_target/grubstake.sh" -o "$_tmp" || die "cannot fetch v$_target"
     sh -n "$_tmp" || die "downloaded script failed a syntax check, refusing to install it"
-    grep -q '^GRUBSTAKE_VERSION=' "$_tmp" || die "downloaded file does not look like grubstake"
+    # A tag is a mutable ref. Assert the bytes identify as what was asked for.
+    grep -q "^GRUBSTAKE_VERSION=\"$_target\"" "$_tmp" || die "v$_target does not contain version $_target"
     chmod +x "$_tmp"
 
     # The new script does the replacing. Never rewrite the file you are being read from.

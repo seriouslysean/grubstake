@@ -1,0 +1,37 @@
+name: network
+
+# The tier that downloads real artifacts, on release tags, where the bytes a pin names are the
+# thing being proved. It lives in its own workflow rather than behind an `if` in test.yml: a job
+# skipped by a job-level `if` still reports, and its name is posted unexpanded, so every pull
+# request would carry a check called `network (${{ matrix.platform }})` forever.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  network:
+    name: network (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Each platform verifies its own pinned hash, so both are downloaded before a release.
+          - platform: linux
+            runner: ubuntu-latest
+          - platform: macos
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # This tier runs the offline tests too, including the one that needs a dash to parse with.
+      - name: install dash
+        if: runner.os == 'macOS'
+        run: brew install dash
+
+      - name: network suite
+        run: test/run.sh --network

@@ -1,39 +1,71 @@
 # Contributing
 
+## The rule that matters
+
+**A fix ships with a test that fails without it.** Not a test that passes afterwards, which proves
+nothing: a test you have watched fail on the unfixed code and pass on the fixed code.
+
+This exists because three consecutive releases each contained a bug introduced by the previous
+release's fix. Every fix had been verified, once, by hand, in a directory that was then deleted. So
+nothing re-ran the earlier proofs and each fix was free to break an older one silently.
+
+Run the suite before you push, and again before you tag.
+
+```sh
+test/run.sh              # offline, seconds
+test/run.sh --network    # also downloads real artifacts
+```
+
 ## Every change starts as an issue
 
-Open an issue before writing code, even a small one, so the reason for a change survives longer than
-the diff that made it. Then branch from `main` and name the branch after the issue, as in `12-fail-
-closed-on-bad-pins`.
+Open an issue before writing code, even for a one-line fix, so the reason survives longer than the
+diff. Record what the wrong behaviour actually was, ideally as the commands that produce it.
 
-Open a pull request that closes the issue, using `Closes #12` in the description so the link is
-recorded on both sides. Merge with a merge commit rather than a squash, which keeps each commit on
-`main` individually revertable.
+Branch from `main` and name the branch after the issue, as in `14-pins-resolve-from-cwd`. Open a
+pull request that closes it with `Closes #14`. Merge with a merge commit rather than a squash, so
+each commit on `main` stays individually revertable.
 
-## Prove the gate before you trust it
+## Writing the test
 
-A change to a gate is not done until it has been shown to fail on input it should reject. This
-repository exists because a version pin can be silently wrong, and a check that never fires looks
-exactly like one that passes.
+Tests live in `test/run.sh`, grouped by area, and each one is named for the failure it prevents
+rather than the function it calls. `pins resolve from the script, not the working directory` says
+what breaks if it regresses; `test_pins_file` does not.
 
-Put the evidence in the pull request. Show the bad input, the failure, and the exit code.
+Most tests fabricate a cache entry with `fake_install` instead of downloading, so a failure points
+at logic rather than at GitHub being slow. Reach for `--network` tests only when the thing under
+test is the download itself.
+
+Before you write the fix, write the test and watch it fail. A test written afterwards tends to
+assert what the code now does rather than what it should do.
 
 ## Releasing
 
-Bump `GRUBSTAKE_VERSION` in `grubstake.sh`, tag the merge commit as `vX.Y.Z`, and publish a release
-pointing at the issues it closes.
+1. `test/run.sh --network` passes.
+2. Bump `GRUBSTAKE_VERSION` in `grubstake.sh`, and the version in the install snippets in
+   `README.md` and `ADOPTING.md`.
+3. Merge the pull request.
+4. Confirm local `main` matches `origin/main`, and that the commit you are about to tag declares
+   the version you are about to tag it as. A release was once cut from a stale local `main` and
+   published a tag whose script identified as the previous version.
+5. Tag `vX.Y.Z`, push the tag, publish a release naming the issues it closes.
 
 Tags matching `v*` are protected against deletion, update, and force-push, because a version pin is
 only meaningful if the tag it names cannot move. A release cannot be corrected in place, so a
-mistake costs a patch version rather than a retag. That is deliberate.
+mistake costs a patch version. That is deliberate.
 
 `main` is protected the same way, so a rewrite requires disabling the ruleset first.
+
+## When a fix changes behaviour on upgrade
+
+Say so in the release notes, in terms of what the user has to do. Cache verification landed without
+mentioning that existing caches carried no digest, so the first `check` after upgrading refused
+every commit until someone ran `ensure`.
 
 ## Rulesets
 
 The active rulesets are committed under `.github/rulesets/` as importable JSON. GitHub does not read
-that directory, so the files are a record rather than a mechanism, and they exist so the settings
-are reviewable in the repository and can be imported into another one.
+that directory, so those files are a record rather than a mechanism, and they exist so the settings
+are reviewable here and can be imported into another repository.
 
 ## Rules for the code itself
 

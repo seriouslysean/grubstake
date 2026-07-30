@@ -16,7 +16,9 @@ GRUBSTAKE="$ROOT/grubstake.sh"
 "$GRUBSTAKE" check >/dev/null
 
 STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
-if [ -n "$STAGED_SWIFT" ]; then
+# Only lint if the repo pinned swiftlint. A repo that does not use it should not be blocked by
+# the shared spine; its own gates in pre-commit.d decide. One line per tool, so grep is enough.
+if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.tools" 2>/dev/null; then
     SWIFTLINT="$("$GRUBSTAKE" path swiftlint)" || exit 1
     # Verify and refuse rather than format-and-restage: re-adding after a fix folds unrelated
     # hunks into a partial `git add -p` and re-stages a working-tree deletion of a file staged

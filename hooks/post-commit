@@ -25,7 +25,8 @@ if [ $((now - stamp)) -gt "$TTL" ]; then
     (
         latest=$(git ls-remote --tags --refs https://github.com/seriouslysean/grubstake 'v*' 2>/dev/null \
             | awk '{print $2}' | sed 's|refs/tags/v||' \
-            | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
         [ -n "$latest" ] && printf '%s\n%s\n' "$now" "$latest" > "$CACHE"
     ) >/dev/null 2>&1 &
 fi
@@ -35,7 +36,7 @@ LATEST=$(sed -n 2p "$CACHE" 2>/dev/null) || exit 0
 [ "$LATEST" = "$CURRENT" ] && exit 0
 
 # Only speak when the cached latest is genuinely newer than what is installed.
-newest=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+newest=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
 [ "$newest" = "$LATEST" ] || exit 0
 
 echo "[grubstake] $LATEST available (pinned $CURRENT) -- run: ./grubstake.sh update"

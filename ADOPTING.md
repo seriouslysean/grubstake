@@ -40,28 +40,43 @@ disagree, stop and report it rather than adjusting a pin to make the check pass.
 Commit `grubstake.sh` and `grubstake.tools`. Nothing else changes in this phase, so the old
 mechanism keeps working and the repo now has a second opinion about the same versions.
 
-## Phase 2: resolve through grubstake
+## Phase 2: resolve through grubstake, without removing what works
 
-Change whatever invokes the tools so it asks grubstake for the path.
+Add grubstake as the **first** branch of whatever resolver the repo already has. Do not replace the
+chain yet. CI is still installing tools the old way at this point, and a repo whose lint script
+resolves from a directory CI populates will go red the moment that branch disappears.
 
 ```sh
-SWIFTLINT="$(./grubstake.sh path swiftlint)" || exit 1
-"$SWIFTLINT" lint --strict "$@"
+if _gs=$(./grubstake.sh path swiftlint 2>/dev/null); then
+    echo "$_gs"
+elif [ -x "./tools/swiftlint" ]; then
+    echo "./tools/swiftlint"
+elif command -v swiftlint >/dev/null 2>&1; then
+    command -v swiftlint
+fi
 ```
 
 Resolve from the repository root, before anything changes directory. That is the failure this
 exists to prevent: a tool manager that reads its manifest relative to the working directory drops
-the pin when a script moves.
+the pin when a script moves, and installs whatever is newest without saying so.
 
-`path` verifies the binary before printing it, so a tampered cache fails here rather than later.
+`path` verifies the binary before printing it, so a tampered cache fails here rather than later. It
+also installs the tool if it is missing, which is what lets this phase work before CI knows about
+grubstake. That means a call to `path` can reach the network. The shipped pre-commit hook runs
+`check` first, which fails with an instruction to run `ensure` rather than downloading mid-commit,
+so keep that ordering in any hook of your own.
 
-Run the repo's own lint and validation entry points and confirm the results are unchanged.
+Run the repo's lint and validation entry points and confirm the results are unchanged. Every commit
+from here to the end of phase 3 should be pushable and green.
 
 ## Phase 3: cut over in one commit
 
-Delete the old mechanism and its manifest in a single commit, together with any hand-copied hashes
-in CI. Two version sources live at once is the drift this replaces, so do not leave the old manifest
-in place "for now".
+Now delete the old mechanism: its manifest, every invocation of it, the remaining branches of the
+resolver chain, and any hand-copied hashes in CI. Two version sources live at once is the drift this
+replaces, so do not leave the old manifest in place "for now".
+
+Search without extension filters. Hook files have no extension, so `--include='*.sh'` will miss
+them, and a stale reference in a hook is one nobody notices.
 
 In CI, replace whatever downloads the tools with:
 
@@ -70,12 +85,19 @@ In CI, replace whatever downloads the tools with:
 ```
 
 Cache the tool directory keyed on `grubstake.tools`, since that file is the version source and a
-change to it should invalidate the cache. On Linux the cache lives under `$XDG_CACHE_HOME`, and on
-macOS under `~/Library/Caches/grubstake`. Set `GRUBSTAKE_CACHE` to place it somewhere else.
+change to it should invalidate the cache. `ensure` re-verifies on a cache hit, so a poisoned cache
+fails at install rather than during lint, and the conditional "only install on cache miss" step can
+go.
 
-Prove the gate still fails. Introduce a violation the linter must catch, confirm the failure, and
-remove it. A gate that never fires looks exactly like one that passes, so a migration is not
-finished until the new path has been shown to reject something.
+If you add `ensure` to an existing bootstrap script, put it after anything that does not need the
+network. Under `set -e` a failed download aborts every later step, and a fresh clone can end up
+half-configured in a way the repo's own validation then reports as drift.
+
+**Prove the gate still fails, per tool.** Inject a violation, confirm the failure, revert. Do it
+once for each tool, not once overall: a whitespace violation may be owned by the formatter and
+ignored by the linter, which proves nothing about the linter while looking like proof. Pick a rule
+you have confirmed that repo's config actually enforces. Line length is a good default, since it is
+almost always on and trivially injected.
 
 ## Phase 4: hooks, only if the repo wants them
 

@@ -1,0 +1,53 @@
+name: Report wrong behaviour
+description: Something grubstake did that it should not have done.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This issue will be published, and no hook can gate it.** `test/no-leaks.sh` refuses
+        tracked files that identify a consumer. It cannot read an issue body, so this form is the
+        only gate there is.
+
+        Nothing you write here may name a consuming repository, a person, a machine, a scheme, a
+        target, or an issue number from somewhere else. Redact paths before pasting output:
+        grubstake prints the cache under your home directory.
+
+        Describe the failure, not the reporter. An adoption report is "an existing four-tool repo",
+        not its name.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `./grubstake.sh version`. Updates are manual, so two repos can sit on different versions.
+    validations:
+      required: true
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: What the wrong behaviour was
+      description: What actually happened, not what you think caused it.
+    validations:
+      required: true
+  - type: textarea
+    id: commands
+    attributes:
+      label: The commands that produce it
+      description: >
+        The exact sequence from a clean state, with the output it printed. A failure someone else
+        can reproduce is a failure that can be turned into a test, and every fix here ships with
+        one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Before filing
+      options:
+        - label: I have read this body back. It names no other repository, no person, and no machine.
+          required: true

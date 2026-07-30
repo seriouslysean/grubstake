@@ -1,7 +1,7 @@
 #!/bin/sh
 # grubstake pre-commit spine. Verifies pinned tools, lints staged Swift, then runs repo-local
-# gates. Repo-specific checks belong in .githooks/pre-commit.d/, not in this file: this file is
-# replaced wholesale by `grubstake update`.
+# gates. Repo-specific checks belong in .githooks/pre-commit.d/, not in this file, which is
+# overwritten whenever the hooks are reinstalled.
 
 set -eu
 
@@ -13,9 +13,11 @@ GRUBSTAKE="$ROOT/grubstake.sh"
     exit 1
 }
 
-"$GRUBSTAKE" check >/dev/null
-
+# Only verify tools when something this spine gates is staged. A cold cache should not refuse a
+# docs-only commit, and a repo with no pins has nothing to verify.
 STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
+[ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
+
 # Only lint if the repo pinned swiftlint. A repo that does not use it should not be blocked by
 # the shared spine; its own gates in pre-commit.d decide. One line per tool, so grep is enough.
 if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.tools" 2>/dev/null; then

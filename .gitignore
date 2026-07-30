@@ -1,0 +1,4 @@
+# Claude Code session state: local to one machine, never product, never published.
+.claude/worktrees/
+.claude/agent-memory/
+.claude/settings.local.json

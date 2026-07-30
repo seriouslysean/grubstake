@@ -711,6 +711,13 @@ else
     printf '\nadd, network  (skipped: pass --network to run)\n'
 fi
 
+# ---------------------------------------------------------------------------- development gates
+
+printf '\ndevelopment gates\n'
+
+it "the antagonist and receipt hooks block what they must and pass what they may"
+if "$(dirname "$0")/gates.sh" >/dev/null 2>&1; then pass; else fail "$("$(dirname "$0")/gates.sh" 2>&1 | tail -5)"; fi
+
 # ---------------------------------------------------------------------------- publication safety
 
 printf '\npublication safety\n'

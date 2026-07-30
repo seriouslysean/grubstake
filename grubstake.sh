@@ -31,6 +31,7 @@ grubstake: pinned, verified build tooling for iOS repos.
   grubstake add <tool>@<ver>   pin a tool: download, hash, record it
   grubstake path <tool>        absolute path to a pinned tool
   grubstake doctor             report install health
+  grubstake clean              remove the entire cache, read-only entries included
   grubstake version            print the version of this script
 
 Tools: swiftlint, swiftformat, xcbeautify, periphery
@@ -193,15 +194,27 @@ with_lock() {
     return $_rc
 }
 
-# A published entry is never unlinked: another repo may be executing from it. The loser of a race
-# discards its own staging, and both copies are identical by construction.
+# A published entry is never unlinked: another repo may be executing from it. The loser of a real
+# race discards its own staging, and both copies are identical by construction.
+# A destination that exists but lacks the executable is not a winner, only debris from an
+# interrupted publish or a stray mkdir, so it is cleared and the verified staging published instead.
 # The lock exists because `mv dir existing-dir` nests rather than fails, and macOS mv has no -T.
 # Read-only comes after publishing, never before: unlinking needs write permission on the
 # containing directory, so hardening the staging first is what stops the loser cleaning up.
 publish_dir() {
     if [ -e "$2" ]; then
-        chmod -R u+w "$1" 2>/dev/null || true
-        rm -rf "$1"
+        if [ -x "$2/$3" ]; then
+            chmod -R u+w "$1" 2>/dev/null || true
+            rm -rf "$1"
+        else
+            chmod -R u+w "$2" 2>/dev/null || true
+            rm -rf "$2"
+            # rm -rf can no-op on an immutable file, and a die here would exit past with_lock's
+            # rmdir and leak the lock, so both failures warn and return for the caller to fail on.
+            [ ! -e "$2" ] || { warn "$3: cannot clear partial $2 (remove it by hand and retry)"; return 1; }
+            mv "$1" "$2" || { warn "$3: cannot publish into $2"; return 1; }
+            chmod -R a-w "$2" 2>/dev/null || true
+        fi
     else
         mv "$1" "$2"
         chmod -R a-w "$2" 2>/dev/null || true
@@ -267,11 +280,12 @@ install_tool() {
     [ "$_reported" = "$_ver" ] || die "$_tool: archive contains ${_reported:-nothing}, pinned $_ver"
 
     mkdir -p "$(dirname "$_dest")"
-    with_lock "$_dest.lock" publish_dir "$_staging" "$_dest"
+    with_lock "$_dest.lock" publish_dir "$_staging" "$_dest" "$_tool"
 
     rm -rf "$_tmp"
     trap - EXIT HUP INT TERM
-    [ -x "$_bin" ] || die "$_tool $_ver: install incomplete"
+    # Should be unreachable: publish_dir now either lands the binary or dies with a directory to remove.
+    [ -x "$_bin" ] || die "$_tool $_ver: install incomplete (remove $_dest and retry)"
     log "$_tool $_ver: installed"
 }
 
@@ -546,6 +560,30 @@ cmd_doctor() {
     done
 }
 
+# No validate_pins: a malformed grubstake.tools must not block the one command that recovers from
+# a wedged cache. cache_root always resolves to a real path, so only a degenerate or relative one is refused.
+cmd_clean() {
+    _root="$(cache_root)"
+    case "$_root" in
+        /|//|/.|/..) die "refusing to remove cache root: '$_root'" ;;
+        /*)          : ;;
+        *)           die "refusing to remove cache root, not an absolute path: '$_root'" ;;
+    esac
+    # rm -rf on a symlink unlinks the link and leaves its target untouched while still reporting success.
+    [ -L "$_root" ] && die "refusing to remove cache root, it is a symlink: '$_root' -> '$(readlink "$_root")'"
+    [ -e "$_root" ] || return 0
+    log "removing $_root"
+    # No lock: cmd_clean holds none, and a held publish lock or an in-flight staging dir both live
+    # under root. Renaming it aside is atomic, so a concurrent ensure either finds it gone and starts
+    # a fresh tree with mkdir -p, or is already past the rename and lands its publish in the trash,
+    # harmless either way since the cache is a rebuildable download cache, never a source of truth.
+    _trash="$_root.trash.$$"
+    mv "$_root" "$_trash" || die "cannot detach cache root for removal: $_root"
+    # Published entries are read-only; unlinking needs write permission on their containing dirs first.
+    chmod -R u+w "$_trash" 2>/dev/null || true
+    rm -rf "$_trash"
+}
+
 # An older release fetched this script and handed off with: __replace-self <installed> <version>.
 # It is already running from the temp copy, so finish the job the way that release expected.
 cmd_legacy_replace() {
@@ -687,6 +725,7 @@ main() {
         add)            cmd_add "$@" ;;
         path)           cmd_path "$@" ;;
         doctor)         cmd_doctor "$@" ;;
+        clean)          cmd_clean "$@" ;;
         version)        echo "$GRUBSTAKE_VERSION" ;;
         -h|--help|help) usage ;;
         *)              die "unknown command: $_cmd (try: grubstake help)" ;;

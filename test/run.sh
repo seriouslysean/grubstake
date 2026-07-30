@@ -270,8 +270,15 @@ printf '\nupdate\n'
 it "a release below the supported floor is refused"
 r=$(new_repo); expect_fail "$r" update 0.1.4
 
-it "the internal replace verb no longer exists"
-r=$(new_repo); expect_fail "$r" __replace-self /tmp/x 9.9.9
+it "the legacy handoff verb still answers, for clients that only speak it"
+# Removing it stranded every existing adopter: it is a protocol only OLD versions speak, so it is
+# the one thing that cannot be fixed forward. It stays as compatibility, not as a live path.
+r=$(new_repo)
+cp "$GS" "$r/target.sh"
+sed -i.bak 's/^GRUBSTAKE_VERSION=.*/GRUBSTAKE_VERSION="0.0.1"/' "$r/target.sh" && rm -f "$r/target.sh.bak"
+( cd "$r" && ./grubstake.sh __replace-self "$r/target.sh" 9.9.9 ) >/dev/null 2>&1
+_v=$( "$r/target.sh" version 2>/dev/null )
+[ "$_v" = "$(gs "$(new_repo)" version)" ] && pass || fail "the shim did not replace the target (got '$_v')"
 
 it "a target that is not a release version is rejected"
 r=$(new_repo); expect_fail "$r" update ../main
@@ -281,8 +288,63 @@ r=$(new_repo); v=$(gs "$r" version); expect_says "already on $v" "$r" update "$v
 
 it "update renames over the script rather than handing off to a temp copy"
 # The handoff avoided a hazard rename never had, and cost a $0 that lied about which repo it was
-# in. Renaming from within keeps the running interpreter on the old inode.
-if grep -q '__replace-self' "$GS"; then fail "the temp-copy handoff is still present"; else pass; fi
+# in. Renaming from within keeps the running interpreter on the old inode. The verb survives only
+# to answer old clients; nothing in this version's own update path may exec it.
+if sed -n '/^cmd_update() {/,/^}/p' "$GS" | grep -q '__replace-self'; then
+    fail "update still hands off to a temp copy"
+else
+    pass
+fi
+
+it "the previous release can update to this one"
+# The suite asserted the destination and never the journey: it checked that the internal replace
+# verb was gone, while every older client still called it. Removing a verb only old versions speak
+# is the one change that cannot be fixed forward.
+if [ "$NETWORK" = 1 ]; then
+    r=$(new_repo)
+    _prev=$( (cd "$ROOT/.." 2>/dev/null; git -C "$(dirname "$GS")" tag --list 'v*' \
+        | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+        | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | sed -n 2p) )
+    if [ -n "$_prev" ] && curl -fsSL "https://raw.githubusercontent.com/seriouslysean/grubstake/v$_prev/grubstake.sh" -o "$r/grubstake.sh" 2>/dev/null; then
+        chmod +x "$r/grubstake.sh"
+        _now="$(gs "$r" version)"
+        gs_rc "$r" update
+        _after="$(gs "$r" version)"
+        [ "$_after" != "$_now" ] && pass || fail "update from $_now did not move it (still $_after)"
+    else
+        fail "could not fetch the previous release to test the upgrade path"
+    fi
+else
+    pass   # network required
+fi
+
+# Sourcing the script would run main and exit, so pull the functions under test out by name.
+extract_fns() {
+    sed -n '/^with_lock() {/,/^}/p;/^publish_dir() {/,/^}/p' "$GS"
+}
+
+it "a race loser cleans up after itself"
+# Two installs of one cold pin. The loser must discard its own staging, or a shared cache
+# accumulates litter that a normal rm cannot remove.
+r=$(new_repo)
+_d="$r/dest"; _st="$r/dest.staging.111"
+mkdir -p "$_st"; printf 'x' > "$_st/f"; chmod -R a-w "$_st"
+mkdir -p "$_d"
+{ extract_fns; echo 'publish_dir "$1" "$2"'; } > "$r/t.sh"
+( cd "$r" && sh "$r/t.sh" "$_st" "$_d" ) >/dev/null 2>&1
+if [ -e "$_st" ]; then fail "the loser could not remove its own read-only staging"; else pass; fi
+chmod -R u+w "$r" 2>/dev/null
+
+it "a lock is released even when the locked command fails"
+r=$(new_repo)
+{ extract_fns; cat <<'INNER'
+die() { echo "$1" >&2; exit 1; }
+fails() { return 1; }
+with_lock "$1" fails
+INNER
+} > "$r/t.sh"
+( cd "$r" && sh -eu "$r/t.sh" "$r/t.lock" ) >/dev/null 2>&1
+if [ -d "$r/t.lock" ]; then fail "the lock survived a failing command"; else pass; fi
 
 it "release versions sort newest first"
 # A trailing -r is ignored when per-key flags are present, which once made update install the
@@ -340,7 +402,7 @@ if [ "$NETWORK" = 1 ]; then
     it "published entries are read-only"
     r=$(new_repo); gs_rc "$r" add swiftlint@0.63.2
     _sha=$(awk '/^swiftlint/{print $3}' "$r/grubstake.tools")
-    if printf 'x' >> "$r/.cache/swiftlint/$_sha/swiftlint" 2>/dev/null; then
+    if { printf 'x' >> "$r/.cache/swiftlint/$_sha/swiftlint"; } 2>/dev/null; then
         fail "a published binary was writable"
     else
         pass

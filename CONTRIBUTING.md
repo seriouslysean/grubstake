@@ -38,6 +38,23 @@ test is the download itself.
 Before you write the fix, write the test and watch it fail. A test written afterwards tends to
 assert what the code now does rather than what it should do.
 
+## Nothing published may identify a consumer
+
+This repo is public. The repos that use it are not, and the development model is to edit the engine
+from inside one of them, so a comment written in that context can carry a private repo name or an
+issue number into a public commit. Prose is the leak, not code.
+
+`test/no-leaks.sh` runs as part of the suite and refuses absolute home paths, email addresses, and
+cross-repo issue references. It matches shapes rather than names, because a denylist of private
+repo names could not live in a public repo without being the leak it exists to prevent. For names,
+keep one pattern per line in `.leakwords`, which is gitignored.
+
+**Issues and pull requests are published too, and no hook can gate them.** Before filing, read the
+body back and remove anything that is not about this repository: which repo hit the bug, what its
+schemes or targets are called, an issue number from somewhere else, a path from your machine.
+Describe the failure, not the reporter. An adoption report becomes "an existing four-tool repo",
+not its name.
+
 ## Releasing
 
 1. `test/run.sh --network` passes.

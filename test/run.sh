@@ -333,6 +333,13 @@ else
     printf '\nadd, network  (skipped: pass --network to run)\n'
 fi
 
+# ---------------------------------------------------------------------------- publication safety
+
+printf '\npublication safety\n'
+
+it "nothing tracked identifies a consumer, a person, or a machine"
+if "$(dirname "$0")/no-leaks.sh" >/dev/null 2>&1; then pass; else fail "$("$(dirname "$0")/no-leaks.sh" 2>&1 | tail -3)"; fi
+
 # ---------------------------------------------------------------------------- result
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"

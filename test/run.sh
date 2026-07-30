@@ -87,6 +87,52 @@ fake_install() {
     chmod +x "$_d/$_tool"
 }
 
+# fake_install alone cannot reach the #30 wedge: it writes straight to the hash-named directory and
+# never calls install_tool, so publish_dir never runs. This fabricates a swiftlint release that
+# install_tool itself will accept -- a zip, hashed for the pin file, holding a stand-in binary that
+# reports the pinned version -- and a curl shim that serves it for any URL. Prints the sha to pin;
+# the shim lands at "$1/curl-shim/curl", a fixed path so callers need no second return value.
+fake_release() {
+    _repo="$1"; _ver="$2"
+    command -v zip >/dev/null 2>&1 || fixture_die "no zip to build the fixture release"
+    case "$(uname -s)" in
+        Darwin) _member=swiftlint ;;
+        Linux)  _member=swiftlint-static ;;
+        *)      fixture_die "fake_release: no fixture member name for $(uname -s)" ;;
+    esac
+    _src="$_repo/release-src"
+    mkdir -p "$_src" || fixture_die "cannot create $_src"
+    printf '#!/bin/sh\necho %s\n' "$_ver" > "$_src/$_member" || fixture_die "cannot write the fixture release binary"
+    chmod +x "$_src/$_member" || fixture_die "cannot make the fixture release binary executable"
+    _zip="$_repo/release.zip"
+    ( cd "$_src" && zip -q "$_zip" "$_member" ) || fixture_die "cannot zip the fixture release"
+    if command -v shasum >/dev/null 2>&1; then
+        _sha="$(shasum -a 256 "$_zip" | awk '{print $1}')"
+    elif command -v sha256sum >/dev/null 2>&1; then
+        _sha="$(sha256sum "$_zip" | awk '{print $1}')"
+    else
+        fixture_die "no shasum or sha256sum to hash the fixture release"
+    fi
+    # awk exits 0 on empty input, so a shasum/sha256sum failure upstream would otherwise fall
+    # through as an empty _sha and surface as a confusing downstream pin-validation failure instead
+    # of naming the actual fixture fault.
+    [ -n "$_sha" ] || fixture_die "cannot hash fixture zip"
+    _shim="$_repo/curl-shim"
+    mkdir -p "$_shim" || fixture_die "cannot create the fixture curl shim dir"
+    cat > "$_shim/curl" <<SHIM
+#!/bin/sh
+_out=""; _prev=""
+for a in "\$@"; do
+    [ "\$_prev" = "-o" ] && _out="\$a"
+    _prev="\$a"
+done
+[ -n "\$_out" ] || exit 1
+cp "$_zip" "\$_out"
+SHIM
+    chmod +x "$_shim/curl" || fixture_die "cannot make the fixture curl shim executable"
+    echo "$_sha"
+}
+
 # For tests that cannot pin the same hash in both columns because they read a hash `add` wrote
 # for real over the network: a hardcoded column asserts against a path only one platform installs to.
 sha_column() {
@@ -241,17 +287,166 @@ r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"; rm -f "$r/.cache/swiftlint/$SHA_A/swiftlint"
 expect_fail "$r" check
 
+it "a partial cache directory does not wedge ensure"
+# publish_dir treats any existing destination as a finished, concurrent install and discards the
+# freshly downloaded, hash-verified staging instead of publishing into it. An interrupted publish, a
+# stray mkdir, or a cache layout change across versions all leave exactly this: a destination that
+# exists but holds no binary. ensure is documented to repair that, and today it cannot -- it dies
+# "install incomplete" and every retry repeats it. fake_install cannot exercise this: it writes the
+# binary straight to the hash-named directory and never calls install_tool, so publish_dir never
+# runs. fake_release is what makes install_tool's real download-hash-extract-publish path run
+# offline, against a fixture instead of the network.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+mkdir -p "$r/.cache/swiftlint/$_sha"   # the wedge itself: present, but never published into
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "ensure did not repair the partial directory (rc $_rc): $_out"
+elif [ ! -x "$r/.cache/swiftlint/$_sha/swiftlint" ]; then
+    fail "ensure exited 0 but never installed the binary: $_out"
+else
+    _crc=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh check >/dev/null 2>&1; echo $? )
+    [ "$_crc" -eq 0 ] && pass || fail "ensure repaired the binary, but check still fails (rc $_crc)"
+fi
+
 it "ensure makes check pass from any recoverable state"
-# The invariant that replaces the stamp-healing matrix: absent or present, nothing in between.
+# This used to loop over absent/partial and call check alone in each -- never ensure -- which is why
+# it never noticed that the partial state stays broken forever (see "a partial cache directory does
+# not wedge ensure" above). That is what shipped #30: the test named for ensure's recovery contract
+# never invoked ensure. fake_release stands in for the network the same way it does there, since a
+# repair has to actually install to be proven.
 for _case in absent partial; do
-    r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+    r=$(new_repo)
+    _sha=$(fake_release "$r" 0.63.2)
+    pins "$r" "swiftlint 0.63.2 $_sha $_sha"
     case "$_case" in
         absent)  : ;;
-        partial) mkdir -p "$r/.cache/swiftlint/$SHA_A" ;;
+        partial) mkdir -p "$r/.cache/swiftlint/$_sha" ;;
     esac
-    gs_rc "$r" check && { fail "state '$_case' passed check without an install"; _bad=1; break; }
+    _out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        fail "state '$_case': ensure exited $_rc: $_out"; _bad=1; break
+    fi
+    _crc=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh check >/dev/null 2>&1; echo $? )
+    if [ "$_crc" -ne 0 ]; then
+        fail "state '$_case': ensure exited 0 but check still fails afterward"; _bad=1; break
+    fi
 done
 [ "${_bad:-0}" = 0 ] && pass; _bad=0
+
+it "a read-only published entry does not defeat cache removal"
+# Published entries are hardened read-only (chmod -R a-w), so a bare `rm -rf` on the cache root
+# fails partway and leaves a half-removed tree for a human to clean up by hand -- exactly the
+# scenario test/run.sh's own trap already works around. There is no `clean` command yet.
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+chmod -R a-w "$r/.cache/swiftlint/$SHA_A"
+# A no-op chmod (root, or a filesystem that ignores it) would let a naive rm -rf succeed and prove
+# nothing about the hard case, the same trap "published entries are read-only" already guards
+# against for the network add tests.
+{ printf x >> "$r/.cache/swiftlint/$SHA_A/swiftlint"; } 2>/dev/null \
+    && fixture_die "chmod -R a-w did not make $r/.cache/swiftlint/$SHA_A/swiftlint read-only (running as root?)"
+_out=$(gs "$r" clean); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "clean exited $_rc: $_out"
+elif [ -d "$r/.cache" ]; then
+    if [ -e "$r/.cache/swiftlint" ]; then
+        fail "the cache root was left behind, read-only entry and all: $_out"
+    else
+        fail "the cache root still exists (though the read-only entry is gone): $_out"
+    fi
+else
+    pass
+fi
+
+it "an unremovable partial directory fails loudly instead of nesting the staging"
+# publish_dir's debris-clearing branch chmods the destination writable before removing it, but
+# chmod cannot restore search (execute) permission it was never asked to add: chmod -R u+w on a
+# subdirectory with no execute bit changes that subdirectory's own mode but still cannot descend
+# into it, so whatever is inside stays exactly as unreachable as before. rm -rf then fails the same
+# way, for the same reason. Pre-fix, rm -rf's exit status does not survive the `if "$@"` inside
+# with_lock (see with_lock's own comment on that), the failure is swallowed, the destination still
+# exists, and `mv staging dest` -- which nests rather than errors when dest is an existing directory,
+# since there is no mv -T on macOS -- buries the freshly downloaded, hash-verified staging inside the
+# debris instead of the install ever failing loudly.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_dest="$r/.cache/swiftlint/$_sha"
+mkdir -p "$_dest/debris"
+printf 'x' > "$_dest/debris/file"
+chmod 000 "$_dest/debris"   # no execute bit: chmod -R u+w cannot descend into it, and neither can rm -rf
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+# u+rwx, not just u+w: the suite's own EXIT trap only restores u+w, which is not enough to enter a
+# directory that was never given execute permission in the first place, and would leave this debris
+# behind forever otherwise.
+chmod -R u+rwx "$_dest" 2>/dev/null
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 over a destination it could not clear: $_out"
+elif find "$_dest" -mindepth 1 -maxdepth 1 -name '*staging*' 2>/dev/null | grep -q .; then
+    fail "the staging directory was nested inside the debris instead of the install failing loudly: $_out"
+else
+    case "$_out" in
+        *"$_dest"*) pass ;;
+        *) fail "died without naming the directory to remove by hand: $_out" ;;
+    esac
+fi
+
+it "clean refuses a symlinked cache root rather than lying about removal"
+# rm -rf on a symlink unlinks the link itself and leaves whatever it points at completely untouched,
+# while still reporting success -- so a `clean` built on a bare `rm -rf "$GRUBSTAKE_CACHE"` would
+# exit 0 and claim the cache was removed while every published entry survives at the real path.
+r=$(new_repo)
+_real="$r/real-cache"
+mkdir -p "$_real/swiftlint/$SHA_A"
+printf '#!/bin/sh\necho 0.63.2\n' > "$_real/swiftlint/$SHA_A/swiftlint"
+chmod +x "$_real/swiftlint/$SHA_A/swiftlint"
+_link="$r/.cache-link"
+ln -s "$_real" "$_link"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$_link" ./grubstake.sh clean 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "clean exited 0 on a symlinked cache root: $_out"
+elif [ ! -x "$_real/swiftlint/$SHA_A/swiftlint" ]; then
+    fail "the symlink's target was touched even though clean refused: $_out"
+else
+    case "$_out" in
+        *"$_link"*) pass ;;
+        *) fail "refused without naming the symlink: $_out" ;;
+    esac
+fi
+
+it "clean refuses a degenerate cache root"
+# GRUBSTAKE_CACHE is used verbatim, so a value that is neither empty nor literally "/" but still
+# resolves to the filesystem root -- ".." above root is root again, so "/.." does -- has to be caught
+# by the same guard that already refuses "" and "/", or clean reaches chmod -R and rm -rf on the
+# entire filesystem. Both are shimmed to record their invocation instead of running for real: even
+# wrapped in `|| true`, a real chmod -R u+w / is itself destructive and slow, so trusting a live rm's
+# exit status alone is not enough -- a real rm can also fail non-zero for an unrelated permission
+# reason and look like a refusal that never happened. The assertion is that neither command was ever
+# reached, not that whichever one ran happened to fail.
+r=$(new_repo)
+_shim="$r/danger-shim"; mkdir -p "$_shim"
+_record="$r/danger.invoked"
+cat > "$_shim/chmod" <<SHIM
+#!/bin/sh
+printf 'chmod %s\n' "\$*" >> "$_record"
+exit 0
+SHIM
+cat > "$_shim/rm" <<SHIM
+#!/bin/sh
+printf 'rm %s\n' "\$*" >> "$_record"
+exit 0
+SHIM
+chmod +x "$_shim/chmod" "$_shim/rm"
+_out=$( cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="/.." ./grubstake.sh clean 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "clean exited 0 for GRUBSTAKE_CACHE=/..: $_out"
+elif [ -f "$_record" ]; then
+    fail "the guard let a destructive command run before refusing: $(cat "$_record")"
+else
+    pass
+fi
 
 # ---------------------------------------------------------------------------- resolution
 
@@ -427,16 +622,46 @@ extract_fns() {
 it "a race loser cleans up after itself"
 # Two installs of one cold pin. The loser must discard its own staging, or a shared cache
 # accumulates litter that a normal rm cannot remove.
+#
+# publish_dir's winner branch is `[ -x "$2/$3" ]`: the tool name is what tells a real winner (dest
+# holds the executable) apart from debris (dest exists but does not). This generated script has no
+# `set -u`, so calling publish_dir with only two arguments leaves $3 empty rather than erroring, and
+# "$2/$3" degrades to "$2/" -- ordinary directory search permission, true for any plain directory --
+# so the winner branch fires unconditionally regardless of what dest actually holds. Passing the
+# tool name, and giving dest a genuine executable to be a genuine winner, is what makes this
+# assertion mean anything again; see "publish_dir publishes a staging directory into a destination
+# that lacks the executable" below for the branch this would otherwise never distinguish from.
 r=$(new_repo)
 _d="$r/dest"; _st="$r/dest.staging.111"
 mkdir -p "$_st"; printf 'x' > "$_st/f"; chmod -R a-w "$_st"
-mkdir -p "$_d"
-{ extract_fns; echo 'publish_dir "$1" "$2"'; } > "$r/t.sh"
-( cd "$r" && sh "$r/t.sh" "$_st" "$_d" ) >/dev/null 2>&1; _rc=$?
+mkdir -p "$_d"; printf '#!/bin/sh\necho 0.63.2\n' > "$_d/swiftlint"; chmod +x "$_d/swiftlint"
+_before="$(cat "$_d/swiftlint")"
+{ extract_fns; echo 'die() { echo "$1" >&2; exit 1; }'; echo 'publish_dir "$1" "$2" "$3"'; } > "$r/t.sh"
+( cd "$r" && sh "$r/t.sh" "$_st" "$_d" swiftlint ) >/dev/null 2>&1; _rc=$?
 # The status is checked rather than discarded: 127 is publish_dir never running, which leaves no
 # staging behind either and so read as a pass.
 if [ "$_rc" -ne 0 ]; then fail "the generated script exited $_rc, so publish_dir did not run"
 elif [ -e "$_st" ]; then fail "the loser could not remove its own read-only staging"
+elif [ "$(cat "$_d/swiftlint" 2>/dev/null)" != "$_before" ]; then fail "the winner's own executable was disturbed"
+else pass; fi
+chmod -R u+w "$r" 2>/dev/null
+
+it "publish_dir publishes a staging directory into a destination that lacks the executable"
+# The other half of the branch above: a destination that exists but does not hold the tool's
+# executable is debris, not a winner -- an interrupted publish, a stray mkdir, a cache layout change
+# across versions -- and the freshly built staging must land there rather than being discarded. Unit
+# coverage of publish_dir itself, at the same level "a race loser cleans up after itself" covers the
+# winner branch; "a partial cache directory does not wedge ensure" already covers this branch
+# end-to-end through the whole ensure pipeline, but nothing previously exercised publish_dir alone.
+r=$(new_repo)
+_d="$r/dest"; _st="$r/dest.staging.222"
+mkdir -p "$_st"; printf 'bin' > "$_st/swiftlint"; chmod +x "$_st/swiftlint"
+mkdir -p "$_d"   # exists, but nothing named swiftlint inside it: debris, not a winner
+{ extract_fns; echo 'die() { echo "$1" >&2; exit 1; }'; echo 'publish_dir "$1" "$2" "$3"'; } > "$r/t.sh"
+( cd "$r" && sh "$r/t.sh" "$_st" "$_d" swiftlint ) >/dev/null 2>&1; _rc=$?
+if [ "$_rc" -ne 0 ]; then fail "the generated script exited $_rc, so publish_dir did not run"
+elif [ -e "$_st" ]; then fail "the staging directory was not moved: $_st still exists"
+elif [ ! -x "$_d/swiftlint" ]; then fail "debris was cleared, but the staging was never published into $_d"
 else pass; fi
 chmod -R u+w "$r" 2>/dev/null
 

@@ -12,9 +12,9 @@ over if anything disagrees.
 Fetch the script and adopt the repo.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v0.2.0/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v0.2.1/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
-./grubstake.sh version   # expect 0.2.0
+./grubstake.sh version   # expect 0.2.1
 ./grubstake.sh install
 ```
 
@@ -71,7 +71,11 @@ Binaries are cached in `~/Library/Caches/grubstake`, or under `$XDG_CACHE_HOME` 
 downloaded ever lands in the repo. Set `GRUBSTAKE_CACHE` if you want them somewhere else.
 
 Checks that belong to one repo go in `.githooks/pre-commit.d/`, where the spine will find and run
-them. Do not edit the spine itself, because `update` replaces it wholesale.
+them. Do not edit the spine itself.
+
+`update` replaces `grubstake.sh` and nothing else. Hooks are written once by `install`, which
+leaves an existing hook file alone, so a spine fix reaches a repo only when you delete its hook
+and re-run `install`. Release notes say when that is worth doing.
 
 The pre-commit lint reads the working tree rather than the staged blobs, so it checks the current
 contents of files whose paths are staged. Linting a copy would break SwiftLint's config resolution,

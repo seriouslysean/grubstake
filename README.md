@@ -79,6 +79,10 @@ grubstake knows how to install `swiftlint`, `swiftformat`, `xcbeautify`, and `pe
 
 `periphery` publishes no Linux build, so grubstake skips it there rather than failing the run.
 
+## Adopting it in an existing repo
+
+The migration is in [ADOPTING.md](ADOPTING.md), which is written for an agent working through it.
+
 ## Contributing
 
 The workflow is in [CONTRIBUTING.md](CONTRIBUTING.md), and the conventions the code holds itself to

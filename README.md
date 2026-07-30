@@ -3,18 +3,22 @@
 grubstake pins the build tools an iOS repo depends on. It is a single script that lives in the repo
 it serves.
 
-Every tool is pinned to an exact version and an exact SHA256. grubstake downloads the tool, verifies
-the bytes it received, confirms the binary reports the version it was pinned to, and refuses to hand it
-over if anything disagrees.
+Every tool is pinned to an exact version and an exact SHA256. grubstake verifies the bytes it
+downloads against that pin, and confirms the archive contains the version it was pinned to, before
+anything is installed.
+
+The pin is the trust boundary and it is checked at download. The cache afterwards is an
+optimisation: it lives in your home directory, anything that can write to it can write to all of
+it, and grubstake does not pretend otherwise.
 
 ## Install
 
 Fetch the script and adopt the repo.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v0.2.2/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v0.3.0/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
-./grubstake.sh version   # expect 0.2.2
+./grubstake.sh version   # expect 0.3.0
 ./grubstake.sh install
 ```
 
@@ -69,6 +73,15 @@ grubstake.tools   the pinned tools, one per line: name version sha256-darwin sha
 
 Binaries are cached in `~/Library/Caches/grubstake`, or under `$XDG_CACHE_HOME` on Linux, so nothing
 downloaded ever lands in the repo. Set `GRUBSTAKE_CACHE` if you want them somewhere else.
+
+Each entry is a directory named for the archive hash it was installed from, so changing a pin
+installs alongside rather than over, and two repos pinning different hashes of the same version
+coexist. Entries are made read-only after they are published, which means clearing the cache needs
+write permission back first:
+
+```sh
+chmod -R u+w ~/Library/Caches/grubstake && rm -rf ~/Library/Caches/grubstake
+```
 
 Checks that belong to one repo go in `.githooks/pre-commit.d/`, where the spine will find and run
 them. Do not edit the spine itself.

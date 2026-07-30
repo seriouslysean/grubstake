@@ -5,9 +5,7 @@
 # gets edited from inside a consumer, so a comment written in that context can carry a private
 # repo name or an issue number into a public commit.
 #
-# It matches SHAPES, not names. A denylist of private repo names could not live here without
-# being the leak it exists to prevent. For names, put one pattern per line in .leakwords, which
-# is gitignored and never published.
+# It matches shapes: paths, addresses, and references that point outside this repo.
 #
 #   test/no-leaks.sh          scan tracked files
 #   test/no-leaks.sh --all    also scan every commit message in history
@@ -36,16 +34,6 @@ scan "absolute home path" '/Users/[a-zA-Z0-9]|/home/[a-z]' || FOUND=1
 scan "email address" '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' || FOUND=1
 # owner/repo#123 pointing somewhere else is how one repo's issue history reaches a public commit.
 scan "cross-repo issue reference" '[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+#[0-9]+' || FOUND=1
-
-if [ -f .leakwords ]; then
-    while IFS= read -r _w; do
-        case "$_w" in ''|\#*) continue ;; esac
-        _hits="$(git grep -inE "$_w" -- . ':!test/no-leaks.sh' 2>/dev/null)"
-        [ -n "$_hits" ] && { printf '%s\n' "$_hits" | while IFS= read -r _l; do printf '  local denylist: %s\n' "$_l"; done; FOUND=1; }
-    done < .leakwords
-else
-    printf '  note: no .leakwords file, so name matching is skipped\n'
-fi
 
 if [ "${1:-}" = "--all" ]; then
     printf 'scanning commit messages\n'

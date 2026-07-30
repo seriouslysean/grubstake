@@ -6,7 +6,8 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="0.2.2"
+GRUBSTAKE_VERSION="0.3.0"
+GRUBSTAKE_MIN_VERSION="0.3.0"   # every earlier release has a known blocking defect
 GRUBSTAKE_REPO="https://github.com/seriouslysean/grubstake"
 GRUBSTAKE_RAW="https://raw.githubusercontent.com/seriouslysean/grubstake"
 
@@ -110,7 +111,16 @@ known_tools() { echo "swiftlint swiftformat xcbeautify periphery"; }
 
 # Resolved from the script, never from the working directory. Reading pins from cwd is exactly
 # the failure this tool exists to prevent: the same script would serve a different repo's pins.
-script_dir() { cd "$(dirname "$0")" && pwd; }
+# Symlinks are followed by hand; macOS has no readlink -f.
+script_path() {
+    _p="$0"
+    while [ -L "$_p" ]; do
+        _t="$(readlink "$_p")"
+        case "$_t" in /*) _p="$_t" ;; *) _p="$(dirname "$_p")/$_t" ;; esac
+    done
+    echo "$_p"
+}
+script_dir() { cd "$(dirname "$(script_path)")" && pwd; }
 pins_file() { echo "$(script_dir)/grubstake.tools"; }
 
 pin_field() {
@@ -160,13 +170,34 @@ validate_pins() {
 
 # ---------------------------------------------------------------------------- install tools
 
-tool_dir()  { echo "$(cache_root)/$1/$2"; }
+# Keyed by the pinned archive hash, not the version. The path identifies the bytes, so editing a
+# pin changes the path, which is a cache miss, which reinstalls. Nothing has to detect staleness.
+tool_dir()  { echo "$(cache_root)/$1/$2"; }   # $2 is the pinned sha256
 tool_bin()  { echo "$(tool_dir "$1" "$2")/$1"; }
-# Digest of the installed binary, recorded at install. The pin covers the archive; this covers
-# what a later run actually executes, which is a mutable file in the user's home.
-tool_stamp() { echo "$(tool_dir "$1" "$2")/.grubstake-sha256"; }
 
-# Hash proves what arrived. Version check proves what is inside it.
+# mkdir is the portable atomic lock. flock(1) is not present on macOS.
+with_lock() {
+    _lk="$1"; shift
+    _w=0
+    while ! mkdir "$_lk" 2>/dev/null; do
+        _w=$((_w + 1))
+        [ "$_w" -gt 50 ] && die "cache entry locked by another run: $_lk (stale? rmdir it)"
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    "$@"; _rc=$?
+    rmdir "$_lk" 2>/dev/null || true
+    return $_rc
+}
+
+# A published entry is never unlinked: another repo may be executing from it. The loser of a race
+# discards its own staging, and both copies are identical by construction.
+# The lock exists because `mv dir existing-dir` nests rather than fails, and macOS mv has no -T.
+publish_dir() {
+    if [ -e "$2" ]; then rm -rf "$1"; else mv "$1" "$2"; fi
+}
+
+# The pinned hash, checked here against the bytes that arrived, is the trust root. Everything
+# after publish is a cache: fast, disposable, and not a security boundary.
 install_tool() {
     _tool="$1"
     _ver="$2"
@@ -180,13 +211,10 @@ install_tool() {
     fi
     [ "$_want" != "-" ] && [ -n "$_want" ] || die "$_tool has no $_plat hash in grubstake.tools (run: grubstake add $_tool@$_ver)"
 
-    _dest="$(tool_dir "$_tool" "$_ver")"
-    _bin="$(tool_bin "$_tool" "$_ver")"
-    # An unstamped binary is reinstalled rather than stamped: stamping whatever is already on
-    # disk would bless a poisoned cache, and a cache from before stamps existed is unproven.
-    if [ -x "$_bin" ] && [ -f "$(tool_stamp "$_tool" "$_ver")" ]; then
-        return 0
-    fi
+    _dest="$(tool_dir "$_tool" "$_want")"
+    _bin="$(tool_bin "$_tool" "$_want")"
+    # Existence at a hash-named path is validity. There is no other state to be in.
+    [ -x "$_bin" ] && return 0
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     # shellcheck disable=SC2064
@@ -194,7 +222,8 @@ install_tool() {
 
     log "$_tool $_ver: downloading"
     _archive="$_tmp/archive"
-    curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$_url" -o "$_archive" || die "$_tool $_ver: download failed"
+    curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$_url" -o "$_archive" \
+        || die "$_tool $_ver: download failed"
 
     _got="$(sha256_file "$_archive")"
     [ "$_got" = "$_want" ] || die "$_tool $_ver: sha256 mismatch
@@ -220,17 +249,18 @@ install_tool() {
     cp -R "$(dirname "$_found")"/. "$_staging"/
     [ "$_member" = "$_tool" ] || mv "$_staging/$_member" "$_staging/$_tool"
     chmod +x "$_staging/$_tool"
+
+    # Asserted once, here, on bytes that have already matched the pin. No later run re-checks it.
+    _reported="$(reported_version "$_staging/$_tool" "$_tool")"
+    [ "$_reported" = "$_ver" ] || die "$_tool: archive contains ${_reported:-nothing}, pinned $_ver"
+
+    chmod -R a-w "$_staging" 2>/dev/null || true
     mkdir -p "$(dirname "$_dest")"
-    # Unlink as late as possible: the cache is shared, and another repo may be executing from
-    # this directory. mv into an existing directory nests rather than fails, so test first.
-    rm -rf "$_dest"
-    if [ -e "$_dest" ]; then rm -rf "$_staging"; else mv "$_staging" "$_dest"; fi
+    with_lock "$_dest.lock" publish_dir "$_staging" "$_dest"
 
     rm -rf "$_tmp"
     trap - EXIT HUP INT TERM
-    # set -e is suppressed when this runs from a || branch, so assert instead of assuming.
     [ -x "$_bin" ] || die "$_tool $_ver: install incomplete"
-    printf '%s\n%s\n' "$(sha256_file "$_bin")" "$_want" > "$(tool_stamp "$_tool" "$_ver")"
     log "$_tool $_ver: installed"
 }
 
@@ -238,29 +268,14 @@ reported_version() {
     "$1" $(tool_version_args "$2") 2>/dev/null | head -1 | sed 's|^[Vv]ersion:[[:space:]]*||' | tr -d '[:space:]'
 }
 
+# Existence at the hash-named path. Re-hashing on every read protects nothing: anything that can
+# rewrite the binary can rewrite whatever we compared it against.
 verify_tool() {
     _tool="$1"
-    _ver="$2"
-    # Assign, do not test: a die inside $( ) kills only the subshell and check would pass.
-    _url="$(tool_url "$_tool" "$_ver" "$(platform)")"
+    _sha="$(pin_sha "$_tool" "$(platform)" 2>/dev/null || echo '-')"
+    _url="$(tool_url "$_tool" "$2" "$(platform)")"
     [ -n "$_url" ] || return 0
-    _bin="$(tool_bin "$_tool" "$_ver")"
-    [ -x "$_bin" ] || die "$_tool $_ver: not installed (run: grubstake ensure)"
-
-    # Re-hash what is on disk. A tampered binary that prints the right version is otherwise
-    # indistinguishable from the real one, and the cache is shared across repos.
-    _stamp="$(tool_stamp "$_tool" "$_ver")"
-    [ -f "$_stamp" ] || die "$_tool $_ver: no install digest recorded (run: grubstake ensure)"
-    [ "$(sha256_file "$_bin")" = "$(sed -n 1p "$_stamp")" ] \
-        || die "$_tool $_ver: cached binary does not match its install digest"
-    # Binds the install to the pin it came from, so editing a pin invalidates the cache rather
-    # than silently continuing to serve what the old pin installed.
-    _pinned_sha="$(pin_sha "$_tool" "$(platform)" 2>/dev/null || echo '-')"
-    [ "$(sed -n 2p "$_stamp")" = "$_pinned_sha" ] \
-        || die "$_tool $_ver: installed from a different pin than grubstake.tools now records"
-
-    _got="$(reported_version "$_bin" "$_tool")"
-    [ "$_got" = "$_ver" ] || die "$_tool: binary reports ${_got:-nothing}, pinned $_ver"
+    [ -x "$(tool_bin "$_tool" "$_sha")" ] || die "$_tool $2: not installed (run: grubstake ensure)"
 }
 
 # ---------------------------------------------------------------------------- commands
@@ -348,7 +363,7 @@ cmd_path() {
     _ver="$(pin_version "$1")" || die "$1 is not pinned"
     _url="$(tool_url "$1" "$_ver" "$(platform)")"
     [ -n "$_url" ] || die "$1 is not published for $(platform)"
-    _bin="$(tool_bin "$1" "$_ver")"
+    _bin="$(tool_bin "$1" "$(pin_sha "$1" "$(platform)")")"
     [ -x "$_bin" ] || install_tool "$1" "$_ver" >&2
     verify_tool "$1" "$_ver"
     echo "$_bin"
@@ -369,7 +384,7 @@ cmd_doctor() {
         _url="$(tool_url "$_tool" "$_ver" "$(platform)")"
         if [ -z "$_url" ]; then
             printf '  %-12s %-10s n/a on %s\n' "$_tool" "$_ver" "$(platform)"
-        elif [ -x "$(tool_bin "$_tool" "$_ver")" ]; then
+        elif [ -x "$(tool_bin "$_tool" "$(pin_sha "$_tool" "$(platform)")")" ]; then
             printf '  %-12s %-10s installed\n' "$_tool" "$_ver"
         else
             printf '  %-12s %-10s MISSING\n' "$_tool" "$_ver"
@@ -411,6 +426,13 @@ cmd_install() {
     log "installed. Review and commit: grubstake.sh grubstake.tools .githooks/"
 }
 
+# Every release below the floor has a known blocking defect, so it is not offered or installable.
+below_floor() {
+    [ "$(printf '%s\n%s\n' "$1" "$GRUBSTAKE_MIN_VERSION" \
+        | LC_ALL=C sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$1" ] \
+        && [ "$1" != "$GRUBSTAKE_MIN_VERSION" ]
+}
+
 # Release tags, newest first. No mutable "latest" pointer.
 # Reverse must be per-key (nr); a trailing -r is ignored when key flags are present.
 release_tags() {
@@ -438,6 +460,7 @@ cmd_update() {
     if [ -n "$_pinned" ]; then
         _pinned="${_pinned#v}"
         echo "$_pinned" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || die "not a release version: $_pinned"
+        below_floor "$_pinned" && die "$_pinned is below the supported floor $GRUBSTAKE_MIN_VERSION"
         [ "$_pinned" = "$GRUBSTAKE_VERSION" ] && { log "already on $GRUBSTAKE_VERSION"; return 0; }
         log "fetching $_pinned"
         fetch_release "$_pinned" "$_tmp" || die "v$_pinned is not a usable release"
@@ -456,30 +479,21 @@ cmd_update() {
     fi
 
     chmod +x "$_tmp"
-    _self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-    # The new script does the replacing. Never rewrite the file you are being read from.
-    exec "$_tmp" __replace-self "$_self" "$_target"
-}
 
-cmd_replace_self() {
-    _installed="$1"
-    _version="$2"
-    _dir="$(dirname "$_installed")"
-    _staged="$(mktemp "$_dir/.grubstake.XXXXXX")"
-    cp "$0" "$_staged"
+    # Rename from within the running process, as rustup does. The interpreter keeps its open fd on
+    # the old inode and finishes reading it undisturbed, so there is no need to hand off to a temp
+    # copy. That handoff avoided a hazard rename never had, and cost a $0 that lied about its repo.
+    _self="$(script_path)"
+    _self="$(cd "$(dirname "$_self")" && pwd)/$(basename "$_self")"
+    _staged="$(mktemp "$(dirname "$_self")/.grubstake.XXXXXX")" || die "cannot stage beside $_self"
+    cp "$_tmp" "$_staged"
     chmod +x "$_staged"
-    # Rename, not overwrite: a new inode leaves readers of the old file alone.
-    mv -f "$_staged" "$_installed"
-    log "updated to $_version"
-    # An older cache carries no install digest, so the very next commit would be refused by the
-    # hook. Heal it here rather than handing the user a broken repo and an instruction.
-    #
-    # Resolve from the installed path, not from $0: this process is the staged temp copy, so
-    # script_dir() is the temp directory and pins_file() would silently point at nothing.
-    if [ -f "$(cd "$(dirname "$_installed")" && pwd)/grubstake.tools" ]; then
-        log "re-verifying tools against the new version"
-        "$_installed" ensure || die "updated, but ensure failed. Run it again before committing."
-    fi
+    mv -f "$_staged" "$_self"
+    rm -f "$_tmp"
+    trap - EXIT HUP INT TERM
+
+    log "updated to $_target"
+    "$_self" ensure || die "updated to $_target, but ensure failed. Run it again before committing."
     log "review the diff, then commit"
 }
 
@@ -491,7 +505,6 @@ main() {
     shift
 
     case "$_cmd" in
-        __replace-self) cmd_replace_self "$@" ;;
         install)        cmd_install "$@" ;;
         update)         cmd_update "$@" ;;
         ensure)         cmd_ensure "$@" ;;

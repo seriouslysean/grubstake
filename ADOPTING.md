@@ -14,7 +14,7 @@ point of this migration is to change the mechanism, not the versions.
 ## Phase 1: pin the tools, change nothing else
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v0.2.0/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v0.2.1/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
 ./grubstake.sh version   # confirm it matches the tag you asked for
 ```
@@ -113,7 +113,11 @@ it leaves existing hook files alone.
 
 A repo with its own pre-commit logic should keep it. Move repo-specific checks into
 `.githooks/pre-commit.d/`, where the spine runs each one and fails the commit if any fails or has
-lost its executable bit. Never edit the spine itself, because `update` replaces it wholesale.
+lost its executable bit. Never edit the spine itself.
+
+`update` replaces `grubstake.sh` only. Hooks are written once by `install` and left alone after
+that, so a fix to the spine reaches this repo only when you delete the hook file and re-run
+`install`. Check the release notes before assuming a hook fix arrived with an update.
 
 ## What to know before you hit it
 

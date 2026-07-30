@@ -6,7 +6,7 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="0.2.0"
+GRUBSTAKE_VERSION="0.2.1"
 GRUBSTAKE_REPO="https://github.com/seriouslysean/grubstake"
 GRUBSTAKE_RAW="https://raw.githubusercontent.com/seriouslysean/grubstake"
 
@@ -108,7 +108,10 @@ known_tools() { echo "swiftlint swiftformat xcbeautify periphery"; }
 # Not JSON: greppable, diffable, no parser needed.
 # Columns: name version sha256-darwin sha256-linux ("-" when absent).
 
-pins_file() { echo "$(repo_root)/grubstake.tools"; }
+# Resolved from the script, never from the working directory. Reading pins from cwd is exactly
+# the failure this tool exists to prevent: the same script would serve a different repo's pins.
+script_dir() { cd "$(dirname "$0")" && pwd; }
+pins_file() { echo "$(script_dir)/grubstake.tools"; }
 
 pin_field() {
     _line=$(grep -E "^$1[[:space:]]" "$(pins_file)" 2>/dev/null || true)
@@ -138,9 +141,10 @@ validate_pins() {
     grep -q "$(printf '\r')" "$_f" && die "grubstake.tools has CRLF line endings"
     grep -qE '^(<<<<<<<|=======|>>>>>>>)' "$_f" && die "grubstake.tools has unresolved conflict markers"
     _n=0
-    while IFS= read -r _l; do
+    while IFS= read -r _l || [ -n "$_l" ]; do
         _n=$((_n + 1))
         case "$_l" in ''|\#*) continue ;; esac
+        case "$_l" in [[:space:]]*) die "grubstake.tools:$_n line must not be indented" ;; esac
         set -- $_l
         [ $# -eq 4 ] || die "grubstake.tools:$_n expected 4 fields, got $#"
         known_tools | grep -qw "$1" || die "grubstake.tools:$_n unknown tool: $1"
@@ -183,7 +187,6 @@ install_tool() {
     if [ -x "$_bin" ] && [ -f "$(tool_stamp "$_tool" "$_ver")" ]; then
         return 0
     fi
-    rm -rf "$_dest"
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     # shellcheck disable=SC2064
@@ -191,7 +194,7 @@ install_tool() {
 
     log "$_tool $_ver: downloading"
     _archive="$_tmp/archive"
-    curl -fsSL "$_url" -o "$_archive" || die "$_tool $_ver: download failed"
+    curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$_url" -o "$_archive" || die "$_tool $_ver: download failed"
 
     _got="$(sha256_file "$_archive")"
     [ "$_got" = "$_want" ] || die "$_tool $_ver: sha256 mismatch
@@ -218,14 +221,16 @@ install_tool() {
     [ "$_member" = "$_tool" ] || mv "$_staging/$_member" "$_staging/$_tool"
     chmod +x "$_staging/$_tool"
     mkdir -p "$(dirname "$_dest")"
-    # Losing a race is fine; clobbering a live install is not.
-    mv "$_staging" "$_dest" 2>/dev/null || rm -rf "$_staging"
+    # Unlink as late as possible: the cache is shared, and another repo may be executing from
+    # this directory. mv into an existing directory nests rather than fails, so test first.
+    rm -rf "$_dest"
+    if [ -e "$_dest" ]; then rm -rf "$_staging"; else mv "$_staging" "$_dest"; fi
 
     rm -rf "$_tmp"
     trap - EXIT HUP INT TERM
     # set -e is suppressed when this runs from a || branch, so assert instead of assuming.
     [ -x "$_bin" ] || die "$_tool $_ver: install incomplete"
-    sha256_file "$_bin" > "$(tool_stamp "$_tool" "$_ver")"
+    printf '%s\n%s\n' "$(sha256_file "$_bin")" "$_want" > "$(tool_stamp "$_tool" "$_ver")"
     log "$_tool $_ver: installed"
 }
 
@@ -246,8 +251,13 @@ verify_tool() {
     # indistinguishable from the real one, and the cache is shared across repos.
     _stamp="$(tool_stamp "$_tool" "$_ver")"
     [ -f "$_stamp" ] || die "$_tool $_ver: no install digest recorded (run: grubstake ensure)"
-    _now="$(sha256_file "$_bin")"
-    [ "$_now" = "$(cat "$_stamp")" ] || die "$_tool $_ver: cached binary does not match its install digest"
+    [ "$(sha256_file "$_bin")" = "$(sed -n 1p "$_stamp")" ] \
+        || die "$_tool $_ver: cached binary does not match its install digest"
+    # Binds the install to the pin it came from, so editing a pin invalidates the cache rather
+    # than silently continuing to serve what the old pin installed.
+    _pinned_sha="$(pin_sha "$_tool" "$(platform)" 2>/dev/null || echo '-')"
+    [ "$(sed -n 2p "$_stamp")" = "$_pinned_sha" ] \
+        || die "$_tool $_ver: installed from a different pin than grubstake.tools now records"
 
     _got="$(reported_version "$_bin" "$_tool")"
     [ "$_got" = "$_ver" ] || die "$_tool: binary reports ${_got:-nothing}, pinned $_ver"
@@ -274,7 +284,7 @@ add_one() {
             continue
         fi
         log "$_tool $_ver: hashing $_plat artifact"
-        curl -fsSL "$_url" -o "$_tmp/a" || die "$_tool $_ver: cannot fetch $_plat artifact"
+        curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$_url" -o "$_tmp/a" || die "$_tool $_ver: cannot fetch $_plat artifact"
         _shas="$_shas $(sha256_file "$_tmp/a")"
     done
 
@@ -382,7 +392,7 @@ cmd_install() {
             log "$_hook: already present, leaving it alone"
             continue
         fi
-        curl -fsSL "$GRUBSTAKE_RAW/v$GRUBSTAKE_VERSION/hooks/$_hook" -o "$_dest.tmp" \
+        curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$GRUBSTAKE_RAW/v$GRUBSTAKE_VERSION/hooks/$_hook" -o "$_dest.tmp" \
             || { rm -f "$_dest.tmp"; die "cannot fetch $_hook for v$GRUBSTAKE_VERSION"; }
         chmod +x "$_dest.tmp"
         mv "$_dest.tmp" "$_dest"
@@ -413,7 +423,7 @@ release_tags() {
 # Fetch one candidate into $2 and confirm it is a usable script declaring $1. Returns 1, never dies,
 # so an unusable tag can be skipped rather than blocking every update.
 fetch_release() {
-    curl -fsSL "$GRUBSTAKE_RAW/v$1/grubstake.sh" -o "$2" 2>/dev/null || return 1
+    curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$GRUBSTAKE_RAW/v$1/grubstake.sh" -o "$2" 2>/dev/null || return 1
     sh -n "$2" 2>/dev/null || return 1
     # A tag is a mutable ref, so assert the bytes identify as what the tag claims.
     grep -q "^GRUBSTAKE_VERSION=\"$1\"" "$2" || return 1
@@ -461,6 +471,12 @@ cmd_replace_self() {
     # Rename, not overwrite: a new inode leaves readers of the old file alone.
     mv -f "$_staged" "$_installed"
     log "updated to $_version"
+    # An older cache carries no install digest, so the very next commit would be refused by the
+    # hook. Heal it here rather than handing the user a broken repo and an instruction.
+    if [ -f "$(pins_file)" ]; then
+        log "re-verifying tools against the new version"
+        "$_installed" ensure || die "updated, but ensure failed. Run it again before committing."
+    fi
     log "review the diff, then commit"
 }
 

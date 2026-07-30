@@ -1,0 +1,42 @@
+#!/bin/sh
+# grubstake post-commit: report that a newer grubstake exists. Notify only. It never updates,
+# never blocks, and never fails a commit.
+#
+# post-commit rather than pre-commit on purpose: nothing here should sit in the path that gates a
+# commit. The synchronous cost is one file read; the network refresh is backgrounded and only
+# runs once per TTL, so an offline machine stays silent instead of stalling.
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+GRUBSTAKE="$ROOT/grubstake.sh"
+[ -x "$GRUBSTAKE" ] || exit 0
+
+CACHE="$(git rev-parse --git-dir)/grubstake-latest"   # inside .git, so it needs no gitignore entry
+TTL=86400
+
+CURRENT="$("$GRUBSTAKE" version 2>/dev/null)" || exit 0
+
+now=$(date +%s)
+stamp=0
+[ -f "$CACHE" ] && stamp=$(sed -n 1p "$CACHE" 2>/dev/null || echo 0)
+case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
+
+if [ $((now - stamp)) -gt "$TTL" ]; then
+    # Backgrounded and detached: a slow or unreachable network must not extend a commit.
+    (
+        latest=$(git ls-remote --tags --refs https://github.com/seriouslysean/grubstake 'v*' 2>/dev/null \
+            | awk '{print $2}' | sed 's|refs/tags/v||' \
+            | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+        [ -n "$latest" ] && printf '%s\n%s\n' "$now" "$latest" > "$CACHE"
+    ) >/dev/null 2>&1 &
+fi
+
+LATEST=$(sed -n 2p "$CACHE" 2>/dev/null) || exit 0
+[ -n "$LATEST" ] || exit 0
+[ "$LATEST" = "$CURRENT" ] && exit 0
+
+# Only speak when the cached latest is genuinely newer than what is installed.
+newest=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+[ "$newest" = "$LATEST" ] || exit 0
+
+echo "[grubstake] $LATEST available (pinned $CURRENT) -- run: ./grubstake.sh update"
+exit 0

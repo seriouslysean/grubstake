@@ -1,0 +1,42 @@
+#!/bin/sh
+# grubstake pre-commit spine. Verifies pinned tools, lints staged Swift, then runs repo-local
+# gates. Repo-specific checks belong in .githooks/pre-commit.d/, not in this file: this file is
+# replaced wholesale by `grubstake update`.
+
+set -eu
+
+ROOT="$(git rev-parse --show-toplevel)"
+GRUBSTAKE="$ROOT/grubstake.sh"
+
+[ -x "$GRUBSTAKE" ] || {
+    echo "[pre-commit] grubstake.sh missing or not executable at repo root" >&2
+    exit 1
+}
+
+"$GRUBSTAKE" check >/dev/null
+
+STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
+if [ -n "$STAGED_SWIFT" ]; then
+    SWIFTLINT="$("$GRUBSTAKE" path swiftlint)" || exit 1
+    # Verify and refuse rather than format-and-restage: re-adding after a fix folds unrelated
+    # hunks into a partial `git add -p` and re-stages a working-tree deletion of a file staged
+    # as new. The developer fixes and re-stages; the hook never touches the index.
+    OUT=$(git diff --cached --name-only -z --diff-filter=ACMR -- '*.swift' \
+        | xargs -0 "$SWIFTLINT" lint --strict --quiet 2>&1) && RC=0 || RC=$?
+    if [ "$RC" -ne 0 ]; then
+        # SwiftLint exits non-zero with this message when every staged path is excluded by config.
+        if ! echo "$OUT" | grep -q "No lintable files found"; then
+            echo "$OUT" >&2
+            echo "[pre-commit] swiftlint failed on staged files. Fix, re-stage, retry." >&2
+            exit 1
+        fi
+    fi
+    [ -n "$OUT" ] && echo "$OUT"
+fi
+
+for gate in "$ROOT"/.githooks/pre-commit.d/*; do
+    [ -x "$gate" ] || continue
+    "$gate" || { echo "[pre-commit] gate failed: $(basename "$gate")" >&2; exit 1; }
+done
+
+exit 0

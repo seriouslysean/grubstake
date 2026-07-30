@@ -60,6 +60,7 @@ check              re-verify installed tools against their pins
 add <tool>@<ver>   pin a tool by downloading it, hashing both platforms, and recording it
 path <tool>        print the absolute path to a pinned tool
 doctor             report the health of this install
+clean              remove the entire cache, read-only entries included
 version            print the version of this script
 ```
 
@@ -76,11 +77,11 @@ downloaded ever lands in the repo. Set `GRUBSTAKE_CACHE` if you want them somewh
 
 Each entry is a directory named for the archive hash it was installed from, so changing a pin
 installs alongside rather than over, and two repos pinning different hashes of the same version
-coexist. Entries are made read-only after they are published, which means clearing the cache needs
-write permission back first:
+coexist. Entries are made read-only after they are published, so clearing the cache by hand needs
+write permission back first; `grubstake clean` does both steps and removes the whole cache root:
 
 ```sh
-chmod -R u+w ~/Library/Caches/grubstake && rm -rf ~/Library/Caches/grubstake
+./grubstake.sh clean
 ```
 
 Checks that belong to one repo go in `.githooks/pre-commit.d/`, where the spine will find and run

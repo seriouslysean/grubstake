@@ -13,7 +13,8 @@
 set -u
 
 GS="$(cd "$(dirname "$0")/.." && pwd)/grubstake.sh"
-ROOT="$(mktemp -d "${TMPDIR:-/tmp}/grubstake-test.XXXXXX")"
+HOOKS="$(cd "$(dirname "$0")/.." && pwd)/hooks"
+SUITE_PID=$$
 NETWORK=0
 [ "${1:-}" = "--network" ] && NETWORK=1
 
@@ -21,8 +22,17 @@ PASS=0
 FAIL=0
 CURRENT=""
 
+# Unchecked, this failed silently under an unwritable TMPDIR and every later test ran against a
+# path that did not exist, which turned "grubstake could not start" into a column of passes.
+ROOT="$(mktemp -d "${TMPDIR:-/tmp}/grubstake-test.XXXXXX")" || {
+    printf 'FATAL  no scratch directory under %s\n' "${TMPDIR:-/tmp}" >&2
+    exit 2
+}
+
 # Published cache entries are read-only, as Go's module cache is, so they need write back first.
-trap 'chmod -R u+w "$ROOT" 2>/dev/null; rm -rf "$ROOT"' EXIT HUP INT TERM
+cleanup() { chmod -R u+w "$ROOT" 2>/dev/null; rm -rf "$ROOT"; }
+trap cleanup EXIT
+trap 'cleanup; exit 2' HUP INT TERM
 
 # ---------------------------------------------------------------------------- harness
 
@@ -31,14 +41,27 @@ it() { CURRENT="$1"; }
 pass() { PASS=$((PASS + 1)); printf '  ok    %s\n' "$CURRENT"; }
 fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n         %s\n' "$CURRENT" "$1"; }
 
+# A fixture that could not be built is not a test result. new_repo runs inside $(...), which is a
+# subshell, so exiting here would end only that subshell and hand the caller an empty path: every
+# expect_fail after it then passes because grubstake.sh could not run at all. Signal the suite
+# instead, so a broken fixture stops the run rather than inflating it.
+fixture_die() {
+    printf '\nFATAL  fixture: %s\n' "$1" >&2
+    kill -TERM "$SUITE_PID" 2>/dev/null
+    exit 2
+}
+
 # A fresh repo with its own cache. Every test gets one, so no test can depend on another.
 new_repo() {
     _r="$ROOT/$(date +%s)-$$-$PASS$FAIL-$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
-    mkdir -p "$_r"
-    _r="$(cd "$_r" && pwd)"
-    ( cd "$_r" && git init -q . )
-    cp "$GS" "$_r/grubstake.sh"
-    mkdir -p "$_r/.cache"
+    mkdir -p "$_r" || fixture_die "cannot create $_r"
+    _r="$(cd "$_r" && pwd)" || fixture_die "cannot enter $_r"
+    ( cd "$_r" && git init -q . ) || fixture_die "git init failed in $_r"
+    cp "$GS" "$_r/grubstake.sh" || fixture_die "cannot copy grubstake.sh into $_r"
+    mkdir -p "$_r/.cache" || fixture_die "cannot create $_r/.cache"
+    # Backstop for whatever the per-step checks above do not enumerate.
+    [ -d "$_r/.git" ] && [ -x "$_r/grubstake.sh" ] && [ -d "$_r/.cache" ] \
+        || fixture_die "incomplete repo at $_r"
     echo "$_r"
 }
 
@@ -334,9 +357,21 @@ else
     printf '  skip  %s (network)\n' "$CURRENT"
 fi
 
-# Sourcing the script would run main and exit, so pull the functions under test out by name.
+# Sourcing the script would run main and exit, so pull the functions under test out by name. The
+# sed ranges are keyed to exact brace formatting: move an opening brace to the next line and the
+# extraction silently yields nothing, the generated script exits 127 without ever calling the
+# function, and a test that only checks for the absence of a lock directory reports ok. An empty
+# or truncated extraction is a harness fault, not a result, so it stops the run.
 extract_fns() {
-    sed -n '/^with_lock() {/,/^}/p;/^publish_dir() {/,/^}/p' "$GS"
+    _fns="$(sed -n '/^with_lock() {/,/^}/p;/^publish_dir() {/,/^}/p' "$GS")"
+    for _f in with_lock publish_dir; do
+        printf '%s\n' "$_fns" | grep -q "^$_f() {$" \
+            || fixture_die "extract_fns: no '$_f() {' line in $GS (reformatted?)"
+    done
+    # Neither function nests a line-anchored brace, so anything but one close each means a range ran on.
+    _closes="$(printf '%s\n' "$_fns" | grep -c '^}$' | tr -d ' ')"
+    [ "$_closes" = 2 ] || fixture_die "extract_fns: $_closes closing braces, expected 2 (truncated)"
+    printf '%s\n' "$_fns"
 }
 
 it "a race loser cleans up after itself"
@@ -347,8 +382,12 @@ _d="$r/dest"; _st="$r/dest.staging.111"
 mkdir -p "$_st"; printf 'x' > "$_st/f"; chmod -R a-w "$_st"
 mkdir -p "$_d"
 { extract_fns; echo 'publish_dir "$1" "$2"'; } > "$r/t.sh"
-( cd "$r" && sh "$r/t.sh" "$_st" "$_d" ) >/dev/null 2>&1
-if [ -e "$_st" ]; then fail "the loser could not remove its own read-only staging"; else pass; fi
+( cd "$r" && sh "$r/t.sh" "$_st" "$_d" ) >/dev/null 2>&1; _rc=$?
+# The status is checked rather than discarded: 127 is publish_dir never running, which leaves no
+# staging behind either and so read as a pass.
+if [ "$_rc" -ne 0 ]; then fail "the generated script exited $_rc, so publish_dir did not run"
+elif [ -e "$_st" ]; then fail "the loser could not remove its own read-only staging"
+else pass; fi
 chmod -R u+w "$r" 2>/dev/null
 
 it "a lock is released even when the locked command fails"
@@ -359,8 +398,12 @@ fails() { return 1; }
 with_lock "$1" fails
 INNER
 } > "$r/t.sh"
-( cd "$r" && sh -eu "$r/t.sh" "$r/t.lock" ) >/dev/null 2>&1
-if [ -d "$r/t.lock" ]; then fail "the lock survived a failing command"; else pass; fi
+( cd "$r" && sh -eu "$r/t.sh" "$r/t.lock" ) >/dev/null 2>&1; _rc=$?
+# 1 is the locked command's own status arriving back through with_lock. 127 is with_lock never
+# running, which leaves no lock directory either and so read as a pass.
+if [ "$_rc" -ne 1 ]; then fail "the generated script exited $_rc, expected the locked command's 1"
+elif [ -d "$r/t.lock" ]; then fail "the lock survived a failing command"
+else pass; fi
 
 it "release versions sort newest first"
 # A trailing -r is ignored when per-key flags are present, which once made update install the
@@ -376,6 +419,242 @@ it "install refuses a foreign hooksPath without writing anything first"
 r=$(new_repo); ( cd "$r" && git config core.hooksPath .other-hooks )
 gs_rc "$r" install
 if [ -d "$r/.githooks" ]; then fail "left .githooks behind after refusing"; else pass; fi
+
+# ---------------------------------------------------------------------------- hooks
+#
+# Nothing here ran either shipped hook before: the suite tested what grubstake does when the suite
+# calls it, never what happens inside a commit. These fixtures install the hooks the way
+# `grubstake install` does and drive them through a real `git commit`.
+
+# A repo with the shipped hooks installed and one commit of history. The baseline commit is made
+# before core.hooksPath is set, so building the fixture never runs the hooks under test.
+new_hook_repo() {
+    _hr="$(new_repo)"
+    printf 'fixture\n' > "$_hr/README.md" || fixture_die "cannot write $_hr/README.md"
+    # gpgsign off explicitly: a signing key configured globally would block every commit below.
+    ( cd "$_hr" \
+      && git config user.email test@example.invalid \
+      && git config user.name "grubstake suite" \
+      && git config commit.gpgsign false \
+      && git add README.md \
+      && git commit -q -m baseline ) || fixture_die "cannot seed a commit in $_hr"
+    mkdir -p "$_hr/.githooks" || fixture_die "cannot create $_hr/.githooks"
+    cp "$HOOKS/pre-commit" "$HOOKS/post-commit" "$_hr/.githooks/" \
+        || fixture_die "cannot copy hooks into $_hr"
+    chmod +x "$_hr/.githooks/pre-commit" "$_hr/.githooks/post-commit" \
+        || fixture_die "cannot make the hooks executable in $_hr"
+    ( cd "$_hr" && git config core.hooksPath .githooks ) \
+        || fixture_die "cannot set core.hooksPath in $_hr"
+    echo "$_hr"
+}
+
+# Commit in a hook fixture, returning git's status and printing everything the hooks said.
+#
+# GRUBSTAKE_CACHE has to be exported into the git invocation itself. The hook is a child of git,
+# not of this function, so a cache set only in this shell would leave the hook resolving against
+# the developer's real cache: the tests would still go green, for a reason the fixture never
+# controlled. GIT_ALLOW_PROTOCOL keeps post-commit's backgrounded refresh off the network, since
+# git then refuses the transport outright instead of dialling out.
+hook_commit() {
+    _hcr="$1"
+    ( cd "$_hcr" \
+      && GRUBSTAKE_CACHE="$_hcr/.cache" GIT_ALLOW_PROTOCOL=file \
+         git commit -q -m change 2>&1 )
+}
+
+commits() { ( cd "$1" && git rev-list --count HEAD 2>/dev/null || echo 0 ); }
+
+# Write a file and stage it; the staged paths are all the pre-commit spine looks at.
+stage() {
+    printf '%s\n' "$3" > "$1/$2" || fixture_die "cannot write $1/$2"
+    ( cd "$1" && git add "$2" ) || fixture_die "cannot stage $2 in $1"
+}
+
+# A stubbed swiftlint at the pinned cache path, so `grubstake path swiftlint` resolves to it. It
+# records the binary it was invoked as and every argument it received, and takes its output and
+# status from files numbered by invocation, so a test can script the first run and the second
+# differently. verify_tool only checks that the path exists, so nothing else runs this. Its callers
+# pin SHA_A in both columns, so the stub sits where either platform looks for it.
+stub_linter() {
+    _sd="$1/.cache/swiftlint/$SHA_A"
+    mkdir -p "$_sd" || fixture_die "cannot create $_sd"
+    printf "#!/bin/sh\nR='%s'\n" "$1" > "$_sd/swiftlint" || fixture_die "cannot write the stub linter"
+    cat >> "$_sd/swiftlint" <<'STUB'
+n=$(cat "$R/lint.runs" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$R/lint.runs"
+{ echo "$0"; for a in "$@"; do echo "$a"; done; } > "$R/lint.argv.$n"
+[ -f "$R/lint.out.$n" ] && cat "$R/lint.out.$n"
+exit "$(cat "$R/lint.rc.$n" 2>/dev/null || echo 0)"
+STUB
+    chmod +x "$_sd/swiftlint" || fixture_die "cannot make the stub linter executable"
+}
+
+# What the stub does on its Nth invocation: repo, n, exit status, output.
+lint_run() {
+    printf '%s\n' "$3" > "$1/lint.rc.$2" || fixture_die "cannot script lint run $2"
+    printf '%s' "$4" > "$1/lint.out.$2" || fixture_die "cannot script lint run $2"
+}
+
+# A repo-local gate, which is where repo-specific checks live rather than in the shared spine.
+gate() {
+    mkdir -p "$1/.githooks/pre-commit.d" || fixture_die "cannot create $1/.githooks/pre-commit.d"
+    printf '#!/bin/sh\nexit %s\n' "$3" > "$1/.githooks/pre-commit.d/$2" \
+        || fixture_die "cannot write gate $2"
+    chmod +x "$1/.githooks/pre-commit.d/$2" || fixture_die "cannot make gate $2 executable"
+}
+
+# The answer post-commit reads, inside .git so it needs no gitignore entry. Stamped now, so the
+# TTL has not expired and nothing tries to refresh it. An empty version is refused rather than
+# written: post-commit says nothing when line 2 is blank, which would make silence prove nothing.
+latest_cache() {
+    [ -n "$2" ] || fixture_die "no version to cache as the latest release"
+    printf '%s\n%s\n' "$(date +%s)" "$2" > "$1/.git/grubstake-latest" \
+        || fixture_die "cannot write the latest cache in $1"
+}
+
+printf '\nhooks\n'
+
+it "the hook lints with the pinned binary from this repo's cache"
+# The hook is a child of git, so a cache exported only into this shell never reaches it, and every
+# test below would then be measuring the developer's real cache instead of the fixture's.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter "$r"; lint_run "$r" 1 0 ""
+stage "$r" A.swift "struct A {}"
+hook_commit "$r" >/dev/null 2>&1
+_bin=$(sed -n 1p "$r/lint.argv.1" 2>/dev/null)
+if [ "$_bin" != "$r/.cache/swiftlint/$SHA_A/swiftlint" ]; then
+    fail "the hook ran '$_bin', not this repo's pinned linter"
+elif ! grep -qx lint "$r/lint.argv.1"; then
+    fail "the linter was not asked to lint: $(tr '\n' ' ' < "$r/lint.argv.1")"
+elif ! grep -qx A.swift "$r/lint.argv.1"; then
+    fail "the staged path never reached the linter: $(tr '\n' ' ' < "$r/lint.argv.1")"
+else
+    pass
+fi
+
+it "a lint failure blocks the commit"
+# The linter's own output has to reach the developer, or a refusal for any other reason -- a tool
+# that was never installed, say -- looks identical to a refusal the linter asked for.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter "$r"; lint_run "$r" 1 2 "A.swift:1:1: error: Force Cast Violation (force_cast)"
+stage "$r" A.swift "struct A {}"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -eq 0 ]; then fail "the commit went through: $_out"
+elif [ "$(commits "$r")" != 1 ]; then fail "refused, and committed anyway"
+else
+    case "$_out" in
+        *"Force Cast Violation"*) pass ;;
+        *) fail "blocked without reporting what the linter said: $_out" ;;
+    esac
+fi
+
+it "a clean lint lets the commit through"
+# A gate that never passes gets bypassed, and then it gates nothing at all.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter "$r"; lint_run "$r" 1 0 ""
+stage "$r" A.swift "struct A {}"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then fail "a clean lint was blocked (rc $_rc): $_out"
+elif [ "$(commits "$r")" != 2 ]; then fail "exited 0 without committing"
+else pass; fi
+
+it "a blocked commit goes through once the lint passes"
+# The retry loop the spine is built around: the hook refuses, the developer fixes and re-stages,
+# and the second attempt has to lint again rather than replay the first verdict.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter "$r"
+lint_run "$r" 1 2 "A.swift:1:1: error: Force Cast Violation (force_cast)"
+lint_run "$r" 2 0 ""
+stage "$r" A.swift "struct A {}"
+hook_commit "$r" >/dev/null 2>&1
+stage "$r" A.swift "struct A { let a = 1 }"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then fail "the retry was still blocked (rc $_rc): $_out"
+elif [ ! -f "$r/lint.argv.2" ]; then fail "the retry never re-ran the linter"
+elif [ "$(commits "$r")" != 2 ]; then fail "exited 0 without committing"
+else pass; fi
+
+it "a commit with no Swift files does not need the tools installed"
+# A cold cache must not refuse a docs-only commit: nothing this spine gates is staged, so there is
+# nothing to verify and no reason to reach for a binary that has not been fetched yet.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then fail "a cold cache blocked a non-Swift commit (rc $_rc): $_out"
+elif [ "$(commits "$r")" != 2 ]; then fail "exited 0 without committing"
+else pass; fi
+
+it "a failing pre-commit.d gate blocks the commit"
+r=$(new_hook_repo); gate "$r" 10-gate 1
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -eq 0 ]; then fail "the commit went through: $_out"
+elif [ "$(commits "$r")" != 1 ]; then fail "refused, and committed anyway"
+else
+    case "$_out" in
+        *"gate failed: 10-gate"*) pass ;;
+        *) fail "blocked without naming the gate: $_out" ;;
+    esac
+fi
+
+it "a pre-commit.d gate that lost its exec bit blocks the commit"
+# A gate that cannot run must not look like one that passed; the silent skip is the whole failure.
+r=$(new_hook_repo); gate "$r" 20-gate 0
+chmod -x "$r/.githooks/pre-commit.d/20-gate"
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -eq 0 ]; then fail "an unrunnable gate was skipped: $_out"
+elif [ "$(commits "$r")" != 1 ]; then fail "refused, and committed anyway"
+else
+    case "$_out" in
+        *"gate not executable"*) pass ;;
+        *) fail "blocked without saying why: $_out" ;;
+    esac
+fi
+
+it "a repo with no pre-commit.d directory still commits"
+# An unmatched glob expands to itself, so the loop has to skip a path that is not there instead of
+# trying to run it. Most adopters never add a repo-local gate.
+r=$(new_hook_repo)
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then fail "blocked with no gates present (rc $_rc): $_out"
+elif [ "$(commits "$r")" != 2 ]; then fail "exited 0 without committing"
+else pass; fi
+
+it "post-commit reports a release newer than the one running"
+r=$(new_hook_repo); latest_cache "$r" 99.9.9
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r")
+case "$_out" in
+    *"99.9.9 available"*) pass ;;
+    *) fail "said nothing about a newer release: $_out" ;;
+esac
+
+it "post-commit stays quiet when the cached latest is the version already running"
+# A line on every commit is noise that gets filtered, and then the one that mattered is filtered too.
+r=$(new_hook_repo); latest_cache "$r" "$(gs "$r" version)"
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r")
+case "$_out" in
+    *"[grubstake]"*) fail "spoke with nothing to report: $_out" ;;
+    *) pass ;;
+esac
+
+it "post-commit stays quiet with no cache and no network"
+# Being offline is a reason to say nothing, not to fail a commit. The refresh is backgrounded, so
+# the commit must neither wait on it nor print a half-answer.
+r=$(new_hook_repo)
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then fail "an offline post-commit failed the commit (rc $_rc): $_out"
+else
+    case "$_out" in
+        *"[grubstake]"*) fail "spoke with no cached answer: $_out" ;;
+        *) pass ;;
+    esac
+fi
 
 # ---------------------------------------------------------------------------- add
 

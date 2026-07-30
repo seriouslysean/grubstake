@@ -6,7 +6,7 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="0.1.3"
+GRUBSTAKE_VERSION="0.1.4"
 GRUBSTAKE_REPO="https://github.com/seriouslysean/grubstake"
 GRUBSTAKE_RAW="https://raw.githubusercontent.com/seriouslysean/grubstake"
 
@@ -337,38 +337,52 @@ cmd_install() {
     log "installed. Review and commit: grubstake.sh grubstake.tools .githooks/"
 }
 
-# Newest SemVer tag. No mutable "latest" pointer.
-latest_tag() {
+# Release tags, newest first. No mutable "latest" pointer.
+# Reverse must be per-key (nr); a trailing -r is ignored when key flags are present.
+release_tags() {
     git ls-remote --tags --refs "$GRUBSTAKE_REPO" 'v*' 2>/dev/null \
         | awk '{print $2}' | sed 's|refs/tags/v||' \
         | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-        | LC_ALL=C sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+        | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr
+}
+
+# Fetch one candidate into $2 and confirm it is a usable script declaring $1. Returns 1, never dies,
+# so an unusable tag can be skipped rather than blocking every update.
+fetch_release() {
+    curl -fsSL "$GRUBSTAKE_RAW/v$1/grubstake.sh" -o "$2" 2>/dev/null || return 1
+    sh -n "$2" 2>/dev/null || return 1
+    # A tag is a mutable ref, so assert the bytes identify as what the tag claims.
+    grep -q "^GRUBSTAKE_VERSION=\"$1\"" "$2" || return 1
 }
 
 cmd_update() {
-    _target="${1:-}"
-    [ -n "$_target" ] || _target="$(latest_tag)"
-    [ -n "$_target" ] || die "cannot resolve a release tag from $GRUBSTAKE_REPO"
-    _target="${_target#v}"
-    echo "$_target" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || die "not a release version: $_target"
-
-    if [ "$_target" = "$GRUBSTAKE_VERSION" ]; then
-        log "already on $GRUBSTAKE_VERSION"
-        return 0
-    fi
-
-    _self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    _pinned="${1:-}"
     _tmp="$(mktemp "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     # shellcheck disable=SC2064
     trap "rm -f '$_tmp'" EXIT HUP INT TERM
 
-    log "fetching $_target"
-    curl -fsSL "$GRUBSTAKE_RAW/v$_target/grubstake.sh" -o "$_tmp" || die "cannot fetch v$_target"
-    sh -n "$_tmp" || die "downloaded script failed a syntax check, refusing to install it"
-    # A tag is a mutable ref. Assert the bytes identify as what was asked for.
-    grep -q "^GRUBSTAKE_VERSION=\"$_target\"" "$_tmp" || die "v$_target does not contain version $_target"
-    chmod +x "$_tmp"
+    if [ -n "$_pinned" ]; then
+        _pinned="${_pinned#v}"
+        echo "$_pinned" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || die "not a release version: $_pinned"
+        [ "$_pinned" = "$GRUBSTAKE_VERSION" ] && { log "already on $GRUBSTAKE_VERSION"; return 0; }
+        log "fetching $_pinned"
+        fetch_release "$_pinned" "$_tmp" || die "v$_pinned is not a usable release"
+        _target="$_pinned"
+    else
+        _candidates="$(release_tags)"
+        [ -n "$_candidates" ] || die "cannot resolve a release tag from $GRUBSTAKE_REPO"
+        _target=""
+        for _c in $_candidates; do
+            [ "$_c" = "$GRUBSTAKE_VERSION" ] && { log "already on $GRUBSTAKE_VERSION"; return 0; }
+            log "fetching $_c"
+            if fetch_release "$_c" "$_tmp"; then _target="$_c"; break; fi
+            warn "v$_c is not a usable release, skipping"
+        done
+        [ -n "$_target" ] || die "no usable release found in $GRUBSTAKE_REPO"
+    fi
 
+    chmod +x "$_tmp"
+    _self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
     # The new script does the replacing. Never rewrite the file you are being read from.
     exec "$_tmp" __replace-self "$_self" "$_target"
 }

@@ -6,7 +6,7 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="0.2.1"
+GRUBSTAKE_VERSION="0.2.2"
 GRUBSTAKE_REPO="https://github.com/seriouslysean/grubstake"
 GRUBSTAKE_RAW="https://raw.githubusercontent.com/seriouslysean/grubstake"
 
@@ -473,7 +473,10 @@ cmd_replace_self() {
     log "updated to $_version"
     # An older cache carries no install digest, so the very next commit would be refused by the
     # hook. Heal it here rather than handing the user a broken repo and an instruction.
-    if [ -f "$(pins_file)" ]; then
+    #
+    # Resolve from the installed path, not from $0: this process is the staged temp copy, so
+    # script_dir() is the temp directory and pins_file() would silently point at nothing.
+    if [ -f "$(cd "$(dirname "$_installed")" && pwd)/grubstake.tools" ]; then
         log "re-verifying tools against the new version"
         "$_installed" ensure || die "updated, but ensure failed. Run it again before committing."
     fi

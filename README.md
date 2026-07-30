@@ -4,8 +4,8 @@ grubstake pins the build tools an iOS repo depends on. It is a single script tha
 it serves.
 
 Every tool is pinned to an exact version and an exact SHA256. grubstake downloads the tool, verifies
-the bytes it received, confirms the binary reports the version it was pinned to, and refuses to run
-if anything disagrees.
+the bytes it received, confirms the binary reports the version it was pinned to, and refuses to hand it
+over if anything disagrees.
 
 ## Install
 

@@ -2,7 +2,7 @@
 
 Rules for working in this repo.
 
-1. Pin every tool to an exact version, and never resolve "latest" at runtime.
+1. Pin every tool to an exact version, and resolve "latest" only when the user explicitly asks to update.
 2. Verify downloaded bytes against a recorded hash, because a version tag is not a checksum.
 3. Assert that a tool reports the version it was pinned to, since the hash only proves what arrived.
 4. Let the machine write pins and let a human review the diff.

@@ -35,7 +35,9 @@ if [ -n "$STAGED_SWIFT" ]; then
 fi
 
 for gate in "$ROOT"/.githooks/pre-commit.d/*; do
-    [ -x "$gate" ] || continue
+    [ -e "$gate" ] || continue
+    # A gate that lost its exec bit must not look like one that passed.
+    [ -x "$gate" ] || { echo "[pre-commit] gate not executable: $gate" >&2; exit 1; }
     "$gate" || { echo "[pre-commit] gate failed: $(basename "$gate")" >&2; exit 1; }
 done
 

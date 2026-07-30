@@ -6,7 +6,7 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="0.1.4"
+GRUBSTAKE_VERSION="0.1.5"
 GRUBSTAKE_REPO="https://github.com/seriouslysean/grubstake"
 GRUBSTAKE_RAW="https://raw.githubusercontent.com/seriouslysean/grubstake"
 
@@ -214,8 +214,7 @@ verify_tool() {
 
 # ---------------------------------------------------------------------------- commands
 
-cmd_add() {
-    [ $# -ge 1 ] || die "usage: grubstake add <tool>@<version>"
+add_one() {
     _tool="${1%@*}"
     _ver="${1#*@}"
     [ "$_tool" != "$1" ] || die "usage: grubstake add <tool>@<version>"
@@ -253,6 +252,14 @@ cmd_add() {
     trap - EXIT HUP INT TERM
     log "pinned $_tool $_ver"
     install_tool "$_tool" "$_ver"
+}
+
+# Every argument is pinned. Reading only $1 meant a batched call pinned one tool and exited 0.
+cmd_add() {
+    [ $# -ge 1 ] || die "usage: grubstake add <tool>@<version>..."
+    for _spec in "$@"; do
+        add_one "$_spec"
+    done
 }
 
 cmd_ensure() {

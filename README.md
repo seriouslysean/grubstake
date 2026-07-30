@@ -12,10 +12,15 @@ over if anything disagrees.
 Fetch the script and adopt the repo.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/main/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v0.2.0/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
+./grubstake.sh version   # expect 0.2.0
 ./grubstake.sh install
 ```
+
+Install from a release tag, never from `main`. `main` is a moving target, and a tool about
+pinning should not adopt itself from an unpinned ref. The current release is on the
+[releases page](https://github.com/seriouslysean/grubstake/releases/latest).
 
 Then pin whichever tools the repo needs.
 

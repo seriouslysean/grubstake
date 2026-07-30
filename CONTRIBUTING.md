@@ -45,9 +45,7 @@ from inside one of them, so a comment written in that context can carry a privat
 issue number into a public commit. Prose is the leak, not code.
 
 `test/no-leaks.sh` runs as part of the suite and refuses absolute home paths, email addresses, and
-cross-repo issue references. It matches shapes rather than names, because a denylist of private
-repo names could not live in a public repo without being the leak it exists to prevent. For names,
-keep one pattern per line in `.leakwords`, which is gitignored.
+cross-repo issue references. It matches shapes that point outside this repo.
 
 **Issues and pull requests are published too, and no hook can gate them.** Before filing, read the
 body back and remove anything that is not about this repository: which repo hit the bug, what its

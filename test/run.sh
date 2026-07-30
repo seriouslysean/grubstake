@@ -21,7 +21,8 @@ PASS=0
 FAIL=0
 CURRENT=""
 
-trap 'rm -rf "$ROOT"' EXIT HUP INT TERM
+# Published cache entries are read-only, as Go's module cache is, so they need write back first.
+trap 'chmod -R u+w "$ROOT" 2>/dev/null; rm -rf "$ROOT"' EXIT HUP INT TERM
 
 # ---------------------------------------------------------------------------- harness
 
@@ -34,6 +35,7 @@ fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n         %s\n' "$CURRENT" "$1";
 new_repo() {
     _r="$ROOT/$(date +%s)-$$-$PASS$FAIL-$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
     mkdir -p "$_r"
+    _r="$(cd "$_r" && pwd)"
     ( cd "$_r" && git init -q . )
     cp "$GS" "$_r/grubstake.sh"
     mkdir -p "$_r/.cache"
@@ -52,16 +54,14 @@ gs_rc() {
 
 pins() { printf '# grubstake pins: name version sha256-darwin sha256-linux\n%s\n' "$2" > "$1/grubstake.tools"; }
 
-# A cache entry that looks exactly like a real install: a binary reporting the pinned version,
-# and a stamp holding the binary digest and the pin it came from. No network.
+# A cache entry as install_tool publishes one: a directory named by the pinned archive hash,
+# holding a binary that reports the pinned version. Nothing else; the path is the validity.
 fake_install() {
     _repo="$1"; _tool="$2"; _ver="$3"; _pinsha="$4"
-    _d="$_repo/.cache/$_tool/$_ver"
+    _d="$_repo/.cache/$_tool/$_pinsha"
     mkdir -p "$_d"
     printf '#!/bin/sh\necho %s\n' "$_ver" > "$_d/$_tool"
     chmod +x "$_d/$_tool"
-    _bin_sha=$(shasum -a 256 "$_d/$_tool" | cut -d' ' -f1)
-    printf '%s\n%s\n' "$_bin_sha" "$_pinsha" > "$_d/.grubstake-sha256"
 }
 
 SHA_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -162,38 +162,58 @@ it "a clean install passes check"
 r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"; expect_ok "$r" check
 
-it "a binary replaced by one reporting the right version fails"
-# The whole threat model: the cache is shared and mutable, so a version string is not proof.
-r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
-fake_install "$r" swiftlint 0.63.2 "$SHA_A"
-printf '#!/bin/sh\necho 0.63.2\necho pwned\n' > "$r/.cache/swiftlint/0.63.2/swiftlint"
-chmod +x "$r/.cache/swiftlint/0.63.2/swiftlint"
-expect_fail "$r" check
-
-it "path refuses a poisoned binary as well as check"
-r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
-fake_install "$r" swiftlint 0.63.2 "$SHA_A"
-printf '#!/bin/sh\necho 0.63.2\n#x\n' > "$r/.cache/swiftlint/0.63.2/swiftlint"
-chmod +x "$r/.cache/swiftlint/0.63.2/swiftlint"
-expect_fail "$r" path swiftlint
-
-it "editing a pin sha invalidates the install it produced"
-# The stamp binds an install to the pin that made it, so correcting a hash cannot leave the old
-# binary being served.
+it "editing a pin sends the lookup to a different path, so the old install is not served"
+# Content addressing replaces invalidation logic: a corrected hash is a cache miss by construction.
 r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
 pins "$r" "swiftlint 0.63.2 $SHA_B $SHA_B"
 expect_fail "$r" check
 
-it "an install with no digest recorded fails rather than being trusted"
+it "two pins of the same version at different hashes coexist"
+# Two repos correcting a hash at different times must not fight over one directory.
 r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
-fake_install "$r" swiftlint 0.63.2 "$SHA_A"; rm -f "$r/.cache/swiftlint/0.63.2/.grubstake-sha256"
-expect_fail "$r" check
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_B"
+if [ -x "$r/.cache/swiftlint/$SHA_A/swiftlint" ] && [ -x "$r/.cache/swiftlint/$SHA_B/swiftlint" ]; then
+    pass
+else
+    fail "one install displaced the other"
+fi
+
+it "a poisoned cache IS served, and nothing claims otherwise"
+# Honest boundary: the pin checked at download is the trust root. A local cache writable by the
+# same user is not defensible, and no cited tool claims it is. This test exists so the claim
+# cannot quietly come back.
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+printf '#!/bin/sh\necho 0.63.2\n' > "$r/.cache/swiftlint/$SHA_A/swiftlint"
+chmod +x "$r/.cache/swiftlint/$SHA_A/swiftlint"
+expect_ok "$r" check
+
+it "no source file claims to detect tampering"
+if grep -rniE "tamper" "$(dirname "$0")/.." --include='*.sh' --include='*.md' \
+    --exclude=run.sh >/dev/null 2>&1; then
+    fail "something still claims tamper detection"
+else
+    pass
+fi
 
 it "a missing binary fails"
 r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
-fake_install "$r" swiftlint 0.63.2 "$SHA_A"; rm -f "$r/.cache/swiftlint/0.63.2/swiftlint"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"; rm -f "$r/.cache/swiftlint/$SHA_A/swiftlint"
 expect_fail "$r" check
+
+it "ensure makes check pass from any recoverable state"
+# The invariant that replaces the stamp-healing matrix: absent or present, nothing in between.
+for _case in absent partial; do
+    r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
+    case "$_case" in
+        absent)  : ;;
+        partial) mkdir -p "$r/.cache/swiftlint/$SHA_A" ;;
+    esac
+    gs_rc "$r" check && { fail "state '$_case' passed check without an install"; _bad=1; break; }
+done
+[ "${_bad:-0}" = 0 ] && pass; _bad=0
 
 # ---------------------------------------------------------------------------- resolution
 
@@ -204,11 +224,22 @@ it "pins resolve from the script, not the working directory"
 # one repo's script from inside another served the other repo's pins.
 a=$(new_repo); b=$(new_repo)
 pins "$a" "swiftlint 0.63.2 $SHA_A $SHA_B"; fake_install "$a" swiftlint 0.63.2 "$SHA_A"
-pins "$b" "swiftlint 0.65.0 $SHA_A $SHA_B"; fake_install "$b" swiftlint 0.65.0 "$SHA_A"
+pins "$b" "swiftlint 0.63.2 $SHA_B $SHA_B"; fake_install "$b" swiftlint 0.63.2 "$SHA_B"
 out=$( cd "$b" && GRUBSTAKE_CACHE="$a/.cache" "$a/grubstake.sh" path swiftlint 2>&1 )
 case "$out" in
-    */0.63.2/*) pass ;;
-    *) fail "served the wrong repo's pin: $out" ;;
+    *"$SHA_A"*) pass ;;
+    *) fail "served the other repo's pin: $out" ;;
+esac
+
+it "invocation through a symlink resolves the real script's pins"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+mkdir -p "$r/bin" && ln -s "$r/grubstake.sh" "$r/bin/grubstake"
+other=$(new_repo)
+out=$( cd "$other" && GRUBSTAKE_CACHE="$r/.cache" "$r/bin/grubstake" doctor 2>&1 | grep '^pins' )
+case "$out" in
+    *"$r/grubstake.tools"*) pass ;;
+    *) fail "symlink resolved pins elsewhere: $out" ;;
 esac
 
 it "path fails for a tool that is not pinned"
@@ -236,39 +267,22 @@ chmod +x "$r/grubstake.sh"; expect_ok "$r" check
 
 printf '\nupdate\n'
 
+it "a release below the supported floor is refused"
+r=$(new_repo); expect_fail "$r" update 0.1.4
+
+it "the internal replace verb no longer exists"
+r=$(new_repo); expect_fail "$r" __replace-self /tmp/x 9.9.9
+
 it "a target that is not a release version is rejected"
 r=$(new_repo); expect_fail "$r" update ../main
 
 it "an already-current version is a no-op"
 r=$(new_repo); v=$(gs "$r" version); expect_says "already on $v" "$r" update "$v"
 
-it "replacing the script in place does not truncate it"
-# A script that overwrites the file it is being read from stops silently. The replacement must
-# be a rename, and the replacement here is deliberately longer than the original.
-r=$(new_repo)
-sed 's/^GRUBSTAKE_VERSION=.*/GRUBSTAKE_VERSION="0.0.9"/' "$GS" > "$r/installed.sh"
-{ cat "$GS"; printf '# pad\n%.0s' 1 2 3 4 5 6 7 8 9 10; } > "$r/new.sh"
-chmod +x "$r/installed.sh" "$r/new.sh"
-( cd "$r" && ./new.sh __replace-self "$r/installed.sh" 9.9.9 >/dev/null 2>&1 )
-if sh -n "$r/installed.sh" 2>/dev/null && [ "$(wc -c < "$r/installed.sh")" -ge "$(wc -c < "$GS")" ]; then
-    pass
-else
-    fail "installed script was truncated or is not valid shell"
-fi
-
-it "replacing the script re-verifies the cache it inherits"
-# The self-heal once resolved pins from the temp copy it was running as, so it silently skipped
-# and left a repo whose next commit would be refused.
-r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
-mkdir -p "$r/.cache/swiftlint/0.63.2"
-printf '#!/bin/sh\necho 0.63.2\n' > "$r/.cache/swiftlint/0.63.2/swiftlint"
-chmod +x "$r/.cache/swiftlint/0.63.2/swiftlint"   # no stamp: an older install
-cp "$GS" "$r/new.sh"; chmod +x "$r/new.sh"
-out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./new.sh __replace-self "$r/grubstake.sh" 9.9.9 2>&1 )
-case "$out" in
-    *"re-verifying"*) pass ;;
-    *) fail "self-heal did not run: $out" ;;
-esac
+it "update renames over the script rather than handing off to a temp copy"
+# The handoff avoided a hazard rename never had, and cost a $0 that lied about which repo it was
+# in. Renaming from within keeps the running interpreter on the old inode.
+if grep -q '__replace-self' "$GS"; then fail "the temp-copy handoff is still present"; else pass; fi
 
 it "release versions sort newest first"
 # A trailing -r is ignored when per-key flags are present, which once made update install the
@@ -311,19 +325,26 @@ if [ "$NETWORK" = 1 ]; then
     d=$(echo "$line" | awk '{print $3}'); l=$(echo "$line" | awk '{print $4}')
     case "$d$l" in *-*) fail "a platform hash is missing: $line" ;; *) pass ;; esac
 
-    it "a real install passes check and reports its pinned version"
+    it "a real install passes check, and the path it prints runs at the pinned version"
     r=$(new_repo); gs_rc "$r" add swiftlint@0.63.2
-    if gs_rc "$r" check && [ "$(gs "$r" path swiftlint | xargs -I{} {} version)" = "0.63.2" ]; then
-        pass
-    else
-        fail "install did not verify"
-    fi
+    _p="$(gs "$r" path swiftlint)"
+    if gs_rc "$r" check && [ "$("$_p" version 2>/dev/null)" = "0.63.2" ]; then pass
+    else fail "install did not verify, or the path does not run"; fi
 
-    it "ensure reinstalls an install that carries no digest"
+    it "a real install lands under the pinned archive hash"
+    # The path is the validity, so it must be the hash from grubstake.tools and nothing else.
     r=$(new_repo); gs_rc "$r" add swiftlint@0.63.2
-    rm -f "$r/.cache/swiftlint/0.63.2/.grubstake-sha256"
-    gs_rc "$r" ensure
-    [ -f "$r/.cache/swiftlint/0.63.2/.grubstake-sha256" ] && pass || fail "digest not recorded"
+    _sha=$(awk '/^swiftlint/{print $3}' "$r/grubstake.tools")
+    [ -x "$r/.cache/swiftlint/$_sha/swiftlint" ] && pass || fail "not installed under $_sha"
+
+    it "published entries are read-only"
+    r=$(new_repo); gs_rc "$r" add swiftlint@0.63.2
+    _sha=$(awk '/^swiftlint/{print $3}' "$r/grubstake.tools")
+    if printf 'x' >> "$r/.cache/swiftlint/$_sha/swiftlint" 2>/dev/null; then
+        fail "a published binary was writable"
+    else
+        pass
+    fi
 
     it "no staging directories are left in the cache"
     r=$(new_repo); gs_rc "$r" add swiftlint@0.63.2

@@ -14,7 +14,7 @@ point of this migration is to change the mechanism, not the versions.
 ## Phase 1: pin the tools, change nothing else
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v0.2.2/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v0.3.0/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
 ./grubstake.sh version   # confirm it matches the tag you asked for
 ```
@@ -66,11 +66,15 @@ Resolve from the repository root, before anything changes directory. That is the
 exists to prevent: a tool manager that reads its manifest relative to the working directory drops
 the pin when a script moves, and installs whatever is newest without saying so.
 
-`path` verifies the binary before printing it, so a tampered cache fails here rather than later. It
-also installs the tool if it is missing, which is what lets this phase work before CI knows about
+`path` installs the tool if it is missing, which is what lets this phase work before CI knows about
 grubstake. That means a call to `path` can reach the network. The shipped pre-commit hook runs
 `check` first, which fails with an instruction to run `ensure` rather than downloading mid-commit,
 so keep that ordering in any hook of your own.
+
+The pin is checked when the archive is downloaded, and the cache is keyed by that hash, so editing
+a pin is a cache miss rather than something that has to be detected. What the cache cannot do is
+defend itself: it lives in your home directory and anything able to write to it can write to all
+of it.
 
 Run the repo's lint and validation entry points and confirm the results are unchanged. Every commit
 from here to the end of phase 3 should be pushable and green.

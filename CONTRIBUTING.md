@@ -64,6 +64,10 @@ not its name.
    published a tag whose script identified as the previous version.
 5. Tag `vX.Y.Z`, push the tag, publish a release naming the issues it closes.
 
+Tags are annotated, so `git clone --branch vX.Y.Z` prints `refs/tags/... is not a commit!` and
+then checks out the commit the tag points at. That is git dereferencing a tag object and is
+expected; the checkout is correct.
+
 Tags matching `v*` are protected against deletion, update, and force-push, because a version pin is
 only meaningful if the tag it names cannot move. A release cannot be corrected in place, so a
 mistake costs a patch version. That is deliberate.

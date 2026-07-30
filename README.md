@@ -12,9 +12,9 @@ over if anything disagrees.
 Fetch the script and adopt the repo.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v0.2.1/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v0.2.2/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
-./grubstake.sh version   # expect 0.2.1
+./grubstake.sh version   # expect 0.2.2
 ./grubstake.sh install
 ```
 

@@ -64,6 +64,11 @@ fake_install() {
     chmod +x "$_d/$_tool"
 }
 
+# A test that fabricates an entry and then runs grubstake pins the SAME hash in both columns.
+# pin_sha reads the column for the running platform, so pinning darwin and linux differently puts
+# the entry at a path only one platform ever looks in, and the test asserts nothing on the other.
+# That is how three tests came to pass only on darwin. Pin the columns differently only when the
+# difference is the thing under test.
 SHA_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 SHA_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
@@ -159,12 +164,12 @@ r=$(new_repo); pins "$r" "garbage 1.0.0 $SHA_A $SHA_B"; expect_fail "$r" doctor
 printf '\ncache integrity\n'
 
 it "a clean install passes check"
-r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"; expect_ok "$r" check
 
 it "editing a pin sends the lookup to a different path, so the old install is not served"
 # Content addressing replaces invalidation logic: a corrected hash is a cache miss by construction.
-r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
 pins "$r" "swiftlint 0.63.2 $SHA_B $SHA_B"
 expect_fail "$r" check
@@ -184,7 +189,7 @@ it "a poisoned cache IS served, and nothing claims otherwise"
 # Honest boundary: the pin checked at download is the trust root. A local cache writable by the
 # same user is not defensible, and no cited tool claims it is. This test exists so the claim
 # cannot quietly come back.
-r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
 printf '#!/bin/sh\necho 0.63.2\n' > "$r/.cache/swiftlint/$SHA_A/swiftlint"
 chmod +x "$r/.cache/swiftlint/$SHA_A/swiftlint"
@@ -199,14 +204,14 @@ else
 fi
 
 it "a missing binary fails"
-r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"; rm -f "$r/.cache/swiftlint/$SHA_A/swiftlint"
 expect_fail "$r" check
 
 it "ensure makes check pass from any recoverable state"
 # The invariant that replaces the stamp-healing matrix: absent or present, nothing in between.
 for _case in absent partial; do
-    r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
+    r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
     case "$_case" in
         absent)  : ;;
         partial) mkdir -p "$r/.cache/swiftlint/$SHA_A" ;;
@@ -223,7 +228,7 @@ it "pins resolve from the script, not the working directory"
 # This is the failure grubstake exists to prevent, and it was once present in grubstake: running
 # one repo's script from inside another served the other repo's pins.
 a=$(new_repo); b=$(new_repo)
-pins "$a" "swiftlint 0.63.2 $SHA_A $SHA_B"; fake_install "$a" swiftlint 0.63.2 "$SHA_A"
+pins "$a" "swiftlint 0.63.2 $SHA_A $SHA_A"; fake_install "$a" swiftlint 0.63.2 "$SHA_A"
 pins "$b" "swiftlint 0.63.2 $SHA_B $SHA_B"; fake_install "$b" swiftlint 0.63.2 "$SHA_B"
 out=$( cd "$b" && GRUBSTAKE_CACHE="$a/.cache" "$a/grubstake.sh" path swiftlint 2>&1 )
 case "$out" in
@@ -232,7 +237,7 @@ case "$out" in
 esac
 
 it "invocation through a symlink resolves the real script's pins"
-r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
 mkdir -p "$r/bin" && ln -s "$r/grubstake.sh" "$r/bin/grubstake"
 other=$(new_repo)

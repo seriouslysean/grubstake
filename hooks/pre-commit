@@ -21,17 +21,31 @@ if [ -n "$STAGED_SWIFT" ]; then
     # Verify and refuse rather than format-and-restage: re-adding after a fix folds unrelated
     # hunks into a partial `git add -p` and re-stages a working-tree deletion of a file staged
     # as new. The developer fixes and re-stages; the hook never touches the index.
+    #
+    # Known limitation: SwiftLint reads the working tree, so this checks the current contents of
+    # files whose paths are staged, not the staged blobs. Linting a temp copy would break config
+    # resolution, and stashing the remainder to lint the index is what strands work in the tools
+    # that do it. The divergence is warned about below, and CI lints the committed tree.
     OUT=$(git diff --cached --name-only -z --diff-filter=ACMR -- '*.swift' \
         | xargs -0 "$SWIFTLINT" lint --strict --quiet 2>&1) && RC=0 || RC=$?
     if [ "$RC" -ne 0 ]; then
         # SwiftLint exits non-zero with this message when every staged path is excluded by config.
         if ! echo "$OUT" | grep -q "No lintable files found"; then
             echo "$OUT" >&2
-            echo "[pre-commit] swiftlint failed on staged files. Fix, re-stage, retry." >&2
+            echo "[pre-commit] swiftlint failed on working-tree contents of staged Swift paths." >&2
+            echo "[pre-commit] fix, re-stage, retry." >&2
             exit 1
         fi
     fi
     [ -n "$OUT" ] && echo "$OUT"
+
+    # Fires on exactly the case the retry loop creates: lint fails, the file is fixed, the commit
+    # is retried without re-staging, and the stale blob commits while the hook reads clean bytes.
+    # Advisory only, since a divergence is legitimate under `git add -p`.
+    if git status --porcelain -- '*.swift' | grep -q '^[ACMR]M'; then
+        echo "[pre-commit] warning: staged Swift files have unstaged edits. Lint read the working" >&2
+        echo "[pre-commit] tree, not what is being committed. Re-stage if the fix belongs here." >&2
+    fi
 fi
 
 for gate in "$ROOT"/.githooks/pre-commit.d/*; do

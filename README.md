@@ -68,6 +68,11 @@ downloaded ever lands in the repo. Set `GRUBSTAKE_CACHE` if you want them somewh
 Checks that belong to one repo go in `.githooks/pre-commit.d/`, where the spine will find and run
 them. Do not edit the spine itself, because `update` replaces it wholesale.
 
+The pre-commit lint reads the working tree rather than the staged blobs, so it checks the current
+contents of files whose paths are staged. Linting a copy would break SwiftLint's config resolution,
+and stashing the unstaged remainder is what strands work in the tools that do it, so the hook warns
+when the two diverge instead and leaves the committed tree to CI.
+
 ## Tools
 
 grubstake knows how to install `swiftlint`, `swiftformat`, `xcbeautify`, and `periphery`.

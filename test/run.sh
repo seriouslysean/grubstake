@@ -300,22 +300,33 @@ it "the previous release can update to this one"
 # The suite asserted the destination and never the journey: it checked that the internal replace
 # verb was gone, while every older client still called it. Removing a verb only old versions speak
 # is the one change that cannot be fixed forward.
+#
+# Resolved from the remote, not from local tags: a shallow clone by tag has one tag, which made
+# this report a failure when the real cause was "nothing to compare against". A test that cannot
+# tell "I could not run" from "the thing is broken" gets ignored the first time it goes red.
 if [ "$NETWORK" = 1 ]; then
-    r=$(new_repo)
-    _prev=$( (cd "$ROOT/.." 2>/dev/null; git -C "$(dirname "$GS")" tag --list 'v*' \
-        | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-        | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | sed -n 2p) )
-    if [ -n "$_prev" ] && curl -fsSL "https://raw.githubusercontent.com/seriouslysean/grubstake/v$_prev/grubstake.sh" -o "$r/grubstake.sh" 2>/dev/null; then
-        chmod +x "$r/grubstake.sh"
-        _now="$(gs "$r" version)"
-        gs_rc "$r" update
-        _after="$(gs "$r" version)"
-        [ "$_after" != "$_now" ] && pass || fail "update from $_now did not move it (still $_after)"
+    _repo="$(sed -n 's/^GRUBSTAKE_REPO="\(.*\)"/\1/p' "$GS")"
+    _prev=$(git ls-remote --tags --refs "$_repo" 'v*' 2>/dev/null \
+        | awk '{print $2}' | sed 's|refs/tags/v||' \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+        | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | sed -n 2p)
+    if [ -z "$_prev" ]; then
+        printf '  skip  %s\n' "$CURRENT (fewer than two releases published)"
     else
-        fail "could not fetch the previous release to test the upgrade path"
+        r=$(new_repo)
+        if curl -fsSL "https://raw.githubusercontent.com/seriouslysean/grubstake/v$_prev/grubstake.sh" \
+             -o "$r/grubstake.sh" 2>/dev/null; then
+            chmod +x "$r/grubstake.sh"
+            _now="$(gs "$r" version)"
+            gs_rc "$r" update
+            _after="$(gs "$r" version)"
+            if [ "$_after" != "$_now" ]; then pass; else fail "update from $_now did not move it (still $_after)"; fi
+        else
+            fail "v$_prev is published but could not be fetched"
+        fi
     fi
 else
-    pass   # network required
+    printf '  skip  %s (network)\n' "$CURRENT"
 fi
 
 # Sourcing the script would run main and exit, so pull the functions under test out by name.

@@ -87,6 +87,16 @@ fake_install() {
     chmod +x "$_d/$_tool"
 }
 
+# For tests that cannot pin the same hash in both columns because they read a hash `add` wrote
+# for real over the network: a hardcoded column asserts against a path only one platform installs to.
+sha_column() {
+    case "$(uname -s)" in
+        Darwin) echo 3 ;;
+        Linux)  echo 4 ;;
+        *)      fixture_die "sha_column: no pin column for $(uname -s)" ;;
+    esac
+}
+
 # A test that fabricates an entry and then runs grubstake pins the SAME hash in both columns.
 # pin_sha reads the column for the running platform, so pinning darwin and linux differently puts
 # the entry at a path only one platform ever looks in, and the test asserts nothing on the other.
@@ -691,13 +701,19 @@ if [ "$NETWORK" = 1 ]; then
     it "a real install lands under the pinned archive hash"
     # The path is the validity, so it must be the hash from grubstake.tools and nothing else.
     r=$(new_repo); gs_rc "$r" add swiftlint@0.63.2
-    _sha=$(awk '/^swiftlint/{print $3}' "$r/grubstake.tools")
-    [ -x "$r/.cache/swiftlint/$_sha/swiftlint" ] && pass || fail "not installed under $_sha"
+    _sha=$(awk -v c="$(sha_column)" '/^swiftlint/{print $c}' "$r/grubstake.tools")
+    _bin="$r/.cache/swiftlint/$_sha/swiftlint"
+    [ -x "$_bin" ] && pass || fail "not installed at $_bin (column $(sha_column), sha $_sha)"
 
     it "published entries are read-only"
     r=$(new_repo); gs_rc "$r" add swiftlint@0.63.2
-    _sha=$(awk '/^swiftlint/{print $3}' "$r/grubstake.tools")
-    if { printf 'x' >> "$r/.cache/swiftlint/$_sha/swiftlint"; } 2>/dev/null; then
+    _sha=$(awk -v c="$(sha_column)" '/^swiftlint/{print $c}' "$r/grubstake.tools")
+    _bin="$r/.cache/swiftlint/$_sha/swiftlint"
+    # An append refused because the path is wrong reads identically to one refused because the
+    # file is read-only, so writability is only provable against an entry that exists.
+    if [ ! -x "$_bin" ]; then
+        fail "not installed at $_bin (column $(sha_column), sha $_sha), so writability was never tested"
+    elif { printf 'x' >> "$_bin"; } 2>/dev/null; then
         fail "a published binary was writable"
     else
         pass

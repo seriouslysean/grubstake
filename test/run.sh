@@ -2222,7 +2222,11 @@ if "$(dirname "$0")/no-leaks.sh" >/dev/null 2>&1; then pass; else fail "$("$(dir
 # leave it green. A throwaway repo with a known-dirty shape closes that.
 leaks_repo() {
     _lr="$(new_repo)"
-    ( cd "$_lr" && git config commit.gpgsign false ) || fixture_die "cannot configure $_lr"
+    # A CI runner has no global identity, so a fixture that commits has to carry its own.
+    ( cd "$_lr" \
+      && git config user.email test@example.invalid \
+      && git config user.name "grubstake suite" \
+      && git config commit.gpgsign false ) || fixture_die "cannot configure $_lr"
     mkdir -p "$_lr/test" || fixture_die "cannot create $_lr/test"
     cp "$(dirname "$0")/no-leaks.sh" "$_lr/test/no-leaks.sh" || fixture_die "cannot copy no-leaks.sh into $_lr"
     chmod +x "$_lr/test/no-leaks.sh" || fixture_die "cannot make no-leaks.sh executable in $_lr"

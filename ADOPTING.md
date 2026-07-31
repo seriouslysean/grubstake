@@ -78,9 +78,14 @@ grubstake. That means a call to `path` can reach the network. The shipped pre-co
 so keep that ordering in any hook of your own.
 
 The pin is checked when the archive is downloaded, and the cache is keyed by that hash, so editing
-a pin is a cache miss rather than something that has to be detected. What the cache cannot do is
-defend itself: it lives in your home directory and anything able to write to it can write to all
-of it.
+a pin is a cache miss rather than something that has to be detected. `ensure` also re-verifies each
+published entry against a receipt recorded at install: an entry from before this existed gets one
+written in place, offline, against whatever is already there, and an entry that no longer matches
+its receipt is reported rather than replaced, since nothing here will delete a binary another repo
+might be executing. Both stay inside the same trust boundary: a receipt cannot say why the bytes
+changed, and it cannot stop a person or process already trusted to write to the cache from rewriting
+it too. What the cache cannot do is defend itself: it lives in your home directory and anything able
+to write to it can write to all of it.
 
 Run the repo's lint and validation entry points and confirm the results are unchanged. Every commit
 from here to the end of phase 3 should be pushable and green.

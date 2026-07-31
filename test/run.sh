@@ -587,6 +587,529 @@ else
     pass
 fi
 
+# ---------------------------------------------------------------------------- cache integrity: receipts
+#
+# #47: publish_dir's winner branch is "[ -x dest/tool ]" alone, so a corrupted-but-executable dest
+# is trusted without ever re-reading what arrived. These tests are written against the receipt
+# design in #47/#2 before it exists: a three-line .grubstake-receipt ("receipt 1" / binary-sha256 /
+# version) staged before publish so it rides the atomic mv and is hardened read-only with the rest
+# of the entry.
+#
+# Design correction: the first receipt design repaired a mismatched or receiptless entry by
+# destroying it in place (rm -rf, then republish), which an antagonist pass showed briefly removes
+# the hash-named path -- a second repo sharing the same machine-wide cache and executing that path
+# saw ENOENT partway through, 9/40 iterations. publish_dir now only ever clears an entry with no
+# executable at all (debris, exactly as before receipts existed); a mismatch is install_tool's
+# refusal to make, never publish_dir's repair to attempt, and a legacy or skewed-format receipt is
+# written beside the existing binary in place, offline, never by destroying and redownloading it.
+
+printf '\ncache integrity: receipts\n'
+
+# Independent of grubstake.sh's own sha256_file, so a fixture never leans on the code under test to
+# build its own expectations.
+sha256_of() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        fixture_die "no shasum or sha256sum to hash $1"
+    fi
+}
+
+# A well-formed receipt beside a binary a test has already placed at $1/$2: "receipt 1", that
+# binary's own sha256, then the given version. fake_install builds the receiptless shape a
+# pre-receipt release leaves behind; this is what the same layout looks like once a receipt has
+# been written beside it.
+fake_receipt() {
+    _dir="$1"; _tool="$2"; _ver="$3"
+    printf 'receipt 1\nbinary-sha256 %s\nversion %s\n' "$(sha256_of "$_dir/$_tool")" "$_ver" > "$_dir/.grubstake-receipt"
+}
+
+# Sourcing the script would run main and exit, so pull the functions under test out by name. The
+# sed ranges are keyed to exact brace formatting: move an opening brace to the next line and the
+# extraction silently yields nothing, the generated script exits 127 without ever calling the
+# function, and a test that only checks for the absence of a lock directory reports ok. An empty
+# or truncated extraction is a harness fault, not a result, so it stops the run.
+#
+# publish_dir consults neither entry_verified nor a receipt: its winner rule is bare executable
+# existence, deliberately, after three antagonist rounds fought over exactly this -- a mismatch is
+# surfaced by install_tool's own deeper pass before publish_dir is ever reached, never repaired by
+# publish_dir itself, so a live binary is never cleared out from under a concurrent reader. That
+# keeps with_lock and publish_dir the whole call graph; neither reaches sha256_file, receipt_file,
+# or entry_verified, so extracting those would carry dead weight into the generated script. Defined
+# here, ahead of every caller in the file (the update section's included), since the earliest of
+# those callers is the receipt tests just below.
+extract_fns() {
+    _fns="$(sed -n '/^with_lock() {/,/^}/p;/^publish_dir() {/,/^}/p' "$GS")"
+    for _f in with_lock publish_dir; do
+        printf '%s\n' "$_fns" | grep -q "^$_f() {$" \
+            || fixture_die "extract_fns: no '$_f() {' line in $GS (reformatted?)"
+    done
+    # Neither function nests a line-anchored brace, so anything but one close each means a range ran on.
+    _closes="$(printf '%s\n' "$_fns" | grep -c '^}$' | tr -d ' ')"
+    [ "$_closes" = 2 ] || fixture_die "extract_fns: $_closes closing braces, expected 2 (truncated)"
+    printf '%s\n' "$_fns"
+}
+
+it "ensure refuses a binary that no longer matches its receipt, rather than reinstalling over it"
+# The original design repaired a mismatch by reinstalling over the existing entry: rm -rf the
+# destination, then mv a freshly downloaded copy into place. A second repo already resolved to that
+# path and executing it in a loop saw ENOENT in the gap between the two (an antagonist pass
+# reproduced it 9/40 iterations; see "two repos sharing one cache: a legacy upgrade must not break a
+# concurrent exec" below). Since the cache is machine-wide and another repo may be running this
+# exact binary right now, ensure now refuses and tells the human what to do instead of touching it.
+# fake_install cannot reach this: it never leaves a genuine receipt to mismatch, so fake_release
+# seeds a real one via a real (offline) install first.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+[ "$_rc" -eq 0 ] || fixture_die "cannot seed a clean install to tamper with (rc $_rc): $_out"
+_d="$r/.cache/swiftlint/$_sha"
+_bin="$_d/swiftlint"
+_receipt="$_d/.grubstake-receipt"
+chmod u+w "$_bin"
+printf '#!/bin/sh\necho tampered\n' > "$_bin"
+chmod +x "$_bin"
+_bin_before="$(cat "$_bin")"
+_inode_before="$(ls -i "$_bin" | awk '{print $1}')"
+_receipt_before="$(cat "$_receipt")"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+_bin_after="$(cat "$_bin" 2>/dev/null)"
+_inode_after="$(ls -i "$_bin" 2>/dev/null | awk '{print $1}')"
+_receipt_after="$(cat "$_receipt" 2>/dev/null)"
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 over a binary that no longer matches its receipt: $_out"
+elif ! printf '%s' "$_out" | grep -q "does not match its receipt"; then
+    fail "refused, but without a receipt-mismatch warning: $_out"
+elif ! printf '%s' "$_out" | grep -F -q "$_d"; then
+    fail "refused, but did not name the entry's directory: $_out"
+elif ! printf '%s' "$_out" | grep -Eqi "clean|remove"; then
+    fail "refused, but did not tell the user how to recover (expected 'clean' or 'remove'): $_out"
+elif [ "$_bin_after" != "$_bin_before" ]; then
+    fail "the binary's bytes changed even though ensure refused: $_out"
+elif [ "$_inode_after" != "$_inode_before" ]; then
+    fail "the binary was unlinked and rebuilt (inode changed) even though ensure refused -- this is the destroy-in-place hazard: $_out"
+elif [ "$_receipt_after" != "$_receipt_before" ]; then
+    fail "the receipt itself was rewritten even though ensure refused to touch the entry: $_out"
+else
+    pass
+fi
+
+it "a legacy entry is upgraded to a receipt without ceremony"
+# The receipt is written beside the existing binary in place, offline: no download, no destroy.
+# AGENTS.md 2 already covers what arrived over the network; this only records the hash of what is
+# already trusted on disk, for next time -- there is nothing left here for fake_release's real
+# (if offline) install cycle to exercise, so fake_install's plain receiptless entry is enough. A
+# curl that always fails is put on PATH deliberately, not curl's mere absence, so a version that
+# quietly reaches the real network to "reinstall" fails loudly here instead of leaving this test
+# green by accident.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"   # receiptless: exactly what a pre-receipt release left behind
+_bin="$r/.cache/swiftlint/$SHA_A/swiftlint"
+_bin_before="$(cat "$_bin")"
+_inode_before="$(ls -i "$_bin" | awk '{print $1}')"
+_shims="$(mktemp -d "$ROOT/legacy-no-net.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+_receipt="$r/.cache/swiftlint/$SHA_A/.grubstake-receipt"
+_bin_after="$(cat "$_bin" 2>/dev/null)"
+_inode_after="$(ls -i "$_bin" 2>/dev/null | awk '{print $1}')"
+if [ "$_rc" -ne 0 ]; then
+    fail "ensure refused a legacy entry that merely predates receipts, even with no network reachable (rc $_rc): $_out"
+elif [ ! -f "$_receipt" ]; then
+    fail "ensure did not write a receipt for the legacy entry: $_out"
+elif printf '%s' "$_out" | grep -q "does not match its receipt"; then
+    fail "a legacy entry with no receipt was reported as receipt-mismatched, not upgraded: $_out"
+elif [ "$(awk '/^binary-sha256/{print $2}' "$_receipt" 2>/dev/null)" != "$(sha256_of "$_bin")" ]; then
+    fail "the receipt does not record the on-disk binary's own hash: $(cat "$_receipt" 2>/dev/null)"
+elif [ "$_bin_after" != "$_bin_before" ]; then
+    fail "the binary's bytes changed even though nothing should have reinstalled it: $_out"
+elif [ "$_inode_after" != "$_inode_before" ]; then
+    fail "the binary was replaced (inode changed) even though the receipt was supposed to be written in place: $_out"
+elif find "$r/.cache/swiftlint/$SHA_A" -maxdepth 1 -name '.grubstake-receipt.tmp.*' 2>/dev/null | grep -q .; then
+    fail "a temp receipt file from the atomic write was left behind: $_out"
+else
+    pass
+fi
+
+it "check is not blocked by an entry that predates receipts"
+# The incident guard from CONTRIBUTING.md's "When a fix changes behaviour on upgrade": cache
+# verification once landed without accounting for existing caches carrying no digest, and the first
+# check after upgrading refused every commit until someone ran ensure. verify_tool/check stay
+# existence-only on purpose, so a receiptless legacy entry must pass check the moment this design
+# lands, not just after ensure re-touches it. This passes today; see the scratch proof in this
+# dispatch's report that a version requiring a receipt inside verify_tool makes it fail, per
+# AGENTS.md rule 14.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"   # no receipt: exactly what a pre-receipt release left behind
+expect_ok "$r" check
+
+it "publish_dir never clears an entry whose binary exists"
+# Inverted after the design correction above: publish_dir no longer repairs a mismatched-receipt
+# winner in place -- that destroy-then-republish is exactly what opened the ENOENT window for a
+# concurrent repo (see "two repos sharing one cache: a legacy upgrade must not break a concurrent
+# exec" below). The winner rule is executable-presence alone now, same as before receipts existed; a
+# mismatch is install_tool's refusal to make (see "ensure refuses a binary that no longer matches its
+# receipt, rather than reinstalling over it" above), never publish_dir's to touch.
+r=$(new_repo)
+_d="$r/dest"; _st="$r/dest.staging.333"
+mkdir -p "$_st"; printf 'staged-bytes' > "$_st/swiftlint"; chmod +x "$_st/swiftlint"
+mkdir -p "$_d"; printf 'original-bytes' > "$_d/swiftlint"; chmod +x "$_d/swiftlint"
+fake_receipt "$_d" swiftlint 0.63.2
+printf 'corrupted-bytes' > "$_d/swiftlint"   # mismatched: bytes no longer match the receipt beside them
+{ extract_fns; echo 'die() { echo "$1" >&2; exit 1; }'; echo 'warn() { echo "WARN: $1" >&2; }'; echo 'publish_dir "$1" "$2" "$3"'; } > "$r/t.sh"
+_out=$( cd "$r" && sh "$r/t.sh" "$_st" "$_d" swiftlint 2>&1 ); _rc=$?
+_after="$(cat "$_d/swiftlint" 2>/dev/null)"
+if [ "$_rc" -ne 0 ]; then
+    fail "the generated script exited $_rc, so publish_dir did not run: $_out"
+elif [ -e "$_st" ]; then
+    fail "the staging directory was not discarded: $_st still exists"
+elif [ "$_after" != "corrupted-bytes" ]; then
+    fail "the existing binary was replaced even though it still exists at the hash-named path: $_out"
+elif printf '%s' "$_out" | grep -q "does not match its receipt"; then
+    fail "publish_dir still warns about (and by implication repairs) a mismatched receipt: $_out"
+else
+    pass
+fi
+chmod -R u+w "$r" 2>/dev/null
+
+it "the receipt rides publish and is read-only"
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+_d="$r/.cache/swiftlint/$_sha"
+_receipt="$_d/.grubstake-receipt"
+if [ "$_rc" -ne 0 ]; then
+    fail "ensure did not even install cleanly (rc $_rc): $_out"
+elif [ ! -f "$_receipt" ]; then
+    fail "no receipt was written beside the published binary: $_out"
+elif [ "$(sed -n 1p "$_receipt")" != "receipt 1" ]; then
+    fail "the receipt's first line was not 'receipt 1': $(cat "$_receipt" 2>/dev/null)"
+elif [ "$(awk '/^binary-sha256/{print $2}' "$_receipt")" != "$(sha256_of "$_d/swiftlint")" ]; then
+    fail "the receipt's sha does not match the published binary: $(cat "$_receipt" 2>/dev/null)"
+else
+    # A no-op chmod (root, or a filesystem that ignores it) would let a naive append succeed and
+    # prove nothing, the same trap "a read-only published entry does not defeat cache removal" above
+    # already guards against for the binary itself.
+    { printf x >> "$_receipt"; } 2>/dev/null \
+        && fixture_die "chmod -R a-w did not make $_receipt read-only (running as root?)"
+    pass
+fi
+
+it "editing a pin's version does not relabel a binary that never reported it"
+# AGENTS.md 3: a tool has to report the version it was pinned to, since the hash only proves what
+# arrived. Relabeling a receipt straight from the pin, with no check against the binary, would let
+# grubstake claim a version the installed binary has never been shown to have -- exactly the
+# scenario "a version-only receipt edit is corrected in place, not re-fetched" below must NOT also
+# accept: there, the binary genuinely reports the newly pinned version, so the receipt's line is
+# what was stale. Here, only the pin changed underneath an unchanged hash and an unchanged binary,
+# so the binary still reports the OLD version, and the entry must be refused, not relabeled. No curl
+# is reachable, so a refusal reached without ever attempting a download is what proves this is
+# install_tool's own reported_version assertion firing, not a network failure standing in for it.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+[ "$_rc" -eq 0 ] || fixture_die "cannot seed a clean install to edit the pin against (rc $_rc): $_out"
+_d="$r/.cache/swiftlint/$_sha"
+_bin="$_d/swiftlint"
+_receipt="$_d/.grubstake-receipt"
+_bin_before="$(cat "$_bin")"
+_inode_before="$(ls -i "$_bin" | awk '{print $1}')"
+_receipt_before="$(cat "$_receipt")"
+pins "$r" "swiftlint 0.65.0 $_sha $_sha"   # same hash, edited version: the binary never became 0.65.0
+_shims="$(mktemp -d "$ROOT/no-net-version-refuse.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+_bin_after="$(cat "$_bin" 2>/dev/null)"
+_inode_after="$(ls -i "$_bin" 2>/dev/null | awk '{print $1}')"
+_receipt_after="$(cat "$_receipt" 2>/dev/null)"
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 after the pin's version changed under an unchanged hash: a binary the pin never verified was relabeled: $_out"
+elif ! printf '%s' "$_out" | grep -q "0.63.2"; then
+    fail "refused, but did not name the version the binary actually reports: $_out"
+elif ! printf '%s' "$_out" | grep -q "0.65.0"; then
+    fail "refused, but did not name the newly pinned version: $_out"
+elif [ "$_receipt_after" != "$_receipt_before" ]; then
+    fail "the receipt was relabeled even though the binary never reported the newly pinned version: $(cat "$_receipt" 2>/dev/null)"
+elif [ "$_bin_after" != "$_bin_before" ]; then
+    fail "the binary's bytes changed even though nothing should have been re-fetched: $_out"
+elif [ "$_inode_after" != "$_inode_before" ]; then
+    fail "the binary was replaced (inode changed) even though ensure refused: $_out"
+else
+    pass
+fi
+
+it "a version-only receipt edit is corrected in place, not re-fetched"
+# The version-mismatch path used to warn and "reinstall": a real download, verified, staged, and
+# handed to publish_dir -- which discards that fresh staging outright, since the existing binary at
+# this hash-named path already makes it the winner (see "publish_dir never clears an entry whose
+# binary exists" above). The wrong version line could therefore never actually be corrected; the
+# download and the warning would repeat, forever, on every single ensure. Now, when the binary still
+# matches its receipt and only the version line disagrees with the pin, the receipt is rewritten in
+# place instead -- no download at all, so no curl shim is put on PATH for the corrective run: any
+# attempt to reach one fails hard rather than silently reaching this sandbox's real network.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+[ "$_rc" -eq 0 ] || fixture_die "cannot seed a clean install to edit the receipt against (rc $_rc): $_out"
+_d="$r/.cache/swiftlint/$_sha"
+_bin="$_d/swiftlint"
+_receipt="$_d/.grubstake-receipt"
+_bin_before="$(cat "$_bin")"
+_inode_before="$(ls -i "$_bin" | awk '{print $1}')"
+chmod u+w "$_d" 2>/dev/null
+# Tamper only the receipt's version line, not the pin and not the binary: the pin still correctly
+# says 0.63.2, and the binary still hashes to what the receipt's own binary-sha256 line records.
+sed 's/^version .*/version 0.60.0/' "$_receipt" > "$_receipt.tmp" && mv "$_receipt.tmp" "$_receipt"
+_shims="$(mktemp -d "$ROOT/no-net-version-fix.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+_bin_after="$(cat "$_bin" 2>/dev/null)"
+_inode_after="$(ls -i "$_bin" 2>/dev/null | awk '{print $1}')"
+_rver="$(awk '/^version/{print $2}' "$_receipt" 2>/dev/null)"
+if [ "$_rc" -ne 0 ]; then
+    fail "ensure did not correct a version-only receipt edit with no network reachable (rc $_rc): $_out"
+elif [ "$_rver" != "0.63.2" ]; then
+    fail "the receipt's version line was not corrected to the pinned version: $(cat "$_receipt" 2>/dev/null)"
+elif [ "$_bin_after" != "$_bin_before" ]; then
+    fail "the binary's bytes changed even though nothing should have been re-fetched: $_out"
+elif [ "$_inode_after" != "$_inode_before" ]; then
+    fail "the binary was replaced (inode changed) instead of the receipt being rewritten in place: $_out"
+else
+    _out2=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc2=$?
+    if [ "$_rc2" -ne 0 ]; then
+        fail "a second ensure over the now-corrected entry failed (rc $_rc2): $_out2"
+    elif printf '%s' "$_out2" | grep -qE "updated the receipt to pinned|entry records version"; then
+        fail "the version-mismatch warning repeated on a second ensure over an already-corrected entry: $_out2"
+    else
+        pass
+    fi
+fi
+
+it "an unknown receipt format is skew, not tampering"
+# A receipt in a format this version does not recognize is not evidence the bytes changed, so it now
+# takes the same offline, in-place path as a legacy receiptless entry (see "a legacy entry is
+# upgraded to a receipt without ceremony" above) -- rewritten beside the existing binary, never a
+# reason to reinstall -- rather than the refusal a genuine hash mismatch gets.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+_d="$r/.cache/swiftlint/$SHA_A"
+_bin="$_d/swiftlint"
+fake_receipt "$_d" swiftlint 0.63.2
+sed 's/^receipt 1/receipt 2/' "$_d/.grubstake-receipt" > "$_d/.grubstake-receipt.tmp" \
+    && mv "$_d/.grubstake-receipt.tmp" "$_d/.grubstake-receipt"
+_bin_before="$(cat "$_bin")"
+_inode_before="$(ls -i "$_bin" | awk '{print $1}')"
+_shims="$(mktemp -d "$ROOT/skew-no-net.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+_bin_after="$(cat "$_bin" 2>/dev/null)"
+_inode_after="$(ls -i "$_bin" 2>/dev/null | awk '{print $1}')"
+if [ "$_rc" -ne 0 ]; then
+    fail "ensure refused an unrecognized receipt format, even with no network reachable (rc $_rc): $_out"
+elif printf '%s' "$_out" | grep -q "does not match its receipt"; then
+    fail "an unrecognized receipt format was reported as a receipt mismatch, not skew: $_out"
+elif [ "$(sed -n 1p "$_d/.grubstake-receipt" 2>/dev/null)" != "receipt 1" ]; then
+    fail "ensure did not record a format-1 receipt over the skewed one: $(cat "$_d/.grubstake-receipt" 2>/dev/null)"
+elif [ "$_bin_after" != "$_bin_before" ]; then
+    fail "the binary's bytes changed even though nothing should have reinstalled it: $_out"
+elif [ "$_inode_after" != "$_inode_before" ]; then
+    fail "the binary was replaced (inode changed) instead of the receipt being rewritten in place: $_out"
+elif find "$_d" -maxdepth 1 -name '.grubstake-receipt.tmp.*' 2>/dev/null | grep -q .; then
+    fail "a temp receipt file from the atomic write was left behind: $_out"
+else
+    pass
+fi
+
+it "an interrupted or failed backfill leaves no half-written receipt"
+# The backfill write is atomic: the hash is computed and validated as 64 hex first, then written to
+# a .tmp.$$ path inside the entry and mv'd over -- so a hash tool that fails mid-backfill has to
+# leave the entry exactly as it was, never a receipt recording an empty or partial hash that the next
+# run reads as a mismatch and refuses forever (see "ensure refuses a binary that no longer matches
+# its receipt, rather than reinstalling over it" above -- a self-inflicted version of that same
+# wedge). Shadowing shasum and sha256sum with a stub that exits 1 keeps sha256_file's own
+# `command -v` checks satisfied, so it takes its normal branch instead of dying outright, while the
+# actual hash still comes out empty: a pipeline reports its last command's exit status, not the
+# shadowed tool's, the same gotcha reported_version's own comment documents.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"   # receiptless: legacy, exactly what triggers a backfill
+_d="$r/.cache/swiftlint/$SHA_A"
+_bin="$_d/swiftlint"
+_receipt="$_d/.grubstake-receipt"
+_shims="$(mktemp -d "$ROOT/no-hash-tools.XXXXXX")" || fixture_die "cannot create a scratch dir for the hash-tool shims"
+printf '#!/bin/sh\nexit 1\n' > "$_shims/shasum"
+printf '#!/bin/sh\nexit 1\n' > "$_shims/sha256sum"
+chmod +x "$_shims/shasum" "$_shims/sha256sum"
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+_leftover=$(find "$_d" -maxdepth 1 -name '.grubstake-receipt.tmp.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_rc" -ne 0 ]; then
+    fail "ensure exited $_rc when the hash tool merely failed, instead of leaving the entry alone: $_out"
+elif [ -f "$_receipt" ]; then
+    fail "a receipt was written from a failed hash: $(cat "$_receipt" 2>/dev/null)"
+elif [ "$_leftover" != "0" ]; then
+    fail "a temp receipt file from the failed backfill was left behind: $_out"
+elif ! printf '%s' "$_out" | grep -q "swiftlint"; then
+    fail "the failed hash said nothing about which entry it could not record for: $_out"
+else
+    # The important part: the entry is still usable, not permanently wedged, once hashing works again.
+    _out2=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc2=$?
+    if [ "$_rc2" -ne 0 ]; then
+        fail "a second ensure with hashing restored still failed (rc $_rc2) -- the failed hash wedged the entry: $_out2"
+    elif [ ! -f "$_receipt" ]; then
+        fail "a second ensure with hashing restored exited 0 but still never recorded a receipt: $_out2"
+    else
+        pass
+    fi
+fi
+
+it "a receipt mismatch on one tool does not stop ensure from verifying the rest"
+# Go's "go mod verify" model: report every failure, exit non-zero once, rather than stopping at the
+# first. A mismatch now warns naming the entry and continues to the remaining pinned tools; ensure
+# only exits non-zero once everything has been attempted. swiftlint is pinned first and tampered
+# after a real (offline) install, so it has a genuine receipt to mismatch; swiftformat is pinned
+# second as a plain receiptless legacy entry, which converges with no download needed, so its receipt
+# appearing is unambiguous evidence ensure reached it rather than stopping at swiftlint. pinned_tools
+# reads grubstake.tools in file order and pins() here writes exactly what it is given, so swiftlint
+# has to be first in the fixture or a healthy second tool being processed proves nothing about
+# continuation.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+# swiftformat is not pinned yet for this first, seeding install: pinning it alongside swiftlint here
+# would send ensure's loop to actually try downloading it too, and the curl shim always serves the
+# swiftlint fixture zip regardless of URL, which does not hash to swiftformat's arbitrary SHA_B.
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+[ "$_rc" -eq 0 ] || fixture_die "cannot seed a clean swiftlint install to tamper with (rc $_rc): $_out"
+_lint_d="$r/.cache/swiftlint/$_sha"
+chmod u+w "$_lint_d/swiftlint"
+printf '#!/bin/sh\necho tampered\n' > "$_lint_d/swiftlint"
+chmod +x "$_lint_d/swiftlint"
+fake_install "$r" swiftformat 0.61.1 "$SHA_B"   # receiptless legacy entry: converges offline, no curl needed
+pins "$r" "swiftlint 0.63.2 $_sha $_sha
+swiftformat 0.61.1 $SHA_B $SHA_B"
+_fmt_receipt="$r/.cache/swiftformat/$SHA_B/.grubstake-receipt"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite a tampered swiftlint entry: $_out"
+elif ! printf '%s' "$_out" | grep -F -q "$_lint_d"; then
+    fail "the mismatch was reported without naming swiftlint's entry: $_out"
+elif [ ! -f "$_fmt_receipt" ]; then
+    fail "ensure stopped at swiftlint's mismatch instead of continuing: swiftformat was never reached, no receipt recorded: $_out"
+else
+    pass
+fi
+
+# ---------------------------------------------------------------------------- cache integrity: shared cache
+#
+# Deliberately breaks the suite's own isolation model: every other test gets its own repo AND its
+# own cache (new_repo), which is exactly why this class of bug survived two prior fix cycles here --
+# no single-repo fixture can observe one repo's write racing another repo's read against a cache both
+# share, which is the real deployment shape this design targets (one machine-wide cache, many
+# repos). This is the one place in the suite two repos are pointed at the same GRUBSTAKE_CACHE on
+# purpose.
+
+printf '\ncache integrity: shared cache\n'
+
+it "two repos sharing one cache: a legacy upgrade must not break a concurrent exec"
+# Reproduces the antagonist's finding directly: the design this replaces repaired a legacy entry by
+# destroying it (rm -rf) and republishing a freshly downloaded copy (mv), leaving the hash-named
+# path briefly absent. A second repo already resolved to that path and executing it in a loop saw
+# ENOENT partway through -- 9 of 40 iterations in the antagonist's run. The corrected design writes
+# the receipt beside the existing binary without ever unlinking it, so the path never goes missing.
+# Repo A's exec loop runs in the background for the whole span of repo B's ensure call (not just one
+# instant), so every iteration that lands inside that call has a chance to catch a destructive
+# window if one exists; a warm-up wait before B starts is what keeps a loop that has not gotten going
+# yet from proving nothing.
+#
+# The catch is probabilistic, not guaranteed, per AGENTS.md 15: a single green run here does not
+# prove the window is closed, only that this run did not hit it. Reconstructing the design this
+# replaces and looping this fixture against it caught the destroy-in-place window 10/20 runs; the
+# same loop against the corrected design caught nothing in 15/15. A future regression back to
+# destroy-in-place is therefore likely, not certain, to show red on any given run.
+a=$(new_repo); b=$(new_repo)
+_shared="$ROOT/shared-cache.$$"
+mkdir -p "$_shared" || fixture_die "cannot create the shared cache dir"
+# fake_release, not an arbitrary hash: a real (if offline) reinstall is what actually exercises the
+# rm-then-mv window in the implementation this test is written to catch regressing back to: an
+# arbitrary sha would only die on a sha256 mismatch long before ever reaching publish_dir. The fixed
+# implementation needs no download for a legacy entry at all, so the curl shim just sits unused.
+_sha=$(fake_release "$a" 0.63.2)
+_entry="$_shared/swiftlint/$_sha"
+mkdir -p "$_entry" || fixture_die "cannot create the shared legacy entry"
+printf '#!/bin/sh\necho 0.63.2\n' > "$_entry/swiftlint" || fixture_die "cannot write the shared legacy binary"
+chmod +x "$_entry/swiftlint" || fixture_die "cannot make the shared legacy binary executable"
+pins "$a" "swiftlint 0.63.2 $_sha $_sha"
+pins "$b" "swiftlint 0.63.2 $_sha $_sha"
+
+_bin=$( cd "$a" && GRUBSTAKE_CACHE="$_shared" ./grubstake.sh path swiftlint 2>/dev/null )
+[ -x "$_bin" ] || fixture_die "repo A could not resolve the shared entry's path"
+
+_execlog="$ROOT/execlog.$$"
+_faillog="$ROOT/execlog.$$.fail"
+_stop="$ROOT/stop.$$"
+: > "$_execlog"
+(
+    _i=0
+    while [ ! -f "$_stop" ]; do
+        _i=$((_i + 1))
+        "$_bin" >/dev/null 2>&1 || echo "$_i" >> "$_faillog"
+        echo "$_i" > "$_execlog"
+    done
+) &
+_aloop=$!
+
+# Wait for repo A's loop to demonstrably be running before repo B starts, so the window B is about
+# to open actually overlaps a live reader instead of a loop that has not started yet. The empty file
+# : > "$_execlog" created above reads back as an empty string, not "0", until the background loop's
+# first write lands, so that has to be normalized before the numeric compare or dash reports
+# "integer expression expected" on every poll before the loop gets going.
+_w=0
+while :; do
+    _seen="$(cat "$_execlog" 2>/dev/null)"
+    case "$_seen" in ''|*[!0-9]*) _seen=0 ;; esac
+    [ "$_seen" -ge 5 ] && break
+    _w=$((_w + 1))
+    [ "$_w" -gt 100 ] && fixture_die "repo A's exec loop never got going"
+    sleep 0.05 2>/dev/null || sleep 1
+done
+
+_out=$( cd "$b" && PATH="$a/curl-shim:$PATH" GRUBSTAKE_CACHE="$_shared" ./grubstake.sh ensure 2>&1 ); _rc=$?
+
+# A little longer past B's ensure, so a window opening right at the end is still caught, before
+# repo A's loop is told to stop.
+sleep 0.2 2>/dev/null || sleep 1
+: > "$_stop"
+wait "$_aloop" 2>/dev/null
+
+_iterations="$(cat "$_execlog" 2>/dev/null)"
+case "$_iterations" in ''|*[!0-9]*) _iterations=0 ;; esac
+_failures=0
+[ -f "$_faillog" ] && _failures=$(wc -l < "$_faillog" | tr -d ' ')
+
+if [ "$_rc" -ne 0 ]; then
+    fail "repo B's ensure over the shared legacy entry exited $_rc: $_out"
+elif [ "$_iterations" -lt 5 ]; then
+    fail "repo A's exec loop only completed $_iterations iterations, too few to have overlapped repo B's ensure"
+elif [ "$_failures" != "0" ]; then
+    fail "repo A's binary failed to exec $_failures/$_iterations times while repo B ran ensure against the shared cache (iterations: $(tr '\n' ' ' < "$_faillog"))"
+else
+    pass
+fi
+rm -f "$_stop" "$_execlog" "$_faillog"
+
 # ---------------------------------------------------------------------------- resolution
 
 printf '\nresolution\n'
@@ -797,41 +1320,30 @@ else
     printf '  skip  %s (network)\n' "$CURRENT"
 fi
 
-# Sourcing the script would run main and exit, so pull the functions under test out by name. The
-# sed ranges are keyed to exact brace formatting: move an opening brace to the next line and the
-# extraction silently yields nothing, the generated script exits 127 without ever calling the
-# function, and a test that only checks for the absence of a lock directory reports ok. An empty
-# or truncated extraction is a harness fault, not a result, so it stops the run.
-extract_fns() {
-    _fns="$(sed -n '/^with_lock() {/,/^}/p;/^publish_dir() {/,/^}/p' "$GS")"
-    for _f in with_lock publish_dir; do
-        printf '%s\n' "$_fns" | grep -q "^$_f() {$" \
-            || fixture_die "extract_fns: no '$_f() {' line in $GS (reformatted?)"
-    done
-    # Neither function nests a line-anchored brace, so anything but one close each means a range ran on.
-    _closes="$(printf '%s\n' "$_fns" | grep -c '^}$' | tr -d ' ')"
-    [ "$_closes" = 2 ] || fixture_die "extract_fns: $_closes closing braces, expected 2 (truncated)"
-    printf '%s\n' "$_fns"
-}
-
 it "a race loser cleans up after itself"
 # Two installs of one cold pin. The loser must discard its own staging, or a shared cache
 # accumulates litter that a normal rm cannot remove.
 #
-# publish_dir's winner branch is `[ -x "$2/$3" ]`: the tool name is what tells a real winner (dest
-# holds the executable) apart from debris (dest exists but does not). This generated script has no
-# `set -u`, so calling publish_dir with only two arguments leaves $3 empty rather than erroring, and
-# "$2/$3" degrades to "$2/" -- ordinary directory search permission, true for any plain directory --
-# so the winner branch fires unconditionally regardless of what dest actually holds. Passing the
-# tool name, and giving dest a genuine executable to be a genuine winner, is what makes this
-# assertion mean anything again; see "publish_dir publishes a staging directory into a destination
-# that lacks the executable" below for the branch this would otherwise never distinguish from.
+# publish_dir's winner branch is bare executable existence, "[ -x "$2/$3" ]", full stop: a live
+# binary is never cleared, whatever its receipt does or does not say -- a mismatch is install_tool's
+# refusal to make, before publish_dir is ever reached (see "ensure refuses a binary that no longer
+# matches its receipt, rather than reinstalling over it" above), never publish_dir's to repair. The
+# tool name is still what tells a real winner (dest holds the executable) apart from debris (dest
+# exists but does not). This generated script has no `set -u`, so calling publish_dir with only two
+# arguments leaves $3 empty rather than erroring, and "$2/$3" degrades to "$2/" -- ordinary
+# directory search permission, true for any plain directory -- so the winner branch would fire
+# unconditionally regardless of what dest actually holds. Passing the tool name, and giving dest a
+# genuine executable to be a genuine winner, is what makes this assertion mean anything again; see
+# "publish_dir publishes a staging directory into a destination that lacks the executable" below for
+# the debris branch this would otherwise never distinguish from, and "publish_dir never clears an
+# entry whose binary exists" above for the same invariant proven directly against a receipt that
+# does not match.
 r=$(new_repo)
 _d="$r/dest"; _st="$r/dest.staging.111"
 mkdir -p "$_st"; printf 'x' > "$_st/f"; chmod -R a-w "$_st"
 mkdir -p "$_d"; printf '#!/bin/sh\necho 0.63.2\n' > "$_d/swiftlint"; chmod +x "$_d/swiftlint"
 _before="$(cat "$_d/swiftlint")"
-{ extract_fns; echo 'die() { echo "$1" >&2; exit 1; }'; echo 'publish_dir "$1" "$2" "$3"'; } > "$r/t.sh"
+{ extract_fns; echo 'die() { echo "$1" >&2; exit 1; }'; echo 'warn() { echo "WARN: $1" >&2; }'; echo 'publish_dir "$1" "$2" "$3"'; } > "$r/t.sh"
 ( cd "$r" && sh "$r/t.sh" "$_st" "$_d" swiftlint ) >/dev/null 2>&1; _rc=$?
 # The status is checked rather than discarded: 127 is publish_dir never running, which leaves no
 # staging behind either and so read as a pass.

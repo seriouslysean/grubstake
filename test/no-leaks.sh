@@ -22,22 +22,23 @@ scan() {
     _what="$1"; _re="$2"
     # Exclude this file and the suite: they contain the patterns by definition.
     _hits="$(git grep -nE "$_re" -- . ':!test/no-leaks.sh' ':!test/run.sh' 2>/dev/null)"
-    [ -z "$_hits" ] && return 0
-    printf '%s\n' "$_hits" | while IFS= read -r _l; do printf '  %s: %s\n' "$_what" "$_l"; done
-    FOUND=1
-    return 1
+    [ -n "$_hits" ] && printf '%s\n' "$_hits" | while IFS= read -r _l; do printf '  %s: %s\n' "$_what" "$_l"; done
+    # A leak can live entirely in a tracked filename with clean content, invisible to git grep above.
+    _names="$(git ls-files -- . ':!test/no-leaks.sh' ':!test/run.sh' | grep -E "$_re" 2>/dev/null)"
+    [ -n "$_names" ] && printf '%s\n' "$_names" | while IFS= read -r _n; do printf '  %s (filename): %s\n' "$_what" "$_n"; done
+    [ -z "$_hits" ] && [ -z "$_names" ]
 }
 
 printf 'scanning tracked files\n'
 
-scan "absolute home path" '/Users/[a-zA-Z0-9]|/home/[a-z]' || FOUND=1
+scan "absolute home path" '/Users/[a-zA-Z0-9]|/home/[a-zA-Z]' || FOUND=1
 scan "email address" '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' || FOUND=1
 # owner/repo#123 pointing somewhere else is how one repo's issue history reaches a public commit.
 scan "cross-repo issue reference" '[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+#[0-9]+' || FOUND=1
 
 if [ "${1:-}" = "--all" ]; then
     printf 'scanning commit messages\n'
-    _hits="$(git log --all --format='%H %s%n%b' | grep -nE '/Users/[a-zA-Z0-9]|/home/[a-z]|[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+#[0-9]+')"
+    _hits="$(git log --all --format='%H %s%n%b' | grep -nE '/Users/[a-zA-Z0-9]|/home/[a-zA-Z]|[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+#[0-9]+')"
     [ -n "$_hits" ] && { printf '%s\n' "$_hits" | head -20; FOUND=1; }
 fi
 

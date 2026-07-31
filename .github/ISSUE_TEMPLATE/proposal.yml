@@ -1,0 +1,44 @@
+name: Propose a change
+description: Something grubstake should do that it does not do, or a question about why it works the way it does.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This issue will be published, and no hook can gate it.** `test/no-leaks.sh` refuses
+        tracked files that identify a consumer. It cannot read an issue body, so this form is the
+        only gate there is.
+
+        Nothing you write here may name a consuming repository, a person, a machine, a scheme, a
+        target, or an issue number from somewhere else. Redact paths before pasting output:
+        grubstake prints the cache under your home directory.
+
+        Describe the need, not the repo that has it. An adoption report is "an existing four-tool
+        repo", not its name.
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What grubstake should do
+      description: The behaviour or surface being proposed, or the question being asked.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: The friction that prompted it
+      description: >
+        What is being done by hand, duplicated, or worked around today. The reason survives longer
+        than any diff, so record it here even if the proposal is declined.
+    validations:
+      required: true
+  - type: textarea
+    id: fit
+    attributes:
+      label: How it stays repo-agnostic
+      description: Optional. What grubstake would own, and what stays in each repo that uses it.
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Before filing
+      options:
+        - label: I have read this body back. It names no other repository, no person, and no machine.
+          required: true

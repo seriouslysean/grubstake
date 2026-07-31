@@ -439,6 +439,99 @@ else
     esac
 fi
 
+it "a space in the cache path does not break the cleanup trap"
+# Contrast case for the single-quote test below: a trap string is shell source, re-parsed when it
+# fires, so any value embedded in it has to survive that second parse regardless of what characters
+# it holds. A plain space is not one of the characters that can break it, so this must stay green.
+# Same version-mismatch shape as the "does not leave a staging directory" test above; only the
+# cache path differs.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.65.0 $_sha $_sha"
+_cache="$r/space cache"
+mkdir -p "$_cache"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$_cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+n=$(find "$_cache" -name '*.staging.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite a version mismatch: $_out"
+elif [ "$n" != "0" ]; then
+    fail "$n staging directories left behind after the version-mismatch die (spaced cache path): $_out"
+else
+    case "$_out" in
+        *"pinned 0.65.0"*) pass ;;
+        *) fail "died for an unexpected reason, not the version mismatch: $_out" ;;
+    esac
+fi
+
+it "a single quote in the cache path does not break the cleanup trap or leak the staging directory"
+# A trap string is shell source, expanded once when the trap is set and re-parsed when it fires, so
+# a value embedded in it has to survive that second parse regardless of what characters it holds
+# (grubstake.sh's `sq` helper exists to guarantee that). A GRUBSTAKE_CACHE containing a literal ' is
+# the minimal case that breaks a naive quoting scheme: it ends the quoting early, so the trap string
+# the shell evaluates at EXIT is no longer valid syntax, and it errors instead of running rm -rf --
+# the staging directory, holding the rejected binary, is never removed. Same version-mismatch shape
+# as the "does not leave a staging directory" test above; only the cache path differs. A broken trap
+# reports this as "Syntax error: Unterminated quoted string" under dash, or "unexpected EOF while
+# looking for matching `''" under bash-as-sh (what /bin/sh resolves to on this machine) -- both
+# patterns are checked, since either shell can run this script. The space-only case just above stays
+# green: it is the quote character itself that breaks a naive scheme, not the space. This test only
+# proves the trap does not error on the character; it does not prove no command runs -- see the
+# compound-injection test below for that.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.65.0 $_sha $_sha"
+_cache="$r/cache's dir"
+mkdir -p "$_cache"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$_cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+n=$(find "$_cache" -name '*.staging.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite a version mismatch: $_out"
+else
+    case "$_out" in
+        *"Unterminated quoted string"*|*"unexpected EOF"*|*"syntax error"*|*"Syntax error"*)
+            fail "the cleanup trap itself errored on the quoted cache path: $_out" ;;
+        *)
+            if [ "$n" != "0" ]; then
+                fail "$n staging directories left behind after the version-mismatch die (quoted cache path): $_out"
+            else
+                case "$_out" in
+                    *"pinned 0.65.0"*) pass ;;
+                    *) fail "died for an unexpected reason, not the version mismatch: $_out" ;;
+                esac
+            fi
+            ;;
+    esac
+fi
+
+it "a hostile GRUBSTAKE_CACHE cannot inject commands into install's cleanup trap"
+# Apostrophe-survival (above) proves the trap does not error on a quote; it does not prove no
+# command runs, since a scheme that merely tolerates the character without properly closing and
+# reopening the quoting can still be broken by a value that goes further. This is the same
+# version-mismatch die as the tests above, but GRUBSTAKE_CACHE is crafted the way an attacker would
+# craft it: close the quote, add a command, reopen a quote, so the staging directory's own path
+# carries the payload. If the trap ever re-parses this as more than a single quoted argument to
+# rm -rf, SENTINEL gets created; sq() (grubstake.sh) exists to prevent exactly that.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.65.0 $_sha $_sha"
+_sentinel="$r/SENTINEL"
+_cache="$r/cache'; touch \"$_sentinel\"; echo '"
+mkdir -p "$_cache"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$_cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+n=$(find "$_cache" -name '*.staging.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ -e "$_sentinel" ]; then
+    fail "the injected command ran: SENTINEL was created via install's cleanup trap"
+elif [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite a version mismatch: $_out"
+elif [ "$n" != "0" ]; then
+    fail "$n staging directories left behind after the version-mismatch die (injection-payload cache path): $_out"
+else
+    case "$_out" in
+        *"pinned 0.65.0"*) pass ;;
+        *) fail "died for an unexpected reason, not the version mismatch: $_out" ;;
+    esac
+fi
+
 it "clean refuses a symlinked cache root rather than lying about removal"
 # rm -rf on a symlink unlinks the link itself and leaves whatever it points at completely untouched,
 # while still reporting success -- so a `clean` built on a bare `rm -rf "$GRUBSTAKE_CACHE"` would
@@ -584,6 +677,26 @@ printf '\nupdate\n'
 
 it "a release below the supported floor is refused"
 r=$(new_repo); expect_fail "$r" update 0.1.4
+
+it "a hostile TMPDIR cannot inject commands into update's cleanup trap"
+# cmd_update's only trap wraps $_tmp, sourced from mktemp under TMPDIR. Refusing a release below the
+# supported floor dies immediately and offline, so that trap is still the one active at EXIT -- the
+# same injection shape as install's and add's traps above, applied to update's one and only site.
+r=$(new_repo)
+_sentinel="$r/SENTINEL"
+_tmpdir="$r/tmp'; touch \"$_sentinel\"; echo '"
+mkdir -p "$_tmpdir"
+_out=$( cd "$r" && TMPDIR="$_tmpdir" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh update 0.1.4 2>&1 ); _rc=$?
+if [ -e "$_sentinel" ]; then
+    fail "the injected command ran: SENTINEL was created via update's cleanup trap"
+elif [ "$_rc" -eq 0 ]; then
+    fail "update exited 0 for a release below the supported floor: $_out"
+else
+    case "$_out" in
+        *"below the supported floor"*) pass ;;
+        *) fail "died for an unexpected reason: $_out" ;;
+    esac
+fi
 
 it "the legacy handoff verb still answers, for clients that only speak it"
 # Removing it stranded every existing adopter: it is a protocol only OLD versions speak, so it is
@@ -1416,6 +1529,83 @@ else
     case "$_out" in
         *"conflict"*) pass ;;
         *) fail "refused, but without naming the conflict markers: $_out" ;;
+    esac
+fi
+
+it "conflict markers introduced while add is still fetching are not merged into the rewrite"
+# cmd_add calls validate_pins exactly once, before add_one ever fetches. add_one then downloads
+# both platform artifacts -- up to --max-time 300 each -- before it ever takes the pins lock and
+# rewrites grubstake.tools. Conflict markers landing in that window -- the same window a real
+# `git pull` mid-add would land in -- are validated by nothing: add_one's grep/sort/mv rewrite runs
+# over whatever is on disk when the lock is finally taken. The curl shim wraps fake_release's own
+# shim (rather than reimplementing its -o argv parsing) and, on its first call only, mutates
+# grubstake.tools and snapshots it to pins-mid-add at that instant -- so the assertion below is a
+# byte-for-byte compare against what the shim actually wrote, never a hand-maintained copy of it.
+r=$(new_repo)
+_pins_path="$r/grubstake.tools"
+pins "$r" "periphery 3.7.4 $SHA_A $SHA_A"
+fake_release "$r" 0.63.2 >/dev/null
+mv "$r/curl-shim/curl" "$r/curl-shim/curl-real"
+cat > "$r/curl-shim/curl" <<SHIM
+#!/bin/sh
+if ! grep -q '<<<<<<<' "$_pins_path" 2>/dev/null; then
+    printf '%s\n' '<<<<<<< HEAD' 'swiftformat 0.61.1 $SHA_B $SHA_B' '=======' 'swiftformat 0.65.0 $SHA_A $SHA_A' '>>>>>>> incoming' >> "$_pins_path"
+    cp "$_pins_path" "$r/pins-mid-add"
+fi
+exec "$r/curl-shim/curl-real" "\$@"
+SHIM
+chmod +x "$r/curl-shim/curl"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@0.63.2 2>&1 ); _rc=$?
+if [ ! -f "$r/pins-mid-add" ]; then
+    fail "fixture never mutated grubstake.tools mid-add; the curl shim did not run as expected"
+elif [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 over conflict markers introduced mid-fetch. pins file now:
+$(cat "$_pins_path" 2>/dev/null)"
+elif ! cmp -s "$_pins_path" "$r/pins-mid-add"; then
+    fail "add refused, but the pins file was rewritten anyway. diff (mid-add snapshot vs after):
+$(diff "$r/pins-mid-add" "$_pins_path" 2>&1)"
+elif [ -e "$_pins_path.lock" ]; then
+    fail "add refused, but left the pins lock behind: $_pins_path.lock"
+else
+    case "$_out" in
+        *"conflict"*) pass ;;
+        *) fail "refused, but without naming the conflict markers: $_out" ;;
+    esac
+fi
+
+it "a hostile TMPDIR cannot inject commands into add's post-lock cleanup trap"
+# add_one's second trap runs after the pins lock is taken, wrapping $_tmp/$_pt/$_lock together. The
+# conflict-marker curl shim above forces a deterministic die inside that window (validate_pins, now
+# called right after the lock is taken and the trap replaced). TMPDIR flows into $_tmp via mktemp,
+# so a hostile TMPDIR is the attacker-controlled value that reaches this specific trap, the same way
+# a hostile GRUBSTAKE_CACHE reaches install's (above).
+r=$(new_repo)
+_pins_path="$r/grubstake.tools"
+pins "$r" "periphery 3.7.4 $SHA_A $SHA_A"
+fake_release "$r" 0.63.2 >/dev/null
+mv "$r/curl-shim/curl" "$r/curl-shim/curl-real"
+cat > "$r/curl-shim/curl" <<SHIM
+#!/bin/sh
+if ! grep -q '<<<<<<<' "$_pins_path" 2>/dev/null; then
+    printf '%s\n' '<<<<<<< HEAD' 'swiftformat 0.61.1 $SHA_B $SHA_B' '=======' 'swiftformat 0.65.0 $SHA_A $SHA_A' '>>>>>>> incoming' >> "$_pins_path"
+fi
+exec "$r/curl-shim/curl-real" "\$@"
+SHIM
+chmod +x "$r/curl-shim/curl"
+_sentinel="$r/SENTINEL"
+_tmpdir="$r/tmp'; touch \"$_sentinel\"; echo '"
+mkdir -p "$_tmpdir"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" TMPDIR="$_tmpdir" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@0.63.2 2>&1 ); _rc=$?
+if [ -e "$_sentinel" ]; then
+    fail "the injected command ran: SENTINEL was created via add's post-lock cleanup trap"
+elif [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 despite conflict markers introduced mid-fetch: $_out"
+elif [ -e "$_pins_path.lock" ]; then
+    fail "add refused, but left the pins lock behind: $_pins_path.lock"
+else
+    case "$_out" in
+        *"conflict"*) pass ;;
+        *) fail "refused, but not for the conflict markers: $_out" ;;
     esac
 fi
 

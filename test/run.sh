@@ -874,10 +874,11 @@ hook_commit() {
 
 commits() { ( cd "$1" && git rev-list --count HEAD 2>/dev/null || echo 0 ); }
 
-# Write a file and stage it; the staged paths are all the pre-commit spine looks at.
+# Write a file and stage it; the staged paths are all the pre-commit spine looks at. "--" before the
+# path so a dash-prefixed name (#29) stages instead of git parsing it as an option itself.
 stage() {
     printf '%s\n' "$3" > "$1/$2" || fixture_die "cannot write $1/$2"
-    ( cd "$1" && git add "$2" ) || fixture_die "cannot stage $2 in $1"
+    ( cd "$1" && git add -- "$2" ) || fixture_die "cannot stage $2 in $1"
 }
 
 # A stubbed swiftlint at the pinned cache path, so `grubstake path swiftlint` resolves to it. It
@@ -904,6 +905,64 @@ STUB
 lint_run() {
     printf '%s\n' "$3" > "$1/lint.rc.$2" || fixture_die "cannot script lint run $2"
     printf '%s' "$4" > "$1/lint.out.$2" || fixture_die "cannot script lint run $2"
+}
+
+# A stubbed swiftlint that decides its own output from real argv rather than a canned per-run
+# script: whether a staged path survives to the linter as a path at all (#29's dash defect) and
+# whether a path is even present when the linter runs (#29's AD/MD defect) both depend on what the
+# linter was actually handed and what it can see, which stub_linter's invocation-numbered scripting
+# cannot express. Argument parsing mirrors SwiftLint's own: "lint" and anything starting with "-"
+# is an option and is consumed, until a bare "--" is seen, after which every remaining argument is a
+# path even if it also starts with "-". A path that does not exist is noted as missing; a path that
+# exists and contains the marker gets a fake violation. A violation for one co-staged path is always
+# reported even when another path in the same invocation is missing -- only when nothing at all was
+# lintable does the run collapse to 0.63.2's own "No lintable files found" message alone, at exit 1.
+# Otherwise a real violation still exits 2. Callers pin SHA_A in both columns, so the stub sits where
+# either platform looks for it.
+stub_linter_mechanical() {
+    _sd="$1/.cache/swiftlint/$SHA_A"
+    mkdir -p "$_sd" || fixture_die "cannot create $_sd"
+    printf "#!/bin/sh\nR='%s'\n" "$1" > "$_sd/swiftlint" \
+        || fixture_die "cannot write the mechanical stub linter"
+    cat >> "$_sd/swiftlint" <<'STUB'
+n=$(cat "$R/lint.runs" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$R/lint.runs"
+{ echo "$0"; for a in "$@"; do echo "$a"; done; } > "$R/lint.argv.$n"
+cd "$R" || exit 99
+missing=""
+violations=""
+seen_dashdash=0
+for a in "$@"; do
+    if [ "$seen_dashdash" -eq 0 ]; then
+        case "$a" in
+            lint) continue ;;
+            --) seen_dashdash=1; continue ;;
+            -*) continue ;;
+        esac
+    fi
+    if [ ! -e "$a" ]; then
+        missing="$missing '$a'"
+    elif grep -q -- VIOLATION_MARKER "$a" 2>/dev/null; then
+        violations="$violations
+$a:1:1: error: Fake Violation (fake_rule)"
+    fi
+done
+out=""
+[ -n "$violations" ] && out="$violations"
+if [ -n "$missing" ]; then
+    _miss_msg="Error: No lintable files found at paths:$missing"
+    if [ -n "$out" ]; then out="$out
+$_miss_msg"; else out="$_miss_msg"; fi
+fi
+if [ -n "$violations" ]; then rc=2
+elif [ -n "$missing" ]; then rc=1
+else rc=0
+fi
+[ -n "$out" ] && printf '%s\n' "$out"
+exit "$rc"
+STUB
+    chmod +x "$_sd/swiftlint" || fixture_die "cannot make the mechanical stub linter executable"
 }
 
 # A repo-local gate, which is where repo-specific checks live rather than in the shared spine.
@@ -984,6 +1043,158 @@ if [ "$_rc" -ne 0 ]; then fail "the retry was still blocked (rc $_rc): $_out"
 elif [ ! -f "$r/lint.argv.2" ]; then fail "the retry never re-ran the linter"
 elif [ "$(commits "$r")" != 2 ]; then fail "exited 0 without committing"
 else pass; fi
+
+it "a staged path beginning with a dash is linted as a path, not consumed as a linter option"
+# #29's unqualified reproduction: a name that is simultaneously a valid staged Swift path and a
+# valid swiftlint option (no "--" separates paths from options) gets consumed as the option, and the
+# violation inside it is never seen.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+stage "$r" '--config=clean.yml.swift' 'let x = 1 // VIOLATION_MARKER'
+_out=$(hook_commit "$r"); _rc=$?
+if [ ! -f "$r/lint.argv.1" ]; then
+    fail "the linter never ran, so this proves nothing about the dash: $_out"
+elif [ "$_rc" -eq 0 ]; then
+    fail "the commit went through with the violation hidden behind the dash-prefixed name: $_out"
+elif [ "$(commits "$r")" != 1 ]; then
+    fail "refused, and committed anyway"
+else
+    case "$_out" in
+        *"Fake Violation"*) pass ;;
+        *) fail "blocked without reporting what the linter said: $_out" ;;
+    esac
+fi
+
+it "a staged file missing from the working tree does not commit unlinted (AD, MD)"
+# SwiftLint cannot read a path that is staged but gone from the working tree: it exits 1 and says
+# "No lintable files found", a message the hook also (wrongly) treats as "every staged path is
+# excluded by config, nothing to report". AD is that state fresh: staged as new, then removed. MD
+# reaches the same state from a tracked file: modified in the index, then removed. Neither case means
+# the linter looked and found nothing wrong; both mean it never looked at all, which the pre-commit
+# gate must not read as a pass, and must not pass through in silence either.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+_bad=""
+
+_n0=$(cat "$r/lint.runs" 2>/dev/null || echo 0)
+_c0=$(commits "$r")
+stage "$r" Violating.swift 'let x = 1 // VIOLATION_MARKER'
+rm -f "$r/Violating.swift"
+_out=$(hook_commit "$r"); _rc=$?
+_n1=$(cat "$r/lint.runs" 2>/dev/null || echo 0)
+_c1=$(commits "$r")
+if [ "$_n1" = "$_n0" ]; then
+    _bad="$_bad AD(the linter never ran: $_out)"
+elif [ "$_rc" -eq 0 ]; then
+    _bad="$_bad AD(exited 0 and committed silently: $_out)"
+elif [ "$_c1" != "$_c0" ]; then
+    _bad="$_bad AD(refused with rc $_rc, but the commit count still moved from $_c0 to $_c1)"
+elif ! printf '%s' "$_out" | grep -q "Violating.swift"; then
+    _bad="$_bad AD(blocked in silence, without naming the file: $_out)"
+fi
+
+# A correct refusal never touches the index, so Violating.swift is still staged (AD) here. Clear it
+# before seeding the tracked baseline below, or that commit is refused for the same AD reason and
+# never becomes the tracked file the MD sub-case needs to modify. The worktree copy is already gone,
+# so this reset only drops the stage; it does not resurrect the file.
+( cd "$r" && git reset -q -- Violating.swift ) || fixture_die "cannot unstage Violating.swift in $r"
+
+# A tracked baseline, so the next removal is a genuine MD rather than a second AD.
+_cseed=$(commits "$r")
+stage "$r" Tracked.swift 'let ok = 1'
+hook_commit "$r" >/dev/null 2>&1
+[ "$(commits "$r")" = "$((_cseed + 1))" ] \
+    || fixture_die "could not seed a tracked baseline commit for MD in $r"
+
+_n2=$(cat "$r/lint.runs" 2>/dev/null || echo 0)
+_c2=$(commits "$r")
+printf 'let x = 1 // VIOLATION_MARKER\n' > "$r/Tracked.swift"
+( cd "$r" && git add Tracked.swift ) || fixture_die "cannot re-stage Tracked.swift in $r"
+rm -f "$r/Tracked.swift"
+_out=$(hook_commit "$r"); _rc=$?
+_n3=$(cat "$r/lint.runs" 2>/dev/null || echo 0)
+_c3=$(commits "$r")
+if [ "$_n3" = "$_n2" ]; then
+    _bad="$_bad MD(the linter never ran: $_out)"
+elif [ "$_rc" -eq 0 ]; then
+    _bad="$_bad MD(exited 0 and committed silently: $_out)"
+elif [ "$_c3" != "$_c2" ]; then
+    _bad="$_bad MD(refused with rc $_rc, but the commit count still moved from $_c2 to $_c3)"
+elif ! printf '%s' "$_out" | grep -q "Tracked.swift"; then
+    _bad="$_bad MD(blocked in silence, without naming the file: $_out)"
+fi
+
+[ -z "$_bad" ] && pass || fail "$_bad"
+
+it "a staged file with a legitimate unstaged edit still commits, with only a warning"
+# AM and MM mean the linter read different content than what is staged, which is normal under
+# `git add -p`; refusing there would break a workflow people rely on. This has to keep working once
+# AD/MD above start refusing, since both are reached through the same lint-the-working-tree
+# limitation and a fix that is not narrow could sweep this case in too.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+stage "$r" Tracked.swift 'let a = 1'
+hook_commit "$r" >/dev/null 2>&1
+printf 'let a = 2\n' > "$r/Tracked.swift"
+( cd "$r" && git add Tracked.swift ) || fixture_die "cannot re-stage Tracked.swift in $r"
+printf 'let a = 3\n' > "$r/Tracked.swift"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "a legitimate unstaged edit (MM) was refused, not just warned about: $_out"
+elif [ "$(commits "$r")" != 3 ]; then
+    fail "exited 0 without committing"
+elif ! printf '%s' "$_out" | grep -q "unstaged edits"; then
+    fail "committed with no warning about the divergence: $_out"
+else
+    pass
+fi
+
+it "a staged rename with an unstaged edit still warns"
+# The divergence warning narrowed from "^[ACMR]M" to "^[AM]M " when AD/MD split off into a refusal.
+# A rename reports "R" in the index column, which that narrower pattern does not match, so `git mv`
+# followed by an unstaged edit -- lint-clean content, so this must still commit -- says nothing about
+# reading working-tree bytes that differ from what is staged.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+stage "$r" Old.swift 'let a = 1'
+hook_commit "$r" >/dev/null 2>&1
+( cd "$r" && git mv Old.swift New.swift ) || fixture_die "cannot rename Old.swift to New.swift in $r"
+printf 'let a = 1\nlet b = 2\n' > "$r/New.swift"
+_out=$(hook_commit "$r"); _rc=$?
+if [ ! -f "$r/lint.argv.2" ]; then
+    fail "the linter never ran: $_out"
+elif [ "$_rc" -ne 0 ]; then
+    fail "a lint-clean rename with an unstaged edit was refused, not just warned about: $_out"
+elif [ "$(commits "$r")" != 3 ]; then
+    fail "exited 0 without committing"
+elif ! printf '%s' "$_out" | grep -q "unstaged edits"; then
+    fail "committed with no warning about the divergence: $_out"
+else
+    pass
+fi
+
+it "a co-staged violation is reported alongside a missing-file refusal"
+# The refusal for a staged-but-gone file is computed straight from git status, independent of what
+# the linter said, so it fires correctly. But $OUT -- where a violation in some other file the
+# linter *did* still read would show up -- is never printed on that path. A developer who fixes the
+# missing file and retries only then learns their other file had a violation the whole time.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+stage "$r" File1.swift 'let x = 1 // VIOLATION_MARKER'
+stage "$r" File2.swift 'let y = 2'
+rm -f "$r/File2.swift"
+_out=$(hook_commit "$r"); _rc=$?
+if [ ! -f "$r/lint.argv.1" ]; then
+    fail "the linter never ran, so this proves nothing: $_out"
+elif [ "$_rc" -eq 0 ]; then
+    fail "the commit went through even though File2.swift is staged but missing: $_out"
+elif ! printf '%s' "$_out" | grep -q "File2.swift"; then
+    fail "did not refuse for the missing file: $_out"
+elif ! printf '%s' "$_out" | grep -q "Fake Violation"; then
+    fail "refused for the missing file, but swallowed File1's violation: $_out"
+else
+    pass
+fi
 
 it "a commit with no Swift files does not need the tools installed"
 # A cold cache must not refuse a docs-only commit: nothing this spine gates is staged, so there is

@@ -188,6 +188,50 @@ validate_pins() {
 tool_dir()  { echo "$(cache_root)/$1/$2"; }   # $2 is the pinned sha256
 tool_bin()  { echo "$(tool_dir "$1" "$2")/$1"; }
 
+receipt_file() {
+    echo "$1/.grubstake-receipt"
+}
+
+# Hashes $1 and prints it only if it comes back 64 lowercase hex; prints nothing otherwise. Shared
+# by every receipt write, so a transient hash failure never reaches a printf that would record it.
+hashed_or_empty() {
+    _h="$(sha256_file "$1" 2>/dev/null || echo '')"
+    if printf '%s' "$_h" | grep -qE '^[0-9a-f]{64}$'; then
+        printf '%s' "$_h"
+    fi
+}
+
+# Stages a receipt for $1 recording $2 as its binary-sha256 and $3 as its version into a tmp name,
+# then renames it over the real path -- the same idiom the staging directory and the pins file use
+# elsewhere in this script -- so a write interrupted mid-truncate never leaves the real receipt
+# partial. Callers run this under $1.lock, the same lock publish_dir uses, so a legacy entry two
+# concurrent ensures both want to backfill does not strand a tmp file one of them can no longer
+# reach. Never dies; a failure here just returns non-zero for the caller to warn about.
+write_receipt() {
+    _wr_tmp="$1/.grubstake-receipt.tmp.$$"
+    chmod u+w "$1" 2>/dev/null || true
+    if printf 'receipt 1\nbinary-sha256 %s\nversion %s\n' "$2" "$3" > "$_wr_tmp" 2>/dev/null \
+        && mv "$_wr_tmp" "$(receipt_file "$1")" 2>/dev/null; then
+        chmod -R a-w "$1" 2>/dev/null || true
+        return 0
+    fi
+    rm -f "$_wr_tmp" 2>/dev/null || true
+    return 1
+}
+
+# Every failure mode -- missing, foreign header, unreadable, hash mismatch -- collapses to the
+# same plain non-zero; the caller decides how loud to be about what the mismatch means.
+entry_verified() {
+    _ev_bin="$1/$2"
+    [ -x "$_ev_bin" ] || return 1
+    _ev_rf="$(receipt_file "$1")"
+    [ -f "$_ev_rf" ] || return 1
+    [ "$(sed -n 1p "$_ev_rf" 2>/dev/null)" = "receipt 1" ] || return 1
+    _ev_sha="$(awk '/^binary-sha256/{print $2}' "$_ev_rf" 2>/dev/null)"
+    printf '%s' "$_ev_sha" | grep -qE '^[0-9a-f]{64}$' || return 1
+    [ "$_ev_sha" = "$(sha256_file "$_ev_bin")" ]
+}
+
 # mkdir is the portable atomic lock. flock(1) is not present on macOS.
 with_lock() {
     _lk="$1"; shift
@@ -205,6 +249,9 @@ with_lock() {
 
 # A published entry is never unlinked: another repo may be executing from it. The loser of a real
 # race discards its own staging, and both copies are identical by construction.
+# A receipt mismatch does not change that: destroying a live binary to repair a mismatch it cannot
+# explain risks handing a concurrent exec an ENOENT mid-run, the exact hazard this rule prevents.
+# install_tool's deep pass is where a mismatch gets surfaced; publish_dir only ever adds an entry.
 # A destination that exists but lacks the executable is not a winner, only debris from an
 # interrupted publish or a stray mkdir, so it is cleared and the verified staging published instead.
 # The lock exists because `mv dir existing-dir` nests rather than fails, and macOS mv has no -T.
@@ -247,8 +294,63 @@ install_tool() {
 
     _dest="$(tool_dir "$_tool" "$_want")"
     _bin="$(tool_bin "$_tool" "$_want")"
-    # Existence at a hash-named path is validity. There is no other state to be in.
-    [ -x "$_bin" ] && return 0
+    # Existence alone is no longer proof: the receipt is what tells a verified entry apart from debris.
+    if [ -x "$_bin" ]; then
+        if entry_verified "$_dest" "$_tool"; then
+            _rver="$(awk '/^version/{print $2}' "$(receipt_file "$_dest")" 2>/dev/null)"
+            if [ "$_rver" = "$_ver" ]; then
+                return 0
+            fi
+            # A stale receipt line is not license to trust the pin's claim unchecked: rule 3 requires
+            # the binary itself to report the pinned version before that label is ever recorded, so
+            # this asserts it here, offline, against the binary already on disk -- the one path that
+            # could otherwise relabel a receipt to a version the binary was never shown to be.
+            _reported="$(reported_version "$_bin" "$_tool" || echo '')"
+            if [ "$_reported" != "$_ver" ]; then
+                warn "$_tool: $_dest reports ${_reported:-nothing}, not the pinned $_ver.
+  The pin may have been edited without re-hashing; run: grubstake add $_tool@$_ver, or remove $_dest by hand."
+                return 1
+            fi
+            # The binary genuinely reports the pinned version -- only the receipt's version line was
+            # stale -- so this rewrites it in place rather than downloading: publish_dir would discard
+            # a fresh download here anyway, since this entry's own executable already makes it the
+            # winner, so nothing built from that download would ever actually land.
+            _bsha="$(hashed_or_empty "$_bin")"
+            if [ -n "$_bsha" ] && with_lock "$_dest.lock" write_receipt "$_dest" "$_bsha" "$_ver"; then
+                log "$_tool: entry recorded version ${_rver:-nothing}, updated the receipt to pinned $_ver"
+            else
+                warn "$_tool: entry records version ${_rver:-nothing}, pinned $_ver, but the receipt could not be updated"
+            fi
+            return 0
+        else
+            _rf="$(receipt_file "$_dest")"
+            if [ -f "$_rf" ] && [ "$(sed -n 1p "$_rf" 2>/dev/null)" = "receipt 1" ]; then
+                # Never reinstall over this: publish_dir never unlinks a live binary, and neither does
+                # this path -- a mismatch this script cannot explain is a human's call, not a repair.
+                # Warned, not died: one flagged entry must not block installing or verifying every
+                # other pinned tool; cmd_ensure exits non-zero at the end if any were flagged.
+                warn "$_tool: $_dest does not match its receipt recorded at install.
+  Remove that directory by hand, or run: grubstake clean"
+                return 1
+            fi
+            # No receipt, or a header this script does not recognize: predates receipts, or was
+            # written by a version that will. Record one against what is already there, offline and
+            # in place -- it is the same trust the entry already had, now with a baseline to drift from.
+            _bsha="$(hashed_or_empty "$_bin")"
+            if [ -z "$_bsha" ]; then
+                # A hash that failed or came back empty must never be recorded: a legacy entry with no
+                # receipt is still usable, and a broken one would leave the next run nothing to self-heal from.
+                warn "$_tool: could not hash $_bin to record a receipt (leaving it as-is)"
+            elif with_lock "$_dest.lock" write_receipt "$_dest" "$_bsha" "$_ver"; then
+                log "$_tool $_ver: recorded a receipt for the existing entry"
+            else
+                # A read-only parent or a full disk must not turn an already-usable entry into a
+                # forced reinstall; the tool ran before this and still does.
+                warn "$_tool: could not record a receipt for $_dest (leaving it as-is)"
+            fi
+            return 0
+        fi
+    fi
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     # shellcheck disable=SC2064
@@ -291,6 +393,18 @@ install_tool() {
     _reported="$(reported_version "$_staging/$_tool" "$_tool" || echo '')"
     [ "$_reported" = "$_ver" ] || die "$_tool: archive contains ${_reported:-nothing}, pinned $_ver"
 
+    # The cp -R above already copied any dotfile the archive shipped, so a receipt written here
+    # deterministically overwrites whatever landed at that name rather than merging with it. No
+    # tmp+mv needed here: staging rides one atomic rename into place, so this is never seen half-written.
+    _bsha="$(hashed_or_empty "$_staging/$_tool")"
+    if [ -n "$_bsha" ]; then
+        printf 'receipt 1\nbinary-sha256 %s\nversion %s\n' "$_bsha" "$_ver" > "$(receipt_file "$_staging")"
+    else
+        # A hash that failed or came back empty must never be written: publishing receiptless is a
+        # fully supported state -- the same one every legacy entry is in -- and self-heals next ensure.
+        warn "$_tool $_ver: could not hash the installed binary to record a receipt (publishing without one)"
+    fi
+
     mkdir -p "$(dirname "$_dest")"
     with_lock "$_dest.lock" publish_dir "$_staging" "$_dest" "$_tool"
 
@@ -309,6 +423,7 @@ reported_version() {
 
 # Existence at the hash-named path. Re-hashing on every read protects nothing: anything that can
 # rewrite the binary can rewrite whatever we compared it against.
+# A stale or mismatched entry is instead caught by ensure's deeper, receipt-based pass, not here.
 verify_tool() {
     _tool="$1"
     _sha="$(pin_sha "$_tool" "$(platform)" 2>/dev/null || echo '-')"
@@ -525,12 +640,16 @@ cmd_add() {
 cmd_ensure() {
     validate_pins
     _any=0
+    _bad=0
     for _tool in $(pinned_tools); do
         _any=1
-        install_tool "$_tool" "$(pin_version "$_tool")"
+        install_tool "$_tool" "$(pin_version "$_tool")" || _bad=1
     done
     [ "$_any" = 1 ] || warn "no tools pinned yet (run: grubstake add swiftlint@x.y.z)"
     cmd_check
+    # cmd_check's own exit status must not stand in for this one, or a tool flagged above would be
+    # reported clean because every entry still passes check's existence-only pass.
+    [ "$_bad" = 0 ] || return 1
 }
 
 cmd_check() {
@@ -549,6 +668,9 @@ cmd_path() {
     _url="$(tool_url "$1" "$_ver" "$(platform)")"
     [ -n "$_url" ] || die "$1 is not published for $(platform)"
     _bin="$(tool_bin "$1" "$(pin_sha "$1" "$(platform)")")"
+    # Existence only, deliberately: the commit path stays hash-free and offline, and a receipt
+    # mismatch surfacing here would put a network-shaped check back in front of every commit. Catching
+    # drift is ensure's job.
     [ -x "$_bin" ] || install_tool "$1" "$_ver" >&2
     verify_tool "$1" "$_ver"
     echo "$_bin"

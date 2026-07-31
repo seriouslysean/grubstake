@@ -92,8 +92,11 @@ fake_install() {
 # install_tool itself will accept -- a zip, hashed for the pin file, holding a stand-in binary that
 # reports the pinned version -- and a curl shim that serves it for any URL. Prints the sha to pin;
 # the shim lands at "$1/curl-shim/curl", a fixed path so callers need no second return value.
+# $3, optional: an exit status the fixture binary reports after printing its version, for exercising
+# reported_version's own exit-status handling. Omitted by every existing caller, so the binary just
+# echoes and returns 0 as before.
 fake_release() {
-    _repo="$1"; _ver="$2"
+    _repo="$1"; _ver="$2"; _exit="${3:-}"
     command -v zip >/dev/null 2>&1 || fixture_die "no zip to build the fixture release"
     case "$(uname -s)" in
         Darwin) _member=swiftlint ;;
@@ -103,6 +106,7 @@ fake_release() {
     _src="$_repo/release-src"
     mkdir -p "$_src" || fixture_die "cannot create $_src"
     printf '#!/bin/sh\necho %s\n' "$_ver" > "$_src/$_member" || fixture_die "cannot write the fixture release binary"
+    [ -n "$_exit" ] && { printf 'exit %s\n' "$_exit" >> "$_src/$_member" || fixture_die "cannot append the exit status to the fixture release binary"; }
     chmod +x "$_src/$_member" || fixture_die "cannot make the fixture release binary executable"
     _zip="$_repo/release.zip"
     ( cd "$_src" && zip -q "$_zip" "$_member" ) || fixture_die "cannot zip the fixture release"
@@ -287,6 +291,25 @@ r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"; rm -f "$r/.cache/swiftlint/$SHA_A/swiftlint"
 expect_fail "$r" check
 
+it "an install does not verify when the archived binary itself exits nonzero"
+# reported_version's pipeline (tool | head | sed | tr) returns tr's exit status, not the tool's own.
+# A binary that prints the pinned version and then fails still satisfies the assertion inside
+# install_tool, so a tool that cannot actually run is published and reported installed anyway. This
+# is the check AGENTS.md rule 3 exists for: the hash proves what arrived, and this is supposed to
+# prove it runs. fake_install cannot reach this: it writes straight into the hash-named cache
+# directory and never calls install_tool, so reported_version never runs; fake_release drives the
+# real download-hash-extract-publish path against a fixture that reports the pinned version and
+# then exits 42, offline.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2 42)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 even though the archived binary itself exits nonzero: $_out"
+else
+    pass
+fi
+
 it "a partial cache directory does not wedge ensure"
 # publish_dir treats any existing destination as a finished, concurrent install and discards the
 # freshly downloaded, hash-verified staging instead of publishing into it. An interrupted publish, a
@@ -393,6 +416,29 @@ else
     esac
 fi
 
+it "a version-mismatch install does not leave a staging directory in the cache"
+# The EXIT trap in install_tool covers $_tmp only, while staging is created outside it at
+# $_dest.staging.$$. A version-mismatch die -- the pinned hash matches what arrived, but the
+# archive's own binary reports a different version than the one pinned -- leaves the staging
+# directory behind in the cache. The existing "no staging directories are left in the cache" test
+# only exercises the success path. fake_release's binary reports 0.63.2; pinning it under a
+# different version number gets the hash check to pass and the version check to fail.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.65.0 $_sha $_sha"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+n=$(find "$r/.cache" -name '*.staging.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite a version mismatch: $_out"
+elif [ "$n" != "0" ]; then
+    fail "$n staging directories left behind after the version-mismatch die: $_out"
+else
+    case "$_out" in
+        *"pinned 0.65.0"*) pass ;;
+        *) fail "died for an unexpected reason, not the version mismatch: $_out" ;;
+    esac
+fi
+
 it "clean refuses a symlinked cache root rather than lying about removal"
 # rm -rf on a symlink unlinks the link itself and leaves whatever it points at completely untouched,
 # while still reporting success -- so a `clean` built on a bare `rm -rf "$GRUBSTAKE_CACHE"` would
@@ -490,6 +536,42 @@ expect_fail "$r" path periphery
 it "path rejects a tool name that is not a known tool"
 r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
 expect_fail "$r" path 'swiftlint|x'
+
+it "path rejects a tool name that known_tools' regex check would silently let through"
+# known_tools | grep -qw "$1" treats the name as a basic regular expression, so a "." in
+# "swift.int" matches any character and passes the guard meant to reject it. Nothing must be
+# pinned under a name grep -qw would also match against "swift.int" (that includes "swiftlint"
+# itself, since pin_field's own lookup is grep -E "^$1[[:space:]]"), or path finds a pin, calls
+# tool_url, and dies there instead -- accidentally closing over the guard's own job with the
+# wrong evidence. periphery is pinned instead so path's guard is what has to reject this alone.
+r=$(new_repo); pins "$r" "periphery 3.7.4 $SHA_A $SHA_A"
+_out=$(gs "$r" path swift.int); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "path exited 0 for 'swift.int': $_out"
+else
+    case "$_out" in
+        *"unknown tool"*) pass ;;
+        *) fail "refused, but not with 'unknown tool' from the guard: $_out" ;;
+    esac
+fi
+
+it "check names the pins-file line when a regex-matched tool name should be an outright rejection"
+# validate_pins carries its own tool-name guard, a call site neither the path test above nor add
+# can reach. Pinning "swift.int" directly and running check exercises it: today the guard lets
+# the line through, and the tool name is instead rejected several frames downstream inside
+# tool_url, whose bare die propagates out through set -e (see cmd_doctor's "assign, do not test"
+# comment) and prints a message with no grubstake.tools:N prefix at all -- so the file and line
+# responsible for the bad pin is never named.
+r=$(new_repo); pins "$r" "swift.int 1.0.0 $SHA_A $SHA_A"
+_out=$(gs "$r" check); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "check exited 0 for a pin named 'swift.int': $_out"
+else
+    case "$_out" in
+        *"grubstake.tools:"*) pass ;;
+        *) fail "refused, but without naming the pins-file line responsible: $_out" ;;
+    esac
+fi
 
 it "a tool with no artifact on this platform is skipped, not failed, by check"
 r=$(new_repo); pins "$r" "periphery 3.7.4 $SHA_A -"
@@ -1313,6 +1395,33 @@ r=$(new_repo); expect_fail "$r" add notatool@1.0.0
 it "add rejects a spec with no version"
 r=$(new_repo); expect_fail "$r" add swiftlint
 
+it "add refuses to write over a pins file with unresolved conflict markers"
+# add is the only command that writes grubstake.tools and, pre-fix, the only one that never calls
+# validate_pins: it exits 0 reporting success while LC_ALL=C sort relocates the conflict markers
+# away from the lines they delimited, so whoever resolves the conflict is reading a file whose
+# structure has been rearranged underneath them. fake_release's curl shim keeps this offline: add
+# still has to hash a real artifact for every platform before it ever reaches the pins file.
+r=$(new_repo)
+pins "$r" "<<<<<<< HEAD
+======="
+_before=$(cat "$r/grubstake.tools")
+fake_release "$r" 0.63.2 >/dev/null
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@0.63.2 2>&1 ); _rc=$?
+_after=$(cat "$r/grubstake.tools")
+if [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 over a pins file with unresolved conflict markers: $_out"
+elif [ "$_after" != "$_before" ]; then
+    fail "add refused, but rewrote grubstake.tools first: $_out"
+else
+    case "$_out" in
+        *"conflict"*) pass ;;
+        *) fail "refused, but without naming the conflict markers: $_out" ;;
+    esac
+fi
+
+# add's half of the regex defect is not observable at the CLI: tool_url's literal case dies with
+# the same message either way, so the check test above covers the discriminating call site.
+
 if [ "$NETWORK" = 1 ]; then
     printf '\nadd, network\n'
 
@@ -1324,10 +1433,23 @@ if [ "$NETWORK" = 1 ]; then
     [ "$n" = "2" ] && pass || fail "pinned $n tools, expected 2"
 
     it "add records a hash for every platform the tool publishes"
-    r=$(new_repo); gs_rc "$r" add swiftlint@0.63.2
-    line=$(grep '^swiftlint' "$r/grubstake.tools")
-    d=$(echo "$line" | awk '{print $3}'); l=$(echo "$line" | awk '{print $4}')
-    case "$d$l" in *-*) fail "a platform hash is missing: $line" ;; *) pass ;; esac
+    # gs_rc's own exit status used to be discarded here entirely (test/run.sh runs under set -u
+    # alone), and when add writes nothing at all, both awk fields read from a missing grep match
+    # are empty, and `case "$d$l" in *-*)` cannot match an empty string -- so a complete failure of
+    # add fell through to pass. Existence guarded before anything about the columns is asserted,
+    # the same shape #37 already added to this test's two siblings.
+    r=$(new_repo)
+    if ! gs_rc "$r" add swiftlint@0.63.2; then
+        fail "add exited non-zero"
+    else
+        line=$(grep '^swiftlint' "$r/grubstake.tools" 2>/dev/null)
+        if [ -z "$line" ]; then
+            fail "add exited 0 but grubstake.tools has no swiftlint pin line"
+        else
+            d=$(echo "$line" | awk '{print $3}'); l=$(echo "$line" | awk '{print $4}')
+            case "$d$l" in *-*) fail "a platform hash is missing: $line" ;; *) pass ;; esac
+        fi
+    fi
 
     it "a real install passes check, and the path it prints runs at the pinned version"
     r=$(new_repo); gs_rc "$r" add swiftlint@0.63.2

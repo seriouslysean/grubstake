@@ -347,24 +347,33 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     # Known limitation: SwiftLint reads the working tree, so this checks the current contents of
     # files whose paths are staged, not the staged blobs. Linting a temp copy would break config
     # resolution, and stashing the remainder to lint the index is what strands work in the tools
-    # that do it. The divergence is warned about below, and CI lints the committed tree.
+    # that do it. AD/MD is refused below and AM/MM is warned about, and CI lints the committed tree.
+    STATUS=$(git status --porcelain -- '*.swift')
+    # AD/MD: the worktree copy is gone, so the linter would read nothing at all. Decide this
+    # ourselves rather than trust the linter's exit status, which a batched run can mask.
+    GONE=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMR]D //p')
+    # "--" ends option parsing, so a staged path starting with "-" is a path, never a linter flag.
     OUT=$(git diff --cached --name-only -z --diff-filter=ACMR -- '*.swift' \
-        | xargs -0 "$SWIFTLINT" lint --strict --quiet 2>&1) && RC=0 || RC=$?
+        | xargs -0 "$SWIFTLINT" lint --strict --quiet -- 2>&1) && RC=0 || RC=$?
+    if [ -n "$GONE" ]; then
+        # Print first: a real violation in a co-staged file the linter did read must not be
+        # swallowed by this refusal, or the developer only learns about it on a second retry.
+        [ -n "$OUT" ] && echo "$OUT" >&2
+        echo "[pre-commit] staged Swift file(s) missing from the working tree, so nothing was linted:" >&2
+        printf '%s\n' "$GONE" | sed 's/^/[pre-commit]   /' >&2
+        exit 1
+    fi
     if [ "$RC" -ne 0 ]; then
-        # SwiftLint exits non-zero with this message when every staged path is excluded by config.
-        if ! echo "$OUT" | grep -q "No lintable files found"; then
-            echo "$OUT" >&2
-            echo "[pre-commit] swiftlint failed on working-tree contents of staged Swift paths." >&2
-            echo "[pre-commit] fix, re-stage, retry." >&2
-            exit 1
-        fi
+        echo "$OUT" >&2
+        echo "[pre-commit] swiftlint failed on working-tree contents of staged Swift paths." >&2
+        echo "[pre-commit] fix, re-stage, retry." >&2
+        exit 1
     fi
     [ -n "$OUT" ] && echo "$OUT"
 
-    # Fires on exactly the case the retry loop creates: lint fails, the file is fixed, the commit
-    # is retried without re-staging, and the stale blob commits while the hook reads clean bytes.
-    # Advisory only, since a divergence is legitimate under `git add -p`.
-    if git status --porcelain -- '*.swift' | grep -q '^[ACMR]M'; then
+    # AM/MM/CM/RM: the linter read different content than what is staged. Advisory only, since this
+    # is legitimate under `git add -p`; AD/MD above already refuses when there is nothing to read.
+    if printf '%s\n' "$STATUS" | grep -q '^[ACMR]M '; then
         echo "[pre-commit] warning: staged Swift files have unstaged edits. Lint read the working" >&2
         echo "[pre-commit] tree, not what is being committed. Re-stage if the fix belongs here." >&2
     fi

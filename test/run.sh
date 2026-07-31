@@ -38,6 +38,12 @@ trap 'cleanup; exit 2' HUP INT TERM
 
 it() { CURRENT="$1"; }
 
+# The count must not depend on the line actually landing. This file exits via [ "$FAIL" -eq 0 ],
+# so if the count were gated on the printf's own success (printf ... && FAIL=$((FAIL + 1))), a
+# printf that fails to write -- a full disk, a reader that closed the pipe early -- would turn a
+# real failure into FAIL=0 and exit 0 on a run the release gates on. Counting first means that same
+# broken printf still leaves FAIL nonzero: the run goes red with an unexplained count instead of
+# green with a hidden one. Confusing-but-red beats silent-but-green.
 pass() { PASS=$((PASS + 1)); printf '  ok    %s\n' "$CURRENT"; }
 fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n         %s\n' "$CURRENT" "$1"; }
 
@@ -1049,6 +1055,14 @@ it "two repos sharing one cache: a legacy upgrade must not break a concurrent ex
 # window if one exists; a warm-up wait before B starts is what keeps a loop that has not gotten going
 # yet from proving nothing.
 #
+# The loop also runs a fixed minimum number of iterations regardless of how long repo B's ensure
+# call takes, so the sample size the pass/fail decision is based on is guaranteed by construction
+# rather than by how much wall clock a busy machine happened to grant it. The verdict is still a
+# check of the same failure-log file as before -- it is not a different kind of signal -- but the
+# loop makes that check on itself the instant it stops and hands the answer back through wait's
+# exit status, rather than leaving a separate process to re-open the file later at whatever moment
+# it happens to get scheduled.
+#
 # The catch is probabilistic, not guaranteed, per AGENTS.md 15: a single green run here does not
 # prove the window is closed, only that this run did not hit it. Reconstructing the design this
 # replaces and looping this fixture against it caught the destroy-in-place window 10/20 runs; the
@@ -1078,11 +1092,21 @@ _stop="$ROOT/stop.$$"
 : > "$_execlog"
 (
     _i=0
-    while [ ! -f "$_stop" ]; do
+    # 20 is a floor, not a target: the loop keeps going past it until told to stop, so it still
+    # spans the whole of repo B's ensure call on a fast machine. The floor exists so a slow one
+    # cannot shrink the sample to a handful of iterations and call that a clean run -- the exit
+    # status below is what decides pass/fail, not how many of these ran.
+    while [ "$_i" -lt 20 ] || [ ! -f "$_stop" ]; do
         _i=$((_i + 1))
-        "$_bin" >/dev/null 2>&1 || echo "$_i" >> "$_faillog"
+        # The append is the one remaining record of a real exec failure; if it silently cannot be
+        # written (a full disk, the temp dir vanishing under it), a real failure would read back as
+        # a clean faillog and this test would pass on exactly the regression it exists to catch.
+        # fixture_die instead of a swallowed error, same as every other fixture write in this file.
+        "$_bin" >/dev/null 2>&1 || echo "$_i" >> "$_faillog" || fixture_die "cannot record repo A's exec failure to $_faillog"
         echo "$_i" > "$_execlog"
     done
+    [ -s "$_faillog" ] && exit 1
+    exit 0
 ) &
 _aloop=$!
 
@@ -1090,14 +1114,19 @@ _aloop=$!
 # to open actually overlaps a live reader instead of a loop that has not started yet. The empty file
 # : > "$_execlog" created above reads back as an empty string, not "0", until the background loop's
 # first write lands, so that has to be normalized before the numeric compare or dash reports
-# "integer expression expected" on every poll before the loop gets going.
+# "integer expression expected" on every poll before the loop gets going. The budget below is
+# generous on purpose: this poll, unlike the pass/fail decision itself, still runs under a load
+# assumption, and firing fixture_die early would abort the whole suite over scheduling noise
+# rather than over anything the test exists to catch. 300 * 0.05s is 15s in practice; it only
+# reaches the full 300s on a shell without fractional sleep, which none of the suite's supported
+# shells are.
 _w=0
 while :; do
     _seen="$(cat "$_execlog" 2>/dev/null)"
     case "$_seen" in ''|*[!0-9]*) _seen=0 ;; esac
     [ "$_seen" -ge 5 ] && break
     _w=$((_w + 1))
-    [ "$_w" -gt 100 ] && fixture_die "repo A's exec loop never got going"
+    [ "$_w" -gt 300 ] && fixture_die "repo A's exec loop never got going"
     sleep 0.05 2>/dev/null || sleep 1
 done
 
@@ -1107,7 +1136,7 @@ _out=$( cd "$b" && PATH="$a/curl-shim:$PATH" GRUBSTAKE_CACHE="$_shared" ./grubst
 # repo A's loop is told to stop.
 sleep 0.2 2>/dev/null || sleep 1
 : > "$_stop"
-wait "$_aloop" 2>/dev/null
+wait "$_aloop"; _lrc=$?
 
 _iterations="$(cat "$_execlog" 2>/dev/null)"
 case "$_iterations" in ''|*[!0-9]*) _iterations=0 ;; esac
@@ -1116,10 +1145,8 @@ _failures=0
 
 if [ "$_rc" -ne 0 ]; then
     fail "repo B's ensure over the shared legacy entry exited $_rc: $_out"
-elif [ "$_iterations" -lt 5 ]; then
-    fail "repo A's exec loop only completed $_iterations iterations, too few to have overlapped repo B's ensure"
-elif [ "$_failures" != "0" ]; then
-    fail "repo A's binary failed to exec $_failures/$_iterations times while repo B ran ensure against the shared cache (iterations: $(tr '\n' ' ' < "$_faillog"))"
+elif [ "$_lrc" -ne 0 ] || [ "$_failures" != "0" ]; then
+    fail "repo A's binary failed to exec $_failures/$_iterations times while repo B ran ensure against the shared cache (iterations: $(tr '\n' ' ' < "$_faillog" 2>/dev/null))"
 else
     pass
 fi

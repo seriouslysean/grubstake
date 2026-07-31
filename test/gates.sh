@@ -61,7 +61,11 @@ case "$out" in
 esac
 
 it "the fourth block on the same state passes and records the override"
-gate >/dev/null; gate >/dev/null
+# Self-contained: reset the block count and the log rather than relying on state a preceding test
+# leaves behind, so inserting or reordering a test here cannot silently miscount to a wrong total,
+# or pass because an earlier test already wrote a gate-override line this one never earned.
+rm -f "$BLOCKS" "$LOG"
+gate >/dev/null; gate >/dev/null; gate >/dev/null
 out=$(gate); rc=$?
 if [ "$rc" -eq 0 ] && [ -z "$out" ] && grep -q '^gate-override' "$LOG"; then pass
 else fail "rc=$rc out=$out"; fi
@@ -69,7 +73,10 @@ else fail "rc=$rc out=$out"; fi
 it "a completed antagonist pass mints the receipt"
 rm -f "$MARKER" "$BLOCKS"
 receipt 'Antagonist: gst-shell-critic.\n\nNo findings.' >/dev/null
-if [ -f "$MARKER" ]; then pass; else fail "no marker written"; fi
+# pass and skip are not equivalent: skip bypasses the gate's session check, so a genuine mint
+# mislabeled skip is strictly more permissive than a correct pass and must not read as ok here.
+if [ -f "$MARKER" ] && [ "$(sed -n 1p "$MARKER")" = pass ]; then pass
+else fail "marker missing or not labeled pass: $(cat "$MARKER" 2>/dev/null)"; fi
 
 it "the gate passes on a fresh matching receipt"
 out=$(gate); rc=$?

@@ -191,7 +191,16 @@ it "the script is wrapped so a truncated copy is inert"
 # A shell reads scripts incrementally, so without main() at the end a partial file executes its
 # valid prefix. A syntax error on stderr is the correct outcome. What must not happen is a command running:
 # no version, no log line, non-zero exit.
-r=$(new_repo); head -c 900 "$GS" > "$r/trunc.sh"; chmod +x "$r/trunc.sh"
+# The cut point is derived from log()'s own byte offset rather than a raw literal: a hardcoded count
+# is incidental to the current header length and would silently drift onto a clean, complete
+# boundary (an exit-0 prefix that defines functions but calls none) if that header ever changed.
+# Landing one byte past the opening quote of log()'s own format string is an unterminated quote for
+# any format string, so drift in what follows that quote cannot close the gap the way a fixed-length
+# offset into the match could.
+_trunc_lit="log()  { printf '"
+_trunc_anchor=$(grep -bo "^$_trunc_lit" "$GS" | head -1 | cut -d: -f1)
+case "$_trunc_anchor" in ''|*[!0-9]*) fixture_die "cannot find the truncation anchor in $GS" ;; esac
+r=$(new_repo); head -c "$((_trunc_anchor + ${#_trunc_lit} + 1))" "$GS" > "$r/trunc.sh"; chmod +x "$r/trunc.sh"
 out=$(sh "$r/trunc.sh" version 2>&1); rc=$?
 if [ "$rc" -eq 0 ]; then
     fail "truncated script exited 0"
@@ -279,12 +288,18 @@ chmod +x "$r/.cache/swiftlint/$SHA_A/swiftlint"
 expect_ok "$r" check
 
 it "no source file claims to detect tampering"
-if grep -rniE "tamper" "$(dirname "$0")/.." --include='*.sh' --include='*.md' \
-    --exclude=run.sh >/dev/null 2>&1; then
-    fail "something still claims tamper detection"
-else
-    pass
-fi
+# git grep, not a filesystem grep with --include filters: the shipped hooks and the workflow YAML
+# have no *.sh/*.md extension and were invisible to an extension-filtered scan, and scoping to
+# tracked files means an untracked local file (a scratch note, an agent's own memory directory)
+# cannot trip this test either. git grep exits 0 (match), 1 (no match), or 2+ (it could not scan
+# at all, e.g. not a repo) -- collapsing every non-zero rc into "clean" would trade one silent
+# pass for another, so a real scan failure has to stop the run rather than read as ok.
+git -C "$(dirname "$0")/.." grep -qiE "tamper" -- . ':!test/run.sh'; _tamper_rc=$?
+case "$_tamper_rc" in
+    0) fail "something still claims tamper detection" ;;
+    1) pass ;;
+    *) fixture_die "git grep could not scan the tree for tamper claims (rc $_tamper_rc)" ;;
+esac
 
 it "a missing binary fails"
 r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
@@ -2201,6 +2216,42 @@ printf '\npublication safety\n'
 
 it "nothing tracked identifies a consumer, a person, or a machine"
 if "$(dirname "$0")/no-leaks.sh" >/dev/null 2>&1; then pass; else fail "$("$(dirname "$0")/no-leaks.sh" 2>&1 | tail -3)"; fi
+
+# The test above only proves no-leaks.sh's exit code against this repo's own, already-clean tree --
+# it cannot prove either scan path below actually fires, and a no-op regression in either one would
+# leave it green. A throwaway repo with a known-dirty shape closes that.
+leaks_repo() {
+    _lr="$(new_repo)"
+    # A CI runner has no global identity, so a fixture that commits has to carry its own.
+    ( cd "$_lr" \
+      && git config user.email test@example.invalid \
+      && git config user.name "grubstake suite" \
+      && git config commit.gpgsign false ) || fixture_die "cannot configure $_lr"
+    mkdir -p "$_lr/test" || fixture_die "cannot create $_lr/test"
+    cp "$(dirname "$0")/no-leaks.sh" "$_lr/test/no-leaks.sh" || fixture_die "cannot copy no-leaks.sh into $_lr"
+    chmod +x "$_lr/test/no-leaks.sh" || fixture_die "cannot make no-leaks.sh executable in $_lr"
+    echo "$_lr"
+}
+
+it "no-leaks flags a leaky filename even when its content is clean"
+r=$(leaks_repo)
+: > "$r/notes-admin@example.com.txt" || fixture_die "cannot write the filename fixture in $r"
+( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the filename fixture in $r"
+if ( cd "$r" && ./test/no-leaks.sh ) >/dev/null 2>&1; then
+    fail "a leaky filename with clean content was not flagged"
+else
+    pass
+fi
+
+it "no-leaks flags a capitalized home path a lowercase-only pattern would miss"
+r=$(leaks_repo)
+printf 'built at /home/Jenkins/workspace/app\n' > "$r/deploy-log.txt" || fixture_die "cannot write the home-path fixture in $r"
+( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the home-path fixture in $r"
+if ( cd "$r" && ./test/no-leaks.sh ) >/dev/null 2>&1; then
+    fail "a capitalized home path was not flagged"
+else
+    pass
+fi
 
 # ---------------------------------------------------------------------------- result
 

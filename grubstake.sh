@@ -109,6 +109,9 @@ tool_version_args() {
 
 known_tools() { echo "swiftlint swiftformat xcbeautify periphery"; }
 
+# grep -qw matches "$1" as a basic regex, so "swift.int" matches "swiftlint"; -xF keeps it literal.
+is_known_tool() { known_tools | tr ' ' '\n' | grep -qxF "$1"; }
+
 # ---------------------------------------------------------------------------- pins
 # Not JSON: greppable, diffable, no parser needed.
 # Columns: name version sha256-darwin sha256-linux ("-" when absent).
@@ -161,7 +164,7 @@ validate_pins() {
         case "$_l" in [[:space:]]*) die "grubstake.tools:$_n line must not be indented" ;; esac
         set -- $_l
         [ $# -eq 4 ] || die "grubstake.tools:$_n expected 4 fields, got $#"
-        known_tools | grep -qw "$1" || die "grubstake.tools:$_n unknown tool: $1"
+        is_known_tool "$1" || die "grubstake.tools:$_n unknown tool: $1"
         echo "$2" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || die "grubstake.tools:$_n bad version: $2"
         for _h in "$3" "$4"; do
             [ "$_h" = "-" ] || echo "$_h" | grep -qE '^[0-9a-f]{64}$' \
@@ -269,6 +272,9 @@ install_tool() {
 
     # Keep the binary's siblings: periphery loads libIndexStore.dylib via @rpath from its own dir.
     _staging="$_dest.staging.$$"
+    # Staging lives outside $_tmp, so a die between here and publish leaked it; rm -rf tolerates publish having moved it.
+    # shellcheck disable=SC2064
+    trap "rm -rf '$_tmp' '$_staging'" EXIT HUP INT TERM
     rm -rf "$_staging"
     mkdir -p "$_staging"
     cp -R "$(dirname "$_found")"/. "$_staging"/
@@ -276,7 +282,7 @@ install_tool() {
     chmod +x "$_staging/$_tool"
 
     # Asserted once, here, on bytes that have already matched the pin. No later run re-checks it.
-    _reported="$(reported_version "$_staging/$_tool" "$_tool")"
+    _reported="$(reported_version "$_staging/$_tool" "$_tool" || echo '')"
     [ "$_reported" = "$_ver" ] || die "$_tool: archive contains ${_reported:-nothing}, pinned $_ver"
 
     mkdir -p "$(dirname "$_dest")"
@@ -290,7 +296,9 @@ install_tool() {
 }
 
 reported_version() {
-    "$1" $(tool_version_args "$2") 2>/dev/null | head -1 | sed 's|^[Vv]ersion:[[:space:]]*||' | tr -d '[:space:]'
+    # A pipeline reports its last command's exit status (tr's), not the tool's; split it out to catch that.
+    _rv="$("$1" $(tool_version_args "$2") 2>/dev/null)" || return 1
+    printf '%s\n' "$_rv" | head -1 | sed 's|^[Vv]ersion:[[:space:]]*||' | tr -d '[:space:]'
 }
 
 # Existence at the hash-named path. Re-hashing on every read protects nothing: anything that can
@@ -451,7 +459,7 @@ add_one() {
     _tool="${1%@*}"
     _ver="${1#*@}"
     [ "$_tool" != "$1" ] || die "usage: grubstake add <tool>@<version>"
-    known_tools | grep -qw "$_tool" || die "unknown tool: $_tool"
+    is_known_tool "$_tool" || die "unknown tool: $_tool"
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     # shellcheck disable=SC2064
@@ -499,6 +507,7 @@ add_one() {
 # Every argument is pinned. Reading only $1 meant a batched call pinned one tool and exited 0.
 cmd_add() {
     [ $# -ge 1 ] || die "usage: grubstake add <tool>@<version>..."
+    validate_pins
     for _spec in "$@"; do
         add_one "$_spec"
     done
@@ -526,7 +535,7 @@ cmd_check() {
 cmd_path() {
     [ $# -ge 1 ] || die "usage: grubstake path <tool>"
     validate_pins
-    known_tools | grep -qw "$1" || die "unknown tool: $1"
+    is_known_tool "$1" || die "unknown tool: $1"
     _ver="$(pin_version "$1")" || die "$1 is not pinned"
     _url="$(tool_url "$1" "$_ver" "$(platform)")"
     [ -n "$_url" ] || die "$1 is not published for $(platform)"

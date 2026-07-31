@@ -20,6 +20,12 @@ log()  { printf '[grubstake] %s\n' "$1"; }
 warn() { printf '[grubstake] %s\n' "$1" >&2; }
 die()  { printf '[grubstake] %s\n' "$1" >&2; exit 1; }
 
+# ---------------------------------------------------------------------------- quoting
+
+# A trap string is shell source expanded once when the trap is set and re-parsed when it fires,
+# so a value embedded in it has to survive that second parse regardless of what characters it holds.
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
 usage() {
     cat <<'USAGE'
 grubstake: pinned, verified build tooling for iOS repos.
@@ -246,7 +252,7 @@ install_tool() {
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     # shellcheck disable=SC2064
-    trap "rm -rf '$_tmp'" EXIT HUP INT TERM
+    trap "rm -rf $(sq "$_tmp")" EXIT HUP INT TERM
 
     log "$_tool $_ver: downloading"
     _archive="$_tmp/archive"
@@ -274,7 +280,7 @@ install_tool() {
     _staging="$_dest.staging.$$"
     # Staging lives outside $_tmp, so a die between here and publish leaked it; rm -rf tolerates publish having moved it.
     # shellcheck disable=SC2064
-    trap "rm -rf '$_tmp' '$_staging'" EXIT HUP INT TERM
+    trap "rm -rf $(sq "$_tmp") $(sq "$_staging")" EXIT HUP INT TERM
     rm -rf "$_staging"
     mkdir -p "$_staging"
     cp -R "$(dirname "$_found")"/. "$_staging"/
@@ -463,7 +469,7 @@ add_one() {
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     # shellcheck disable=SC2064
-    trap "rm -rf '$_tmp'" EXIT HUP INT TERM
+    trap "rm -rf $(sq "$_tmp")" EXIT HUP INT TERM
 
     # Hash every platform, so a macOS run still pins what Linux CI fetches.
     _shas=""
@@ -489,7 +495,10 @@ add_one() {
         sleep 0.1 2>/dev/null || sleep 1
     done
     # shellcheck disable=SC2064
-    trap "rm -rf '$_tmp' '$_pt' '$_lock'" EXIT HUP INT TERM
+    trap "rm -rf $(sq "$_tmp") $(sq "$_pt") $(sq "$_lock")" EXIT HUP INT TERM
+    # The fetch above can run for minutes with nothing holding the pins file, so its contents are
+    # only known-good once the lock that guards the rewrite below is held.
+    validate_pins
     [ -f "$_pins" ] || printf '# grubstake pins: name version sha256-darwin sha256-linux\n' > "$_pins"
     grep -v -E "^$_tool[[:space:]]" "$_pins" 2>/dev/null | grep -v '^$' > "$_pt" || true
     # shellcheck disable=SC2086
@@ -677,7 +686,7 @@ cmd_update() {
     _pinned="${1:-}"
     _tmp="$(mktemp "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     # shellcheck disable=SC2064
-    trap "rm -f '$_tmp'" EXIT HUP INT TERM
+    trap "rm -f $(sq "$_tmp")" EXIT HUP INT TERM
 
     # Silent on the common path; an overridden source is the one case a reader cannot infer from
     # the rest of the output, since fetch_release never repeats the host it pulled from.

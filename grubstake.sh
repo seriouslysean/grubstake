@@ -6,7 +6,7 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="0.4.0"
+GRUBSTAKE_VERSION="0.5.0"
 GRUBSTAKE_MIN_VERSION="0.3.0"   # every earlier release has a known blocking defect
 # Named so cmd_update can tell an override apart from the default it is comparing against.
 GRUBSTAKE_REPO_DEFAULT="https://github.com/seriouslysean/grubstake"

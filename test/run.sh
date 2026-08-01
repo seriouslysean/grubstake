@@ -1161,6 +1161,138 @@ else
     pass
 fi
 
+it "a lock failure on one tool stays scoped to that tool, instead of aborting ensure for the rest"
+# #67: with_lock's own retry loop calls die() directly when it can never acquire the lock -- both
+# the #56 vanished-parent fast-fail and the stale-lock timeout below it are a hard exit of the
+# whole process, regardless of how the caller structured its own error handling. Every other
+# install_tool failure mode instead warns, marks the run bad, and lets cmd_ensure continue to the
+# next tool (see "a receipt mismatch on one tool does not stop ensure from verifying the rest"
+# above) -- a lock failure is the one exception, pre-existing and untouched by #56, which only
+# improved the message on the way to the same die(). A directory already sitting at "<dest>.lock"
+# before ensure ever runs makes mkdir fail every retry the same way a real concurrent holder would,
+# no second process needed, for the same five-second budget a genuinely stale lock would cost.
+# swiftlint is pinned first, its lock is what's blocked, and swiftformat second as a plain
+# receiptless legacy entry that converges with no download, so its receipt appearing is unambiguous
+# evidence ensure reached it rather than dying at swiftlint.
+r=$(new_repo)
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+fake_install "$r" swiftformat 0.61.1 "$SHA_B"
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A
+swiftformat 0.61.1 $SHA_B $SHA_B"
+_lockdir="$r/.cache/swiftlint/$SHA_A.lock"
+mkdir -p "$_lockdir" || fixture_die "cannot plant the stale lock"
+_fmt_receipt="$r/.cache/swiftformat/$SHA_B/.grubstake-receipt"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite a tool it could never lock: $_out"
+elif ! printf '%s' "$_out" | grep -F -q "$_lockdir"; then
+    fail "the lock failure was reported without naming swiftlint's lock: $_out"
+elif [ ! -f "$_fmt_receipt" ]; then
+    # Seen to flake under a loaded machine (full-suite dash runs), never in isolation: nothing in
+    # this fixture pre-plants or contends for swiftformat's own "$SHA_B.lock", so its mkdir should
+    # always win on the first try. If it ever doesn't, this fixture cannot yet tell "genuinely
+    # contended" apart from "mkdir failed for an unrelated transient reason" -- with_lock's own
+    # `mkdir "$_lk" 2>/dev/null` discards the real errno either way -- so the diagnostic below is
+    # what the next occurrence needs to tell those apart, per AGENTS.md 15.
+    fail "ensure stopped at swiftlint's lock instead of continuing: swiftformat was never reached, no receipt recorded (swiftformat entry: $(ls -la "$r/.cache/swiftformat" 2>&1 | tr '\n' ';'); its lock: $([ -d "$r/.cache/swiftformat/$SHA_B.lock" ] && echo present || echo absent)): $_out"
+elif ! printf '%s' "$_out" | grep -q '^\[grubstake\] ok ('; then
+    fail "check's own summary never ran: $_out"
+else
+    pass
+fi
+rm -rf "$_lockdir" 2>/dev/null
+
+it "a lock failure while correcting a stale receipt version is scoped to that tool, not fatal to the rest"
+# #67, the sibling site to the one above: a genuinely verified entry whose receipt just records an
+# older version than the pin takes the "correct the receipt version in place" branch (no download,
+# since the binary on disk already reports the pinned version -- see "a version-only receipt edit is
+# corrected in place, not re-fetched" above). If with_lock can never acquire this entry's own lock,
+# the correction must warn and flag the run rather than silently return 0 and let a stale version
+# label stand as if it had been fixed. fake_receipt anchors binary-sha256 to the binary fake_install
+# actually wrote, so entry_verified passes and this reaches the version-rewrite branch, never the
+# mismatch-warn branch above it (which fires on a *reported* version mismatch, not a stale label).
+# swiftformat is pinned second, as a plain receiptless legacy entry, so its receipt appearing is
+# unambiguous evidence ensure continued past swiftlint's stuck lock rather than stopping there.
+r=$(new_repo)
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+fake_receipt "$r/.cache/swiftlint/$SHA_A" swiftlint 0.60.0
+fake_install "$r" swiftformat 0.61.1 "$SHA_B"
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A
+swiftformat 0.61.1 $SHA_B $SHA_B"
+_lockdir="$r/.cache/swiftlint/$SHA_A.lock"
+mkdir -p "$_lockdir" || fixture_die "cannot plant the stale lock"
+_receipt="$r/.cache/swiftlint/$SHA_A/.grubstake-receipt"
+_fmt_receipt="$r/.cache/swiftformat/$SHA_B/.grubstake-receipt"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+_rver="$(awk '/^version/{print $2}' "$_receipt" 2>/dev/null)"
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite a stale receipt it could never correct: $_out"
+elif [ "$_rver" != "0.60.0" ]; then
+    fail "the receipt's stale version was rewritten despite the lock never being acquired: $(cat "$_receipt" 2>/dev/null)"
+elif ! printf '%s' "$_out" | grep -F -q "$_lockdir"; then
+    fail "the lock failure was reported without naming swiftlint's lock: $_out"
+elif [ ! -f "$_fmt_receipt" ]; then
+    fail "ensure stopped at swiftlint's stuck receipt instead of continuing: swiftformat was never reached, no receipt recorded: $_out"
+else
+    pass
+fi
+rm -rf "$_lockdir" 2>/dev/null
+
+it "a lock failure on a cold install is scoped to that tool, and check runs its own full pass too"
+# #67's third site: the two tests above cover with_lock's own retry loop and the stale-receipt
+# rewrite, both reached through an entry that already has a binary on disk. Neither can reach the
+# cold-install branch, where fake_install's shortcut never runs at all: install_tool's early
+# "already installed" check only defers to with_lock once a real download has verified and staged
+# the archive, so the publish lock is the one this scenario needs a real (offline) install to reach.
+# swiftlint is pinned cold, served by fake_release/curl-shim, with its eventual publish lock
+# pre-planted so it never lands; swiftformat is pinned second as a plain receiptless legacy entry,
+# proving the install loop itself is scoped exactly as the sibling tests above already prove.
+# The install loop being scoped is not the same claim as check's own pass being scoped: verify_tool
+# still dies outright on a missing binary today, and cmd_ensure calls cmd_check after the install
+# loop, so that die is what kills the whole run before it ever reaches its own summary line. A
+# second, direct "check" invocation with a third tool that has no entry at all is what actually
+# discriminates that -- swiftformat's own binary exists either way, so it proves nothing about
+# whether check's loop can survive a missing one; xcbeautify's absence does, since it is only ever
+# reached if check's pass over swiftlint's absence did not just die.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+fake_install "$r" swiftformat 0.61.1 "$SHA_B"
+pins "$r" "swiftlint 0.63.2 $_sha $_sha
+swiftformat 0.61.1 $SHA_B $SHA_B"
+_lockdir="$r/.cache/swiftlint/$_sha.lock"
+mkdir -p "$_lockdir" || fixture_die "cannot plant the stale lock"
+_fmt_receipt="$r/.cache/swiftformat/$SHA_B/.grubstake-receipt"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite a tool that was never installed: $_out"
+elif [ -e "$r/.cache/swiftlint/$_sha/swiftlint" ]; then
+    fail "swiftlint was published despite never acquiring its publish lock: $_out"
+elif ! printf '%s' "$_out" | grep -F -q "$_lockdir"; then
+    fail "the lock failure was reported without naming swiftlint's lock: $_out"
+elif [ ! -f "$_fmt_receipt" ]; then
+    fail "the install loop stopped at swiftlint's lock instead of continuing: swiftformat was never reached: $_out"
+elif printf '%s' "$_out" | grep -q '^\[grubstake\] ok ('; then
+    fail "the summary claimed ok despite a tool that was never installed: $_out"
+else
+    # A third tool with no entry at all, added only now: check never installs anything, so this
+    # cannot send the earlier ensure run off to actually try downloading it.
+    pins "$r" "swiftlint 0.63.2 $_sha $_sha
+swiftformat 0.61.1 $SHA_B $SHA_B
+xcbeautify 1.0.0 $SHA_A $SHA_A"
+    _cout=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh check 2>&1 ); _crc=$?
+    _missing=$(printf '%s\n' "$_cout" | grep -c "not installed")
+    if [ "$_crc" -eq 0 ]; then
+        fail "check exited 0 despite two tools that were never installed: $_cout"
+    elif [ "$_missing" -ne 2 ]; then
+        fail "check named only $_missing of 2 missing tools instead of running its full pass (died at the first?): $_cout"
+    elif printf '%s' "$_cout" | grep -q '^\[grubstake\] ok ('; then
+        fail "check claimed ok despite two tools that were never installed: $_cout"
+    else
+        pass
+    fi
+fi
+rm -rf "$_lockdir" 2>/dev/null
+
 # ---------------------------------------------------------------------------- cache integrity: shared cache
 #
 # Deliberately breaks the suite's own isolation model: every other test gets its own repo AND its

@@ -35,6 +35,10 @@ LATEST=$(sed -n 2p "$CACHE" 2>/dev/null) || exit 0
 [ -n "$LATEST" ] || exit 0
 [ "$LATEST" = "$CURRENT" ] && exit 0
 
+# CURRENT comes from the installed script's own report; LATEST is read raw from a writable cache
+# file. Neither has passed the fetch filter's grep, so an unvalidated one reaches the advisory line.
+printf '%s\n%s\n' "$CURRENT" "$LATEST" | grep -qvE '^[0-9]+\.[0-9]+\.[0-9]+$' && exit 0
+
 # Only speak when the cached latest is genuinely newer than what is installed.
 newest=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
 [ "$newest" = "$LATEST" ] || exit 0

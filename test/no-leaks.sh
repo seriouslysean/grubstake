@@ -7,6 +7,11 @@
 #
 # It matches shapes: paths, addresses, and references that point outside this repo.
 #
+# A bare owner/repo mention with no issue number is beyond this scanner: the pattern that would
+# catch it matches every path fragment in the tree, and a deny-list tracked here would itself
+# carry the names it protects. The semantic audit gates that shape in published bodies; in
+# tracked files it has no mechanical gate at all and rests on review of the diff.
+#
 #   test/no-leaks.sh          scan tracked files
 #   test/no-leaks.sh --all    also scan every commit message in history
 

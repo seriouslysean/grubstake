@@ -3096,6 +3096,95 @@ fi
 # add's half of the regex defect is not observable at the CLI: tool_url's literal case dies with
 # the same message either way, so the check test above covers the discriminating call site.
 
+it "add's pins lock fails fast naming the vanished directory, not a phantom holder"
+# #68: add_one's pins lock is a hand-rolled "while ! mkdir" loop, the same shape with_lock had
+# before #56 -- mkdir cannot distinguish its parent being gone from another run genuinely holding
+# the lock, so if the directory holding grubstake.tools disappears between add's fetch loop and its
+# lock attempt, the loop spins the full ~5s retry budget and then blames a run that was never
+# there. The trigger is far-fetched (the repo's own working directory vanishing mid-add, not
+# something anything in normal use does), which is why this is filed for consistency with #56
+# rather than urgency -- but the fix is the same shape: check the parent inside the loop, fail
+# fast, name what actually happened.
+#
+# add's own network fetches happen before the lock (hashing every platform first), so
+# fake_release/curl-shim get add_one to the lock cheaply and offline. lock_pause_shim pauses
+# add_one's own lock mkdir (it ends in ".lock" the same way with_lock's does, so the existing shim
+# needs no changes), which is the deterministic point to rename the repo directory away: renaming
+# it does not disturb the already-running, already-exec'd grubstake.sh process (the open script and
+# its cwd survive a renamed-away directory entry same as any Unix process would), but the lock's
+# own path, computed once from script_dir() before the loop started, no longer resolves once the
+# real mkdir is finally allowed to run. The reached/go handshake files live under $ROOT, one level
+# above the repo, since the repo itself is what gets renamed out from under this test.
+r=$(new_repo)
+_sha=$(fake_release "$r" 1.0.0)
+_shim="$r/mkdir-shim"; _reached="$ROOT/add-reached.$$"; _go="$ROOT/add-go.$$"
+lock_pause_shim "$_shim" "$_reached" "$_go"
+(
+    cd "$r" || exit 1
+    PATH="$r/curl-shim:$_shim:$PATH"; export PATH
+    GRUBSTAKE_CACHE="$r/.cache"; export GRUBSTAKE_CACHE
+    exec ./grubstake.sh add swiftlint@1.0.0 >"$r/out" 2>&1
+) &
+_bgpid=$!
+_w=0
+while [ ! -f "$_reached" ]; do
+    _w=$((_w + 1))
+    [ "$_w" -gt 300 ] && fixture_die "add never reached its pins lock"
+    sleep 0.05 2>/dev/null || sleep 1
+done
+_trash="$ROOT/add-vanished-repo.$$"
+mv "$r" "$_trash" || fixture_die "cannot rename the repo directory away while add is paused at its lock"
+_t0=$(date +%s)
+: > "$_go"
+wait "$_bgpid" 2>/dev/null
+_rc=$?
+_t1=$(date +%s)
+_elapsed=$((_t1 - _t0))
+_out="$(cat "$_trash/out" 2>/dev/null)"
+if [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 despite its own repo directory vanishing mid-run: $_out"
+elif [ "$_elapsed" -ge 3 ]; then
+    fail "add spun ${_elapsed}s instead of failing fast when its own directory vanished mid-lock: $_out"
+elif printf '%s' "$_out" | grep -q "locked by another run"; then
+    fail "misdiagnosed a vanished directory as another run holding the pins lock: $_out"
+elif ! printf '%s' "$_out" | grep -Eqi "gone|removed|disappear|vanish|no longer|does not exist"; then
+    fail "failed fast without naming the real cause: $_out"
+else
+    pass
+fi
+rm -f "$_reached" "$_go" 2>/dev/null
+chmod -R u+w "$_trash" 2>/dev/null
+rm -rf "$_trash" 2>/dev/null
+
+it "add's pins lock still reports a genuine holder when the directory is intact"
+# The other half of #68: the fix must not turn genuine contention into the same fast-fail. A
+# directory already sitting at grubstake.tools.lock before add ever runs, with the repo directory
+# left alone this time, makes add_one's mkdir fail every retry the same way a real concurrent
+# `add` would, for the same budget a genuinely stale lock costs -- no second process or pause shim
+# needed, the same static-plant technique #67's sibling lock test used. Exit and message alone do
+# not prove the retry budget was honestly exhausted rather than skipped (a "> 0" in place of the
+# real "> 50" would still exit non-zero and still say "locked by another run" on its very first
+# retry) -- the elapsed time, timed the same way the vanished-directory test above times its fast
+# path, is what actually distinguishes a real ~5s budget from a gutted one.
+r=$(new_repo)
+fake_release "$r" 1.0.0 >/dev/null
+_lockdir="$r/grubstake.tools.lock"
+mkdir -p "$_lockdir" || fixture_die "cannot plant the stale pins lock"
+_t0=$(date +%s)
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1 ); _rc=$?
+_t1=$(date +%s)
+_elapsed=$((_t1 - _t0))
+rm -rf "$_lockdir" 2>/dev/null
+if [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 despite a pins lock genuinely held by another run: $_out"
+elif ! printf '%s' "$_out" | grep -q "locked by another run"; then
+    fail "genuine contention was not reported as locked by another run: $_out"
+elif [ "$_elapsed" -lt 3 ]; then
+    fail "reported contention after only ${_elapsed}s -- the retry budget was not honestly exhausted: $_out"
+else
+    pass
+fi
+
 if [ "$NETWORK" = 1 ]; then
     printf '\nadd, network\n'
 

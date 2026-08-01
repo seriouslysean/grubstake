@@ -58,7 +58,12 @@ platform() {
 cache_root() {
     if [ -n "${GRUBSTAKE_CACHE:-}" ]; then
         echo "$GRUBSTAKE_CACHE"
-    elif [ "$(platform)" = darwin ]; then
+        return 0
+    fi
+    # Checked, not tested directly: a die inside $( ) only kills that subshell, so comparing its
+    # empty result against "darwin" would read as false and fall through to a Linux-shaped path.
+    _cr_plat="$(platform)" || return 1
+    if [ "$_cr_plat" = darwin ]; then
         echo "$HOME/Library/Caches/grubstake"
     else
         echo "${XDG_CACHE_HOME:-$HOME/.cache}/grubstake"
@@ -185,8 +190,8 @@ validate_pins() {
 
 # Keyed by the pinned archive hash, not the version. The path identifies the bytes, so editing a
 # pin changes the path, which is a cache miss, which reinstalls. Nothing has to detect staleness.
-tool_dir()  { echo "$(cache_root)/$1/$2"; }   # $2 is the pinned sha256
-tool_bin()  { echo "$(tool_dir "$1" "$2")/$1"; }
+tool_dir()  { _tdr="$(cache_root)" || return 1; echo "$_tdr/$1/$2"; }   # $2 is the pinned sha256
+tool_bin()  { _tbd="$(tool_dir "$1" "$2")" || return 1; echo "$_tbd/$1"; }
 
 receipt_file() {
     echo "$1/.grubstake-receipt"
@@ -292,7 +297,9 @@ publish_dir() {
 install_tool() {
     _tool="$1"
     _ver="$2"
-    _plat="$(platform)"
+    # Checked, not assigned: errexit is suspended for this whole body under "install_tool ... || _bad=1",
+    # so a bare assignment would swallow platform()'s own die and fall through to a misleading empty-platform skip.
+    _plat="$(platform)" || return 1
     _want="$(pin_sha "$_tool" "$_plat" 2>/dev/null || echo '-')"
     _url="$(tool_url "$_tool" "$_ver" "$_plat")"
 
@@ -456,12 +463,14 @@ reported_version() {
 # A stale or mismatched entry is instead caught by ensure's deeper, receipt-based pass, not here.
 verify_tool() {
     _tool="$1"
-    _sha="$(pin_sha "$_tool" "$(platform)" 2>/dev/null || echo '-')"
-    # Checked, not assigned: "|| _cbad=1" suspends errexit here, so a die inside must be caught explicitly.
-    if ! _url="$(tool_url "$_tool" "$2" "$(platform)")"; then
+    # Checked before use, not nested as an argument: embedding it in tool_url's own argument list
+    # would let tool_url's unrelated catch-all die (and print) before this ever sees the failure.
+    if ! _plat="$(platform)"; then
         warn "$_tool $2: could not resolve for this platform"
         return 1
     fi
+    _sha="$(pin_sha "$_tool" "$_plat" 2>/dev/null || echo '-')"
+    _url="$(tool_url "$_tool" "$2" "$_plat")"
     [ -n "$_url" ] || return 0
     [ -x "$(tool_bin "$_tool" "$_sha")" ] && return 0
     # Warned, not died: cmd_check's own loop is where every missing tool gets named, not just the first.
@@ -705,9 +714,12 @@ cmd_path() {
     validate_pins
     is_known_tool "$1" || die "unknown tool: $1"
     _ver="$(pin_version "$1")" || die "$1 is not pinned"
-    _url="$(tool_url "$1" "$_ver" "$(platform)")"
-    [ -n "$_url" ] || die "$1 is not published for $(platform)"
-    _bin="$(tool_bin "$1" "$(pin_sha "$1" "$(platform)")")"
+    # Assigned on its own, not nested as an argument: a die inside $( ) only kills that subshell, so
+    # embedding it in tool_url's own argument would let tool_url's unrelated death mask this one.
+    _plat="$(platform)"
+    _url="$(tool_url "$1" "$_ver" "$_plat")"
+    [ -n "$_url" ] || die "$1 is not published for $_plat"
+    _bin="$(tool_bin "$1" "$(pin_sha "$1" "$_plat")")"
     # Existence only, deliberately: the commit path stays hash-free and offline, and a receipt
     # mismatch surfacing here would put a network-shaped check back in front of every commit. Catching
     # drift is ensure's job.
@@ -721,8 +733,24 @@ cmd_doctor() {
     _root="$(repo_root)"
     printf 'grubstake  %s\n' "$GRUBSTAKE_VERSION"
     printf 'repo       %s\n' "$_root"
-    printf 'platform   %s\n' "$(platform)"
-    printf 'cache      %s\n' "$(cache_root)"
+    # Captured and checked, not embedded: a die inside $( ) only kills that subshell, so an
+    # unsupported arch here would otherwise print as a blank field rather than doctor's own report of it.
+    if _plat="$(platform 2>&1)"; then
+        _plat_ok=1
+    else
+        _plat_ok=0
+        _plat="${_plat#\[grubstake\] }"
+    fi
+    printf 'platform   %s\n' "$_plat"
+    # Same shape as the platform field above: cache_root can fail on its own (GRUBSTAKE_CACHE unset,
+    # platform unsupported) even when $_plat_ok already covered the platform line's own failure.
+    # 2>/dev/null: cache_root's own nested platform() call still writes its die to stderr directly,
+    # unredirected by cache_root's own capture, so it must be silenced here or it leaks past this report.
+    if _cache="$(cache_root 2>/dev/null)"; then
+        printf 'cache      %s\n' "$_cache"
+    else
+        printf 'cache      unresolved (platform unsupported)\n'
+    fi
     _hookspath="$(git -C "$_root" config core.hooksPath || true)"
     printf 'hooksPath  %s\n' "${_hookspath:-(unset)}"
     printf 'pins       %s\n' "$(pins_file)"
@@ -751,11 +779,22 @@ cmd_doctor() {
     fi
     for _tool in $(pinned_tools); do
         _ver="$(pin_version "$_tool")"
-        # Assign, do not test: a die inside $( ) would only kill the subshell.
-        _url="$(tool_url "$_tool" "$_ver" "$(platform)")"
+        if [ "$_plat_ok" = 0 ]; then
+            printf '  %-12s %-10s unsupported platform\n' "$_tool" "$_ver"
+            continue
+        fi
+        # Guarded like verify_tool's own: $_plat_ok only proves the exit status was clean, not the
+        # value -- a zero-exit uname that also wrote to stderr got merged into $_plat above, and
+        # tool_url's own catch-all die on a bad value would otherwise abort this whole report.
+        # 2>/dev/null: that catch-all still prints even when its exit status is caught below, and
+        # this report must stay stderr-clean the same way the cache line above does.
+        if ! _url="$(tool_url "$_tool" "$_ver" "$_plat" 2>/dev/null)"; then
+            printf '  %-12s %-10s could not resolve\n' "$_tool" "$_ver"
+            continue
+        fi
         if [ -z "$_url" ]; then
-            printf '  %-12s %-10s n/a on %s\n' "$_tool" "$_ver" "$(platform)"
-        elif [ -x "$(tool_bin "$_tool" "$(pin_sha "$_tool" "$(platform)")")" ]; then
+            printf '  %-12s %-10s n/a on %s\n' "$_tool" "$_ver" "$_plat"
+        elif [ -x "$(tool_bin "$_tool" "$(pin_sha "$_tool" "$_plat")")" ]; then
             printf '  %-12s %-10s installed\n' "$_tool" "$_ver"
         else
             printf '  %-12s %-10s MISSING\n' "$_tool" "$_ver"
@@ -764,9 +803,10 @@ cmd_doctor() {
 }
 
 # No validate_pins: a malformed grubstake.tools must not block the one command that recovers from
-# a wedged cache. cache_root always resolves to a real path, so only a degenerate or relative one is refused.
+# a wedged cache. cache_root can now fail outright (unsupported platform, no GRUBSTAKE_CACHE override);
+# a degenerate or relative path is the only case left for the checks below to refuse.
 cmd_clean() {
-    _root="$(cache_root)"
+    _root="$(cache_root)" || die "cannot determine the cache root: platform unsupported"
     case "$_root" in
         /|//|/.|/..) die "refusing to remove cache root: '$_root'" ;;
         /*)          : ;;

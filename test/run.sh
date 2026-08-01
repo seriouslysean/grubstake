@@ -299,6 +299,179 @@ else
     pass
 fi
 
+it "ensure on an unsupported arch fails with the guard's own error, not an empty-platform skip"
+# #70: install_tool's own "_plat=\"\$(platform)\"" (grubstake.sh:295) is a bare assignment, and
+# install_tool runs with errexit suspended for its whole body under cmd_ensure's own
+# "install_tool ... || _bad=1" (the same rule the arch-guard test above already relies on for
+# install_tool's callers) -- so platform()'s die is printed but its status is discarded there, $_plat
+# lands empty, and install_tool falls through to tool_url returning empty for "swiftlint:" (no such
+# case) and logs "swiftlint: not published for , skipping" as if this were a legitimate skip (the same
+# shape periphery's genuine linux gap uses) rather than a refusal. ensure still ends up non-zero today,
+# but only because cmd_check's own independent, later pass over the same tool fails separately (#67) --
+# a second, unrelated symptom, not this one being fixed. This fixture pins only swiftlint, so "not
+# published for" cannot be the legitimate periphery-on-linux message; widening the fixture to include a
+# tool with a genuine platform gap would make that assertion ambiguous.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_unameshim="$r/uname-shim"; mkdir -p "$_unameshim" || fixture_die "cannot create the uname shim dir"
+cat > "$_unameshim/uname" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    -s) echo Linux ;;
+    -m) echo aarch64 ;;
+    *)  echo Linux ;;
+esac
+SHIM
+chmod +x "$_unameshim/uname" || fixture_die "cannot make the uname shim executable"
+_curlshim="$r/curl-blocked"; mkdir -p "$_curlshim" || fixture_die "cannot create the blocked-curl shim dir"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_curlshim/curl"
+chmod +x "$_curlshim/curl" || fixture_die "cannot make the blocked curl shim executable"
+_out=$( cd "$r" && PATH="$_unameshim:$_curlshim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 on a non-x86_64 Linux: $_out"
+elif printf '%s' "$_out" | grep -q "not published for"; then
+    fail "install_tool ran on an empty platform and logged a misleading per-tool skip: $_out"
+elif printf '%s' "$_out" | grep -q "unknown tool"; then
+    fail "the guard's failure was masked by tool_url dying on an empty platform argument: $_out"
+elif ! printf '%s' "$_out" | grep -q "unsupported arch: aarch64"; then
+    fail "refused, but not with the guard's own message: $_out"
+else
+    pass
+fi
+
+# Shared by every remaining #70 site test below: the same uname stand-in as the two tests above,
+# factored out because three more call sites now need it. Not backported into those two: they are
+# already reviewed and passing, and this section's rule is add coverage, not churn proven tests.
+uname_arch_shim() {
+    mkdir -p "$1" || fixture_die "cannot create the uname shim dir"
+    cat > "$1/uname" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    -s) echo Linux ;;
+    -m) echo aarch64 ;;
+    *)  echo Linux ;;
+esac
+SHIM
+    chmod +x "$1/uname" || fixture_die "cannot make the uname shim executable"
+}
+
+it "check on an unsupported arch resolves the guard's own message, not an unrelated tool_url death"
+# #70's remaining survey item at verify_tool: it now captures "_plat=\"\$(platform)\"" and checks it
+# directly, before ever calling tool_url -- unlike the #67-era shape (still in this branch's own git
+# history) that called tool_url with platform() nested as its own argument and only caught tool_url's
+# resulting "unknown tool" death after the fact. That earlier shape already turned check non-zero and
+# already printed "could not resolve for this platform", so a test asserting only those two properties
+# would have passed on the #67 shape too, proving nothing about whether tool_url's masking death still
+# fires alongside it. Discrimination proof (scratch copy of this repo's own committed HEAD, the #67-era
+# verify_tool, spliced in): watched failing -- see this dispatch's report.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_unameshim="$r/uname-shim"; uname_arch_shim "$_unameshim"
+_curlshim="$r/curl-blocked"; mkdir -p "$_curlshim" || fixture_die "cannot create the blocked-curl shim dir"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_curlshim/curl"
+chmod +x "$_curlshim/curl" || fixture_die "cannot make the blocked curl shim executable"
+_out=$( cd "$r" && PATH="$_unameshim:$_curlshim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh check 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "check exited 0 on a non-x86_64 Linux: $_out"
+elif printf '%s' "$_out" | grep -q "unknown tool"; then
+    fail "the guard's failure was masked by tool_url dying on an empty platform argument: $_out"
+elif ! printf '%s' "$_out" | grep -q "could not resolve for this platform"; then
+    fail "refused, but not with verify_tool's own platform-resolution message: $_out"
+else
+    pass
+fi
+
+it "path on an unsupported arch fails with the guard's own message and prints no path"
+# #70's remaining survey item at cmd_path: "_url=\"\$(tool_url \"\$1\" \"\$_ver\" \"\$(platform)\")\""
+# nested platform() as tool_url's own argument, unguarded -- the same shape install_tool had before its
+# own fix, and the one shape in this file with no catch at all. A refusal that still reaches
+# tool_url's own "unknown tool" death is only accidentally non-zero; cmd_path's normal success path
+# ends in "echo \"\$_bin\"" on stdout, so a refusal that got there anyway would print a path alongside
+# whatever it died on. Discrimination proof (scratch copy of this repo's own committed HEAD, the
+# unfixed cmd_path, spliced in): watched failing -- see this dispatch's report.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_unameshim="$r/uname-shim"; uname_arch_shim "$_unameshim"
+_curlshim="$r/curl-blocked"; mkdir -p "$_curlshim" || fixture_die "cannot create the blocked-curl shim dir"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_curlshim/curl"
+chmod +x "$_curlshim/curl" || fixture_die "cannot make the blocked curl shim executable"
+_out=$( cd "$r" && PATH="$_unameshim:$_curlshim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftlint 2>&1 ); _rc=$?
+_stdout=$( cd "$r" && PATH="$_unameshim:$_curlshim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftlint 2>/dev/null )
+if [ "$_rc" -eq 0 ]; then
+    fail "path exited 0 on a non-x86_64 Linux: $_out"
+elif printf '%s' "$_out" | grep -q "unknown tool"; then
+    fail "the guard's failure was masked by tool_url dying on an empty platform argument: $_out"
+elif ! printf '%s' "$_out" | grep -q "unsupported arch: aarch64"; then
+    fail "refused, but not with the guard's own message: $_out"
+elif [ -n "$_stdout" ]; then
+    fail "printed something on stdout despite refusing: $_stdout"
+else
+    pass
+fi
+
+it "doctor on an unsupported arch stays advisory, without a stray guard message leaking past its report"
+# #70's remaining survey item at cmd_doctor covers two nestings. The header's own capture
+# ("_plat=\"\$(platform 2>&1)\"") redirects platform()'s stderr into the captured value, so a failure
+# there renders cleanly inside doctor's own "platform   ..." line instead of a blank field, and the
+# per-tool loop reuses that same captured value rather than re-embedding "$(platform)" per tool, so a
+# tool row reads "unsupported platform" instead of silently trying "n/a on " with an empty platform
+# name. Neither call site is reached with GRUBSTAKE_CACHE set (every other test in this file sets it),
+# so this test deliberately leaves it unset and points HOME at a scratch directory instead: only that
+# reaches cache_root's own "$(platform)" nesting -- doctor's sixth and last site, inside
+# "elif [ \"\$(platform)\" = darwin ]" -- which is a tested condition, so a failure there is swallowed
+# for control-flow purposes (cache_root quietly takes the linux branch) but platform()'s own die() still
+# writes to stderr unconditionally, unredirected, leaking a duplicate "[grubstake] unsupported arch"
+# line the header's own clean capture does not have. doctor is advisory (confirmed against its own rc
+# semantics: a MISSING tool or a drifted hook already reports without failing doctor itself), so this
+# asserts exit 0 throughout, not a refusal.
+#
+# This was watched failing directly against this branch's real grubstake.sh before cache_root's own
+# nesting was fixed here (a stray "[grubstake] unsupported arch" line leaking past doctor's clean
+# report) -- see this dispatch's report for that verbatim output. cache_root's fix landed on this same
+# branch while this dispatch was in progress, so this test is not proven via a scratch-copy mutation
+# the way the sibling test below is: the watched failure above already is that proof.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_unameshim="$r/uname-shim"; uname_arch_shim "$_unameshim"
+_fakehome="$r/fake-home"; mkdir -p "$_fakehome" || fixture_die "cannot create the fake HOME dir"
+_out=$( cd "$r" && PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh doctor 2>/dev/null ); _rc=$?
+_err=$( cd "$r" && PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh doctor 2>&1 1>/dev/null )
+if [ "$_rc" -ne 0 ]; then
+    fail "doctor exited $_rc on an unsupported arch; doctor is advisory and must still report, not fail: $_out"
+elif ! printf '%s\n' "$_out" | grep -q '^platform.*unsupported arch: aarch64'; then
+    fail "the platform field did not carry the guard's own message: $_out"
+elif ! printf '%s' "$_out" | grep -q "unsupported platform"; then
+    fail "the per-tool row did not report an unsupported platform: $_out"
+elif [ -n "$_err" ]; then
+    fail "a stray '[grubstake] unsupported arch' line leaked to stderr outside doctor's own report: $_err"
+else
+    pass
+fi
+
+it "clean on an unsupported arch refuses instead of silently no-oping on a fabricated cache path"
+# #70 critic finding: cmd_clean's own "_root=\"\$(cache_root)\"" is the same bare-assignment shape
+# every other site in this file had. cache_root itself reaches the sixth site (its own
+# "elif [ \"\$(platform)\" = darwin ]") only when GRUBSTAKE_CACHE is unset, same as the doctor test
+# above, so this reuses that fixture exactly: no GRUBSTAKE_CACHE, no XDG_CACHE_HOME, a scratch HOME.
+# Pre-fix, cache_root's own platform() failure is swallowed by the tested "elif" condition, so
+# cache_root falls through to the linux-shaped "${XDG_CACHE_HOME:-\$HOME/.cache}/grubstake" path built
+# from an arch it never actually confirmed, and cmd_clean's "[ -e \"\$_root\" ] || return 0" quietly
+# exits 0 since nothing was ever created at that fabricated path -- a clean that never ran, reporting
+# success. The fix (this branch's own "_root=\"\$(cache_root)\" || die ...") makes that refusal
+# explicit instead. Discrimination proof (scratch copy of this repo's own committed HEAD, the unfixed
+# cache_root and cmd_clean, spliced in): watched failing -- see this dispatch's report.
+r=$(new_repo)
+_unameshim="$r/uname-shim"; uname_arch_shim "$_unameshim"
+_fakehome="$r/fake-home"; mkdir -p "$_fakehome" || fixture_die "cannot create the fake HOME dir"
+_out=$( cd "$r" && env -u GRUBSTAKE_CACHE -u XDG_CACHE_HOME PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh clean 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "clean exited 0 on an unsupported arch instead of refusing: $_out"
+elif ! printf '%s' "$_out" | grep -q "cannot determine the cache root"; then
+    fail "refused, but not with cmd_clean's own cache-root message: $_out"
+else
+    pass
+fi
+
 # ---------------------------------------------------------------------------- pins validation
 
 printf '\npins file validation\n'

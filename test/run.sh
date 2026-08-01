@@ -247,6 +247,58 @@ else
     esac
 fi
 
+# ---------------------------------------------------------------------------- platform
+
+printf '\nplatform\n'
+
+it "a non-x86_64 Linux is refused by name, not silently installed as amd64"
+# platform()'s Linux branch dies "unsupported arch: $(uname -m)" when uname -m is not x86_64. Nothing
+# proved that guard fires: delete it and every existing test still passes, since none of them run on
+# anything but this sandbox's own real uname. A uname shim reporting Linux/aarch64 exercises it without
+# needing real aarch64 hardware. A curl that always fails keeps this offline and, more importantly,
+# keeps the discrimination copy below from quietly reaching this sandbox's real network egress to
+# GitHub once the guard is stripped.
+#
+# rc alone does not discriminate: `ensure` exits non-zero either way (a stripped guard still fails,
+# just later, when the real amd64 URL's download is blocked). Two properties depend on nothing but the
+# guard, so those are what is asserted: die() writes "unsupported arch: aarch64" to stderr
+# unconditionally, before anything downstream can lose track of its exit status; and tool_url never
+# returns a real linux URL, so "downloading" -- install_tool's own log line printed right before curl
+# ever runs -- never appears.
+#
+# Both are needed because platform() is always called nested inside another command substitution
+# (tool_url's own "$(platform)" argument), which discards its exit status: the actual reason the script
+# ends up non-zero here is tool_url separately dying on the resulting empty platform argument ("unknown
+# tool: swiftlint"), not platform()'s own die propagating directly. That coupling is a real, separate
+# defect (reported alongside this dispatch), not this test's to fix -- so this asserts only the two
+# guard-only properties above, never the incidental "unknown tool" line, message ordering, or how many
+# times "aarch64" happens to appear.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_unameshim="$r/uname-shim"; mkdir -p "$_unameshim" || fixture_die "cannot create the uname shim dir"
+cat > "$_unameshim/uname" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    -s) echo Linux ;;
+    -m) echo aarch64 ;;
+    *)  echo Linux ;;
+esac
+SHIM
+chmod +x "$_unameshim/uname" || fixture_die "cannot make the uname shim executable"
+_curlshim="$r/curl-blocked"; mkdir -p "$_curlshim" || fixture_die "cannot create the blocked-curl shim dir"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_curlshim/curl"
+chmod +x "$_curlshim/curl" || fixture_die "cannot make the blocked curl shim executable"
+_out=$( cd "$r" && PATH="$_unameshim:$_curlshim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 on a non-x86_64 Linux instead of refusing: $_out"
+elif ! printf '%s' "$_out" | grep -q "aarch64"; then
+    fail "refused, but never named the actual arch (aarch64): $_out"
+elif printf '%s' "$_out" | grep -q "downloading"; then
+    fail "attempted to download an artifact for the wrong arch instead of refusing outright: $_out"
+else
+    pass
+fi
+
 # ---------------------------------------------------------------------------- pins validation
 
 printf '\npins file validation\n'
@@ -1582,6 +1634,96 @@ it "release versions sort newest first"
 # oldest release every time.
 top=$(printf '0.2.0\n0.10.0\n0.9.9\n' | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
 [ "$top" = "0.10.0" ] && pass || fail "sorted to $top, expected 0.10.0"
+
+# Shared by both version-filter tests below: a fixed set of ls-remote refs covering every shape that
+# would sort wrong if it reached "sort -t. -k1,1nr" unfiltered -- a pre-release suffix, a two-component
+# version, a tag with a leftover "v" (as if the tag itself were misnamed "vv1.2.3"), and a non-numeric
+# tag -- alongside three well-formed releases, including the classic double-digit trap (0.10.0 above
+# 0.9.9 lexically fails, numerically it must not). Unfiltered, "1.2.3-beta" sorts on key1=1, which
+# outranks every 0.x release below it, and a leading non-numeric field reads as 0 -- exactly the
+# wrong-sort the issue describes, and exactly what grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' exists to prevent
+# before either site's sort ever sees these values.
+git_tags_shim() {
+    mkdir -p "$1" || fixture_die "cannot create the git shim dir"
+    cat > "$1/git" <<'SHIM'
+#!/bin/sh
+if [ "$1" = "ls-remote" ]; then
+    printf '%s\trefs/tags/v%s\n' \
+        aaa 0.2.0 \
+        bbb 0.10.0 \
+        ccc 0.9.9 \
+        ddd 1.2.3-beta \
+        eee 1.2 \
+        fff v1.2.3 \
+        ggg abc
+    exit 0
+fi
+exit 1
+SHIM
+    chmod +x "$1/git" || fixture_die "cannot make the git shim executable"
+}
+
+it "release_tags excludes shapes that would otherwise outrank a well-formed release"
+# release_tags is extracted from grubstake.sh by name (the same technique extract_fns and
+# cmd_legacy_replace's own extraction above use), never reimplemented, so a change to the real regex or
+# sort flags breaks this test instead of a hand-copied stand-in silently drifting from the source. git
+# is shimmed to answer any ls-remote call with the fixed refs above, offline, so the only thing under
+# test is the pipeline grubstake.sh actually runs on whatever git returns.
+r=$(new_repo)
+_shim="$r/git-shim"; git_tags_shim "$_shim"
+_fn="$(sed -n '/^release_tags() {/,/^}/p' "$GS")"
+printf '%s\n' "$_fn" | grep -q '^release_tags() {$' \
+    || fixture_die "extract release_tags: no line-anchored '{' in $GS (reformatted?)"
+_closes="$(printf '%s\n' "$_fn" | grep -c '^}$' | tr -d ' ')"
+[ "$_closes" = 1 ] || fixture_die "extract release_tags: $_closes closing braces, expected 1 (truncated)"
+{
+    printf '#!/bin/sh\nset -eu\nGRUBSTAKE_REPO=fake\n'
+    printf '%s\n' "$_fn"
+    printf 'release_tags\n'
+} > "$r/t.sh"
+_out=$( cd "$r" && PATH="$_shim:$PATH" sh "$r/t.sh" 2>&1 ); _rc=$?
+_want="0.10.0
+0.9.9
+0.2.0"
+if [ "$_rc" -ne 0 ]; then
+    fail "the generated script exited $_rc, so release_tags did not run cleanly: $_out"
+elif [ "$_out" != "$_want" ]; then
+    fail "got:
+$_out
+expected:
+$_want"
+else
+    pass
+fi
+
+it "post-commit's own tag comparison excludes the same malformed shapes, not just grubstake.sh's copy"
+# hooks/post-commit runs its own inline copy of the filter-then-sort pipeline; it is not a call into
+# grubstake.sh, so the release_tags test above says nothing about this one. Extracted from
+# hooks/post-commit itself, byte for byte, for the same reason as above. The extraction is asserted to
+# actually contain the version filter, not just be non-empty: the sed range's end pattern
+# ("head -1)$") matches twice in this file (this pipeline and the later CURRENT-vs-LATEST comparison,
+# which has no filter in front of it and is out of scope here -- see the report), so a change nearby
+# that shifted the range without breaking it outright would otherwise go unnoticed. This pipeline ends
+# in "| head -1", so it reports the single winner rather than the full filtered list.
+r=$(new_repo)
+_shim="$r/git-shim"; git_tags_shim "$_shim"
+_snippet="$(sed -n '/^        latest=$(git ls-remote/,/head -1)$/p' "$HOOKS/post-commit")"
+[ -n "$_snippet" ] || fixture_die "extract post-commit's latest= pipeline: nothing matched (reformatted?)"
+printf '%s\n' "$_snippet" | grep -qF "grep -E '^[0-9]+\\.[0-9]+\\.[0-9]+\$'" \
+    || fixture_die "extract post-commit's latest= pipeline: the version filter is missing from the extraction (reformatted?)"
+{
+    printf '#!/bin/sh\nset -eu\n'
+    printf '%s\n' "$_snippet"
+    printf 'echo "$latest"\n'
+} > "$r/t.sh"
+_out=$( cd "$r" && PATH="$_shim:$PATH" sh "$r/t.sh" 2>&1 ); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "the generated script exited $_rc: $_out"
+elif [ "$_out" != "0.10.0" ]; then
+    fail "got '$_out', expected 0.10.0 (a pre-release suffix sorts ahead of it unfiltered: see the release_tags test above)"
+else
+    pass
+fi
 
 # A local stand-in for GRUBSTAKE_REPO/GRUBSTAKE_RAW: a bare repo carrying one annotated release tag,
 # plus a raw-fetch tree laid out the same way raw.githubusercontent.com is (v<version>/grubstake.sh).

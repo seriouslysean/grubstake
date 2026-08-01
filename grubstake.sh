@@ -686,8 +686,11 @@ add_one() {
     _lock="$_pins.lock"
     _pt="$_pins.$$.tmp"
     # mkdir is the portable atomic lock. Two agents adding pins otherwise write from stale reads.
+    _lockdir="$(dirname "$_lock")"
     _waited=0
     while ! mkdir "$_lock" 2>/dev/null; do
+        # mkdir cannot distinguish ENOENT from EEXIST; the parent's absence is what separates them.
+        [ -d "$_lockdir" ] || die "$_lock: its directory is gone, most likely the repository was removed mid-add"
         _waited=$((_waited + 1))
         [ "$_waited" -gt 50 ] && die "grubstake.tools is locked by another run ($_lock)"
         sleep 0.1 2>/dev/null || sleep 1

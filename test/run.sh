@@ -173,6 +173,36 @@ SHIM
     chmod +x "$_lpdir/mkdir" || fixture_die "cannot make the lock-pause mkdir shim executable"
 }
 
+# Pauses "mv" only when its destination (mv's own last argument) exactly matches $4, so it does not
+# also catch an unrelated mv on the same run -- install_tool renames the archived member into place
+# inside staging before ever publishing, and on Linux (where swiftlint's member is named
+# "swiftlint-static", not "swiftlint") that lands at a different destination than either the
+# receipt's own tmp-to-real rename or the final staging-to-dest publish, so gating on exact
+# destination rather than "any mv" is what keeps this pointed at the one call site under test. The
+# pid file is written before the reached flag, the same ordering lock_pause_shim's plant uses, so a
+# poller that wakes on the flag never reads the pid file before it exists.
+mv_pause_shim() {
+    _mvdir="$1"; _mvreached="$2"; _mvgo="$3"; _mvdest="$4"
+    mkdir -p "$_mvdir" || fixture_die "cannot create the mv-pause shim dir $_mvdir"
+    _mvreal="$(command -v mv)" || fixture_die "no real mv on PATH to wrap"
+    cat > "$_mvdir/mv" <<SHIM
+#!/bin/sh
+for _a in "\$@"; do _mvlast="\$_a"; done
+if [ "\$_mvlast" = "$_mvdest" ]; then
+    echo "\$\$" > "$_mvreached.pid"
+    : > "$_mvreached"
+    _mvw=0
+    while [ ! -f "$_mvgo" ]; do
+        _mvw=\$((_mvw + 1))
+        [ "\$_mvw" -gt 300 ] && { echo "mv-pause shim: timed out waiting for the go flag" >&2; exit 1; }
+        sleep 0.05 2>/dev/null || sleep 1
+    done
+fi
+exec "$_mvreal" "\$@"
+SHIM
+    chmod +x "$_mvdir/mv" || fixture_die "cannot make the mv-pause shim executable"
+}
+
 # For tests that cannot pin the same hash in both columns because they read a hash `add` wrote
 # for real over the network: a hardcoded column asserts against a path only one platform installs to.
 sha_column() {
@@ -1933,6 +1963,174 @@ INNER
 if [ "$_rc" -ne 1 ]; then fail "the generated script exited $_rc, expected the locked command's 1"
 elif [ -d "$r/t.lock" ]; then fail "the lock survived a failing command"
 else pass; fi
+
+it "a signal landing while write_receipt holds the lock does not strand it"
+# #62: with_lock has no trap, so a signal between its mkdir and rmdir leaves the lock directory
+# behind. It stays latent until the same entry is locked again, which then spins the full retry
+# budget and warns about a lock nobody holds -- recoverable only by hand. A legacy (receiptless)
+# entry reaches with_lock the cheapest way, through write_receipt, with no download needed.
+# mv_pause_shim pauses write_receipt's own tmp-to-real rename, the last thing it does before
+# returning and letting with_lock rmdir the lock, so the process is killed with the lock genuinely
+# held. The specific pid, not its process group: the wrapped command here is write_receipt, a shell
+# function running in grubstake.sh's own process, not a separate one -- the only real child is the
+# shimmed mv itself, and "exec" replaces the backgrounded subshell with grubstake.sh outright, so
+# "$!" is grubstake.sh's own pid, no job-control or process-group games needed to reach it directly.
+# Confirmed in scratch first: with no trap in play, dash returns from a blocked wait() the instant
+# the signal lands rather than deferring until the child exits, leaving that child an orphan --
+# reaped explicitly below, since #64 is plain that backgrounding something and not reaping it is a
+# sampled result, not a real one.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+_shim="$r/mv-shim"; _reached="$r/reached"; _go="$r/go"
+_lockdir="$r/.cache/swiftlint/$SHA_A.lock"
+mv_pause_shim "$_shim" "$_reached" "$_go" "$r/.cache/swiftlint/$SHA_A/.grubstake-receipt"
+(
+    cd "$r" || exit 1
+    PATH="$_shim:$PATH"; export PATH
+    GRUBSTAKE_CACHE="$r/.cache"; export GRUBSTAKE_CACHE
+    exec ./grubstake.sh ensure >"$r/out" 2>&1
+) &
+_bgpid=$!
+_w=0
+while [ ! -f "$_reached" ]; do
+    _w=$((_w + 1))
+    [ "$_w" -gt 300 ] && fixture_die "the run never reached write_receipt's critical section"
+    sleep 0.05 2>/dev/null || sleep 1
+done
+[ -d "$_lockdir" ] || fixture_die "reached the critical section without holding its own lock"
+kill -TERM "$_bgpid" 2>/dev/null
+wait "$_bgpid" 2>/dev/null
+if [ -f "$_reached.pid" ]; then
+    kill -TERM "$(cat "$_reached.pid")" 2>/dev/null
+    wait "$(cat "$_reached.pid")" 2>/dev/null
+fi
+if [ -d "$_lockdir" ]; then
+    fail "the lock directory was stranded after the run was killed mid-write_receipt"
+else
+    _t0=$(date +%s)
+    _out2=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc2=$?
+    _t1=$(date +%s)
+    _elapsed=$((_t1 - _t0))
+    if [ "$_rc2" -ne 0 ]; then
+        fail "the follow-up ensure failed against a lock that should have been released by the trap: $_out2"
+    elif printf '%s' "$_out2" | grep -q "cache entry locked by another run"; then
+        fail "the follow-up ensure spun the retry budget and warned about a stale lock nobody holds: $_out2"
+    elif [ "$_elapsed" -ge 3 ]; then
+        fail "the follow-up ensure took ${_elapsed}s instead of acquiring the lock immediately: $_out2"
+    else
+        pass
+    fi
+fi
+rm -rf "$_lockdir" 2>/dev/null
+
+it "a signal landing while publish_dir holds the lock does not nest the staging install_tool's own trap names"
+# #62's other with_lock call site, and the one the contract calls out by name: install_tool already
+# arms its own trap over $_tmp and $_staging before this call (~450), so with_lock's own trap must
+# compose with that one -- save the caller's trap and restore it, rather than clobber it -- since
+# POSIX traps are per-signal per-shell and the wrapped command runs in the very same shell, not a
+# subshell.
+#
+# What this test actually guards, proven by scratch mutation rather than asserted on faith: a
+# with_lock that arms its own trap bare, with no save/restore of whatever the caller already had
+# armed (the naive, clobbering shape), makes this test fail with $_staging left behind -- verified
+# against a scratch copy with with_lock's save/restore deleted and its trap set to a plain
+# "rmdir $_lk" on EXIT HUP INT TERM. Against that mutation the run dies with "install incomplete"
+# and $_staging survives; against the composed fix it does not. That is the one thing this test can
+# tell apart, and the comment used to hedge on it before the mutation was actually run.
+#
+# It cannot cheaply also discriminate a stranded *lock*: the clobbering mutation above still frees
+# $_lk fine, because with_lock's own trap only ever has to do its own job (rmdir the lock it holds),
+# never the caller's -- clobbering the outer trap and still releasing the lock are independent
+# failures. Making this test also catch a stranded lock would need a with_lock that skips its own
+# rmdir on signal entirely, which is not a composition bug at all -- it is "no trap", the exact
+# defect the write_receipt test above already exists to catch. The two invariants are orthogonal by
+# construction, not by an accident of this fixture, so there is no cheap way to fold them into one
+# assertion here.
+#
+# A cold pin reaches this, served offline by fake_release/curl-shim; mv_pause_shim pauses the actual
+# publish rename ("mv $_staging $_dest"), gated on that exact destination so it never catches the
+# member rename that happens earlier inside staging on Linux (there the archived member is
+# "swiftlint-static", not "swiftlint", so that rename lands at a different destination than either
+# this one or the receipt's own tmp-to-real rename). $_staging is found by the same glob the #56
+# fixtures already use rather than assumed from "$_dest.staging.$!": exec makes that pid correct
+# under every shell tested so far, but the glob costs nothing and does not depend on it.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_dest="$r/.cache/swiftlint/$_sha"
+_lockdir="$_dest.lock"
+_shim="$r/mv-shim"; _reached="$r/reached"; _go="$r/go"
+mv_pause_shim "$_shim" "$_reached" "$_go" "$_dest"
+(
+    cd "$r" || exit 1
+    PATH="$r/curl-shim:$_shim:$PATH"; export PATH
+    GRUBSTAKE_CACHE="$r/.cache"; export GRUBSTAKE_CACHE
+    exec ./grubstake.sh ensure >"$r/out" 2>&1
+) &
+_bgpid=$!
+_w=0
+while [ ! -f "$_reached" ]; do
+    _w=$((_w + 1))
+    [ "$_w" -gt 300 ] && fixture_die "the run never reached publish_dir's critical section"
+    sleep 0.05 2>/dev/null || sleep 1
+done
+[ -d "$_lockdir" ] || fixture_die "reached the critical section without holding its own lock"
+_staging=$(printf '%s\n' "$_dest".staging.* 2>/dev/null | head -1)
+[ -n "$_staging" ] && [ -d "$_staging" ] || fixture_die "could not find the staging directory install_tool was about to publish"
+kill -TERM "$_bgpid" 2>/dev/null
+wait "$_bgpid" 2>/dev/null
+if [ -f "$_reached.pid" ]; then
+    kill -TERM "$(cat "$_reached.pid")" 2>/dev/null
+    wait "$(cat "$_reached.pid")" 2>/dev/null
+fi
+if [ -d "$_staging" ]; then
+    fail "the staging directory install_tool's own trap names was left behind: with_lock's fix must compose with that trap, not clobber it"
+elif [ -d "$_lockdir" ]; then
+    fail "the lock directory was stranded after the run was killed mid-publish"
+else
+    pass
+fi
+rm -rf "$_lockdir" "$_staging" 2>/dev/null
+
+it "with_lock refuses a lock it cannot safely hold when it cannot save the caller's trap state"
+# with_lock's own trap composition needs somewhere to stash the caller's existing trap before
+# overwriting it (a plain redirect into a mktemp file, not command substitution -- dash resets a
+# subshell's own trap table, so "$(trap)" reads back empty even with one already armed). An
+# unwritable TMPDIR makes that mktemp fail, and with_lock refuses to hold a lock it could not make
+# safe to interrupt: it warns, releases the lock it had just acquired, and returns 1 -- the same
+# tool-scoped shape every other with_lock-adjacent failure already has (see the two signal tests
+# above and #67's sibling tests), not a die. Two legacy (receiptless) entries, both reaching
+# with_lock the cheapest way through write_receipt, prove this is genuinely per-tool and not a
+# one-and-done abort: both must be refused independently, in the same run, since a broken TMPDIR
+# does not clear itself between them.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A
+swiftformat 0.61.1 $SHA_B $SHA_B"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+fake_install "$r" swiftformat 0.61.1 "$SHA_B"
+_badtmp="$r/no-tmp"
+mkdir -p "$_badtmp" || fixture_die "cannot create $_badtmp"
+chmod a-w "$_badtmp" || fixture_die "cannot make $_badtmp read-only"
+# A test operator, not an actual write attempt: a failed redirection into a directory that lacks
+# write permission is fatal to a non-interactive shell regardless of set -e, so "{ : > file; }
+# 2>/dev/null" does not survive to report anything -- 2>/dev/null only silences a command's own
+# stderr, not the shell's own inability to open the redirection target.
+[ -w "$_badtmp" ] && fixture_die "chmod a-w did not make $_badtmp unwritable (running as root?)"
+_lockA="$r/.cache/swiftlint/$SHA_A.lock"
+_lockB="$r/.cache/swiftformat/$SHA_B.lock"
+_out=$( cd "$r" && TMPDIR="$_badtmp" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+_warns=$(printf '%s\n' "$_out" | grep -c "cannot save the caller's trap state")
+chmod -R u+rwx "$_badtmp" 2>/dev/null
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite never being able to safely hold a lock: $_out"
+elif [ "$_warns" -ne 2 ]; then
+    fail "expected both tools refused per-tool (2 warns), got $_warns: $_out"
+elif [ -d "$_lockA" ] || [ -d "$_lockB" ]; then
+    fail "a lock directory was left behind despite with_lock refusing to hold it: $_out"
+else
+    pass
+fi
 
 it "release versions sort newest first"
 # A trailing -r is ignored when per-key flags are present, which once made update install the

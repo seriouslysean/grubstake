@@ -239,6 +239,8 @@ entry_verified() {
 
 # mkdir is the portable atomic lock. flock(1) is not present on macOS.
 with_lock() {
+    # A nested call would clobber this call's own _lk/_wl_saved globals (no `local` in POSIX sh); no caller nests today, so a re-entry dies loud rather than silently losing a saved trap.
+    [ -z "${_wl_active:-}" ] || die "with_lock: called re-entrantly, nesting is not supported"
     _lk="$1"; shift
     _lkdir="$(dirname "$_lk")"
     _w=0
@@ -256,9 +258,40 @@ with_lock() {
         fi
         sleep 0.1 2>/dev/null || sleep 1
     done
+    _wl_active=1
+    # Captured via a plain redirect, not $(trap): dash resets a subshell's own trap table, so
+    # command substitution reads this back empty even with a trap already armed in this shell.
+    _wl_savefile="$(mktemp "${TMPDIR:-/tmp}/grubstake-trap.XXXXXX")" || {
+        warn "$_lk: cannot save the caller's trap state, refusing to hold this lock unsafely"
+        rmdir "$_lk" 2>/dev/null || true
+        _wl_active=""
+        return 1
+    }
+    # A redirect failure here is fatal to the whole process under dash (a special builtin's own redirection error is unconditionally fatal there), not something an if around it can catch.
+    trap > "$_wl_savefile" 2>/dev/null
+    # A swallowed read failure here would read as "caller had no trap" and restore nothing.
+    if ! _wl_saved="$(cat "$_wl_savefile" 2>/dev/null)"; then
+        warn "$_lk: cannot read back the caller's trap state, refusing to hold this lock unsafely"
+        rm -f "$_wl_savefile" 2>/dev/null || true
+        rmdir "$_lk" 2>/dev/null || true
+        _wl_active=""
+        return 1
+    fi
+    rm -f "$_wl_savefile" 2>/dev/null || true
+    # Commands passed here must warn and return, never exit or die: the EXIT trap below only releases the lock, it does not restore this trap.
+    # Restoring (or clearing, with no caller trap) always runs first below, so no instruction boundary is ever left with neither this trap nor the caller's armed.
+    trap '
+        if [ -n "$_wl_saved" ]; then eval "$_wl_saved"; else trap - EXIT HUP INT TERM; fi
+        rmdir "$_lk" 2>/dev/null || true
+        exit 1
+    ' HUP INT TERM
+    trap 'rmdir "$_lk" 2>/dev/null || true' EXIT
     # `cmd; rc=$?` does not survive set -e: the shell exits at cmd and never reaches the rmdir.
     if "$@"; then _rc=0; else _rc=$?; fi
+    # Same restore-first order as the signal handler: disarming before releasing would let a signal here rmdir a second time, after another run may have already reclaimed the path.
+    if [ -n "$_wl_saved" ]; then eval "$_wl_saved"; else trap - EXIT HUP INT TERM; fi
     rmdir "$_lk" 2>/dev/null || true
+    _wl_active=""
     return $_rc
 }
 

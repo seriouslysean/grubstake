@@ -239,9 +239,16 @@ with_lock() {
     _w=0
     while ! mkdir "$_lk" 2>/dev/null; do
         # mkdir cannot distinguish ENOENT from EEXIST; the parent's absence is what separates them.
-        [ -d "$_lkdir" ] || die "$_lk: its directory is gone, most likely a concurrent clean removed the cache mid-install"
+        if [ ! -d "$_lkdir" ]; then
+            warn "$_lk: its directory is gone, most likely a concurrent clean removed the cache mid-install"
+            return 1
+        fi
         _w=$((_w + 1))
-        [ "$_w" -gt 50 ] && die "cache entry locked by another run: $_lk (stale? rmdir it)"
+        # Acquisition failure is the caller's to scope; with_lock never decides how loud it is.
+        if [ "$_w" -gt 50 ]; then
+            warn "cache entry locked by another run: $_lk (stale? rmdir it)"
+            return 1
+        fi
         sleep 0.1 2>/dev/null || sleep 1
     done
     # `cmd; rc=$?` does not survive set -e: the shell exits at cmd and never reaches the rmdir.
@@ -319,10 +326,15 @@ install_tool() {
             # a fresh download here anyway, since this entry's own executable already makes it the
             # winner, so nothing built from that download would ever actually land.
             _bsha="$(hashed_or_empty "$_bin")"
-            if [ -n "$_bsha" ] && with_lock "$_dest.lock" write_receipt "$_dest" "$_bsha" "$_ver"; then
+            if [ -z "$_bsha" ]; then
+                # A failed or empty hash must never fail the run, the same rule the sibling branch and fresh publish both hold.
+                warn "$_tool: entry records version ${_rver:-nothing}, pinned $_ver, but could not be hashed to correct the receipt"
+            elif with_lock "$_dest.lock" write_receipt "$_dest" "$_bsha" "$_ver"; then
                 log "$_tool: entry recorded version ${_rver:-nothing}, updated the receipt to pinned $_ver"
             else
+                # Scoped like the mismatch branch above: the entry is never touched, only the run is flagged.
                 warn "$_tool: entry records version ${_rver:-nothing}, pinned $_ver, but the receipt could not be updated"
+                return 1
             fi
             return 0
         else
@@ -349,7 +361,9 @@ install_tool() {
             else
                 # A read-only parent or a full disk must not turn an already-usable entry into a
                 # forced reinstall; the tool ran before this and still does.
+                # Only the run is flagged; the entry is left exactly as it was.
                 warn "$_tool: could not record a receipt for $_dest (leaving it as-is)"
+                return 1
             fi
             return 0
         fi
@@ -410,12 +424,23 @@ install_tool() {
 
     mkdir -p "$(dirname "$_dest")"
     # errexit is suspended for this function's whole body under cmd_ensure's "install_tool ... || _bad=1".
-    with_lock "$_dest.lock" publish_dir "$_staging" "$_dest" "$_tool" \
-        || { rm -rf "$_tmp"; trap - EXIT HUP INT TERM; die "$_tool $_ver: could not finish publishing (remove $_staging and retry)"; }
+    with_lock "$_dest.lock" publish_dir "$_staging" "$_dest" "$_tool" || {
+        rm -rf "$_tmp"
+        trap - EXIT HUP INT TERM
+        chmod -R u+w "$_staging" 2>/dev/null || true
+        rm -rf "$_staging"
+        # Named only if it survives the attempt above: a plain lock failure never touched staging at all.
+        if [ -e "$_staging" ]; then
+            warn "$_tool $_ver: could not finish publishing (remove $_staging and retry)"
+        else
+            warn "$_tool $_ver: could not finish publishing (retry)"
+        fi
+        return 1
+    }
 
     rm -rf "$_tmp"
     trap - EXIT HUP INT TERM
-    # Should be unreachable: publish_dir now either lands the binary or dies with a directory to remove.
+    # Should be unreachable: a with_lock failure above already warns and returns before this executes.
     [ -x "$_bin" ] || die "$_tool $_ver: install incomplete (remove $_dest and retry)"
     log "$_tool $_ver: installed"
 }
@@ -432,9 +457,16 @@ reported_version() {
 verify_tool() {
     _tool="$1"
     _sha="$(pin_sha "$_tool" "$(platform)" 2>/dev/null || echo '-')"
-    _url="$(tool_url "$_tool" "$2" "$(platform)")"
+    # Checked, not assigned: "|| _cbad=1" suspends errexit here, so a die inside must be caught explicitly.
+    if ! _url="$(tool_url "$_tool" "$2" "$(platform)")"; then
+        warn "$_tool $2: could not resolve for this platform"
+        return 1
+    fi
     [ -n "$_url" ] || return 0
-    [ -x "$(tool_bin "$_tool" "$_sha")" ] || die "$_tool $2: not installed (run: grubstake ensure)"
+    [ -x "$(tool_bin "$_tool" "$_sha")" ] && return 0
+    # Warned, not died: cmd_check's own loop is where every missing tool gets named, not just the first.
+    warn "$_tool $2: not installed (run: grubstake ensure)"
+    return 1
 }
 
 # ---------------------------------------------------------------------------- hooks
@@ -651,17 +683,20 @@ cmd_ensure() {
         install_tool "$_tool" "$(pin_version "$_tool")" || _bad=1
     done
     [ "$_any" = 1 ] || warn "no tools pinned yet (run: grubstake add swiftlint@x.y.z)"
-    cmd_check
-    # cmd_check's own exit status must not stand in for this one, or a tool flagged above would be
-    # reported clean because every entry still passes check's existence-only pass.
+    # Bare would let cmd_check's own now-possible non-zero return trip set -e before the line below runs.
+    cmd_check || _bad=1
+    # cmd_check's status alone still cannot stand in for this: a receipt mismatch above already left
+    # a binary that passes check's existence-only pass, so folding it in here is additive, not a substitute.
     [ "$_bad" = 0 ] || return 1
 }
 
 cmd_check() {
     validate_pins
+    _cbad=0
     for _tool in $(pinned_tools); do
-        verify_tool "$_tool" "$(pin_version "$_tool")"
+        verify_tool "$_tool" "$(pin_version "$_tool")" || _cbad=1
     done
+    [ "$_cbad" = 0 ] || return 1
     log "ok ($GRUBSTAKE_VERSION)"
 }
 

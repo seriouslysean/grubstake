@@ -688,18 +688,32 @@ cmd_doctor() {
     printf 'repo       %s\n' "$_root"
     printf 'platform   %s\n' "$(platform)"
     printf 'cache      %s\n' "$(cache_root)"
-    printf 'hooksPath  %s\n' "$(git -C "$_root" config core.hooksPath || echo '(unset)')"
+    _hookspath="$(git -C "$_root" config core.hooksPath || true)"
+    printf 'hooksPath  %s\n' "${_hookspath:-(unset)}"
     printf 'pins       %s\n' "$(pins_file)"
-    for _hook in pre-commit post-commit; do
-        _installed="$_root/.githooks/$_hook"
-        if [ ! -f "$_installed" ]; then
-            printf '  %-12s not installed\n' "$_hook"
-        elif embedded_hook "$_hook" | cmp -s - "$_installed"; then
-            printf '  %-12s ok\n' "$_hook"
-        else
-            printf '  %-12s DRIFTED from the embedded copy (rm it and run: grubstake install)\n' "$_hook"
-        fi
-    done
+    if [ -n "$_hookspath" ] && [ "$_hookspath" != ".githooks" ]; then
+        # A foreign hooksPath means the repo owns its hooks, the same reason install refuses one.
+        printf '  hooks        not graded, hooksPath is not .githooks\n'
+    else
+        for _hook in pre-commit post-commit; do
+            _installed="$_root/.githooks/$_hook"
+            if [ ! -f "$_installed" ]; then
+                printf '  %-12s not installed\n' "$_hook"
+            else
+                # Marker line is pinned by the suite against hooks/*: reword it there and this check moves too.
+                grep -q "^# grubstake $_hook" "$_installed" 2>/dev/null && _marker_rc=0 || _marker_rc=$?
+                if [ "$_marker_rc" -eq 1 ]; then
+                    printf '  %-12s not grubstake'"'"'s (repo-managed; leaving it alone)\n' "$_hook"
+                elif [ "$_marker_rc" -ge 2 ]; then
+                    printf '  %-12s cannot be read\n' "$_hook"
+                elif embedded_hook "$_hook" | cmp -s - "$_installed"; then
+                    printf '  %-12s ok\n' "$_hook"
+                else
+                    printf '  %-12s DRIFTED from the embedded copy (rm it and run: grubstake install)\n' "$_hook"
+                fi
+            fi
+        done
+    fi
     for _tool in $(pinned_tools); do
         _ver="$(pin_version "$_tool")"
         # Assign, do not test: a die inside $( ) would only kill the subshell.

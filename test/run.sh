@@ -2342,6 +2342,97 @@ else
     pass
 fi
 
+it "doctor never advises deleting a hook grubstake did not write"
+# #59: the drift check above compares .githooks/pre-commit to embedded_hook unconditionally, with
+# no notion of a repo that wired core.hooksPath itself and never ran install. That repo's own hook
+# gets called DRIFTED and told to `rm it and run: grubstake install` -- a remedy that deletes a
+# hook grubstake never wrote. Nothing here carries the marker embedded_hook's own copy does, so
+# there is nothing for doctor to have adopted.
+r=$(new_repo)
+mkdir -p "$r/.githooks" || fixture_die "cannot create $r/.githooks"
+printf '#!/bin/sh\necho "repo-managed gate"\n' > "$r/.githooks/pre-commit" \
+    || fixture_die "cannot write $r/.githooks/pre-commit"
+chmod +x "$r/.githooks/pre-commit" || fixture_die "cannot make $r/.githooks/pre-commit executable"
+( cd "$r" && git config core.hooksPath .githooks ) || fixture_die "cannot set core.hooksPath in $r"
+# Read back what was just written: doctor's report hinges entirely on this value, so a config
+# write that silently did not take must fail the fixture, not masquerade as doctor misbehaving.
+[ "$(cd "$r" && git config core.hooksPath)" = ".githooks" ] \
+    || fixture_die "core.hooksPath did not read back as .githooks in $r"
+_out=$(gs "$r" doctor); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "doctor exited non-zero on a repo that keeps its own hook (rc $_rc): $_out"
+else
+    case "$_out" in
+        *DRIFTED*|*"rm it and run"*) fail "doctor advised deleting a hook it never wrote: $_out" ;;
+        *"hooksPath  .githooks"*) pass ;;
+        *) fail "doctor did not report on this repo at all: $_out" ;;
+    esac
+fi
+
+it "doctor still reports drift in a hook that carries grubstake's marker"
+# The ownership distinction #59 wants must not swallow real drift: a hook that IS the embedded
+# copy, then edited, still needs the existing DRIFTED remedy -- that report is correct today and
+# must survive the fix. new_hook_repo seeds the real hooks/pre-commit (marker and all), so
+# corrupting it in place keeps the marker but changes the bytes.
+r=$(new_hook_repo)
+printf '# corrupted for test\n' >> "$r/.githooks/pre-commit"
+_out=$(gs "$r" doctor)
+# Grep the pre-commit line specifically: a case glob spans newlines, so matching the three
+# substrings anywhere in $_out (in any order across lines) would not pin them to the one line
+# that must carry them together.
+_line=$(printf '%s\n' "$_out" | grep 'pre-commit')
+case "$_line" in
+    *"DRIFTED"*"rm it and run: grubstake install"*) pass ;;
+    *) fail "doctor stopped flagging a genuinely drifted grubstake hook: $_out" ;;
+esac
+
+# Adoption rule chosen here: a hooksPath other than .githooks means the repo manages its own hooks
+# outright, mirroring cmd_install's own refusal to touch a foreign hooksPath. doctor must not grade
+# hooks it was never asked to install, so "not installed" (a defect reading) must not appear for a
+# repo that never pointed hooksPath at .githooks in the first place.
+it "doctor does not grade hooks in a repo whose hooksPath is not .githooks"
+r=$(new_repo)
+( cd "$r" && git config core.hooksPath .other-hooks ) || fixture_die "cannot set core.hooksPath in $r"
+# Read back what was just written, for the same reason as the fixture above: a config write that
+# silently did not take must fail the fixture, not masquerade as doctor misbehaving.
+[ "$(cd "$r" && git config core.hooksPath)" = ".other-hooks" ] \
+    || fixture_die "core.hooksPath did not read back as .other-hooks in $r"
+_out=$(gs "$r" doctor); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "doctor exited non-zero for a repo that manages its own hooksPath (rc $_rc): $_out"
+else
+    case "$_out" in
+        *"not installed"*|*"DRIFTED"*) fail "doctor graded a hook in a repo it was never asked to install: $_out" ;;
+        *) pass ;;
+    esac
+fi
+
+it "a reworded hook header would make doctor mistake real drift for a hand-off"
+# cmd_doctor's ownership discriminator is `grep -q "^# grubstake <hook>"` against the installed
+# file. That line is ordinary prose in hooks/pre-commit and hooks/post-commit, not a declared
+# sentinel -- nothing marks it as machine-read. A plausible reword of it (e.g. "grubstake's
+# pre-commit gate.") would silently flip doctor from reporting a drifted-but-still-grubstake's hook
+# to reporting "not grubstake's; hands off" for every repo that installed this hook, since the
+# marker doctor looks for would simply no longer be there. Changing the shipped hook bytes to carry
+# a declared sentinel instead would trigger the manual hook-refresh ceremony in every consuming
+# repo, so this constraint is enforced here, at development time, rather than at runtime.
+#
+# Extracted from grubstake.sh rather than hardcoded a second time here, so the mirror failure --
+# cmd_doctor's own grep pattern drifting instead of hooks/'s prose -- fails this test too; a
+# hardcoded copy would only ever catch one direction of the coupling.
+_raw="$(grep -Fo '"^# grubstake $_hook"' "$GS")"
+_pat="${_raw#\"}"; _pat="${_pat%\"}"
+if [ -z "$_pat" ]; then
+    fail "cmd_doctor no longer greps '^# grubstake \$_hook'; this test's extraction needs updating to match"
+else
+    _bad=""
+    for _hook in pre-commit post-commit; do
+        _want="${_pat%\$_hook}$_hook"
+        grep -q "$_want" "$HOOKS/$_hook" 2>/dev/null || _bad="$_bad $_hook"
+    done
+    [ -z "$_bad" ] && pass || fail "missing doctor's ownership marker line ('# grubstake <hook>'):$_bad"
+fi
+
 # ---------------------------------------------------------------------------- add
 
 printf '\nadd\n'

@@ -2621,6 +2621,52 @@ else
     esac
 fi
 
+it "post-commit stays quiet on a malformed CURRENT rather than comparing it against a genuinely newer release"
+# #71: the third comparison, newest=$(printf ... "$CURRENT" "$LATEST" ... | sort ...), has no
+# filter in front of it, unlike the two sort sites that select LATEST in the first place. CURRENT is
+# whatever the installed script's own "version" verb prints, so a dev/pre-release build with a
+# non-numeric suffix reaches this comparison unvalidated. A real hook invocation reaches this cleanly:
+# new_hook_repo copies the shipped hooks/post-commit verbatim, and latest_cache writes the exact
+# cache line the hook reads. NOTES.md, not a .swift path: staging Swift would send pre-commit into
+# its own "check" call, whose output lands in the same combined "$_out" hook_commit returns and
+# could mask or fake the very "available" line this test greps for.
+r=$(new_hook_repo)
+sed -i.bak 's/^GRUBSTAKE_VERSION=.*/GRUBSTAKE_VERSION="0.5.0-dev"/' "$r/grubstake.sh" && rm -f "$r/grubstake.sh.bak"
+latest_cache "$r" 9.9.9
+_c0=$(commits "$r")
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "a malformed CURRENT failed the commit outright, not just stayed quiet (rc $_rc): $_out"
+elif [ "$(commits "$r")" != "$((_c0 + 1))" ]; then
+    fail "the commit did not land, so silence proves nothing here: $_out"
+elif printf '%s' "$_out" | grep -q "available"; then
+    fail "advised an update by comparing an unvalidated, malformed CURRENT against LATEST: $_out"
+else
+    pass
+fi
+
+it "post-commit stays quiet on a poisoned LATEST cache rather than comparing it against a well-formed CURRENT"
+# #71's sharper case: LATEST is filtered by grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' when the background
+# refresh writes it, but read back raw from the cache file with no re-validation, so a poisoned or
+# stale cache carries anything into the same unguarded comparison. This is worse than scenario 1: the
+# advisory below would name a version no tag filter could ever have produced, not merely an
+# unvalidated-but-plausible one.
+r=$(new_hook_repo)
+latest_cache "$r" "99.0.0-dev"
+_c0=$(commits "$r")
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "a poisoned LATEST cache failed the commit outright, not just stayed quiet (rc $_rc): $_out"
+elif [ "$(commits "$r")" != "$((_c0 + 1))" ]; then
+    fail "the commit did not land, so silence proves nothing here: $_out"
+elif printf '%s' "$_out" | grep -q "available"; then
+    fail "advised an update by comparing a well-formed CURRENT against a poisoned, unvalidated LATEST: $_out"
+else
+    pass
+fi
+
 it "doctor reports a hook that has drifted from grubstake's copy"
 # ADOPTING says install writes hooks once and leaves them alone, so a fix landing in hooks/ (like
 # #29) never reaches an already-adopted repo through update. doctor is the only place left that can

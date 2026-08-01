@@ -235,8 +235,11 @@ entry_verified() {
 # mkdir is the portable atomic lock. flock(1) is not present on macOS.
 with_lock() {
     _lk="$1"; shift
+    _lkdir="$(dirname "$_lk")"
     _w=0
     while ! mkdir "$_lk" 2>/dev/null; do
+        # mkdir cannot distinguish ENOENT from EEXIST; the parent's absence is what separates them.
+        [ -d "$_lkdir" ] || die "$_lk: its directory is gone, most likely a concurrent clean removed the cache mid-install"
         _w=$((_w + 1))
         [ "$_w" -gt 50 ] && die "cache entry locked by another run: $_lk (stale? rmdir it)"
         sleep 0.1 2>/dev/null || sleep 1
@@ -406,7 +409,9 @@ install_tool() {
     fi
 
     mkdir -p "$(dirname "$_dest")"
-    with_lock "$_dest.lock" publish_dir "$_staging" "$_dest" "$_tool"
+    # errexit is suspended for this function's whole body under cmd_ensure's "install_tool ... || _bad=1".
+    with_lock "$_dest.lock" publish_dir "$_staging" "$_dest" "$_tool" \
+        || { rm -rf "$_tmp"; trap - EXIT HUP INT TERM; die "$_tool $_ver: could not finish publishing (remove $_staging and retry)"; }
 
     rm -rf "$_tmp"
     trap - EXIT HUP INT TERM

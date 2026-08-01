@@ -143,6 +143,36 @@ SHIM
     echo "$_sha"
 }
 
+# A deterministic stand-in for hoping a real race lands: any mkdir call ending in ".lock" --
+# with_lock's own lock acquisition is the only mkdir shaped this way anywhere in grubstake.sh --
+# blocks until $3 exists, running "$1/plant" first if the caller wrote one there. That gives a test
+# a fixed point to attach a second process to instead of a window it has to get lucky to hit. The
+# real mkdir's path is resolved once, here, against the unshimmed PATH this helper itself runs
+# under, and baked into the generated script as a literal -- never re-resolved at runtime, or a
+# shim earlier on the shimmed PATH would find itself and recurse.
+lock_pause_shim() {
+    _lpdir="$1"; _lpreached="$2"; _lpgo="$3"
+    mkdir -p "$_lpdir" || fixture_die "cannot create the lock-pause shim dir $_lpdir"
+    _lpreal="$(command -v mkdir)" || fixture_die "no real mkdir on PATH to wrap"
+    cat > "$_lpdir/mkdir" <<SHIM
+#!/bin/sh
+case "\$*" in
+    *.lock)
+        [ -x "$_lpdir/plant" ] && "$_lpdir/plant" "\$@"
+        : > "$_lpreached"
+        _lpw=0
+        while [ ! -f "$_lpgo" ]; do
+            _lpw=\$((_lpw + 1))
+            [ "\$_lpw" -gt 300 ] && { echo "lock-pause shim: timed out waiting for the go flag" >&2; exit 1; }
+            sleep 0.05 2>/dev/null || sleep 1
+        done
+        ;;
+esac
+exec "$_lpreal" "\$@"
+SHIM
+    chmod +x "$_lpdir/mkdir" || fixture_die "cannot make the lock-pause mkdir shim executable"
+}
+
 # For tests that cannot pin the same hash in both columns because they read a hash `add` wrote
 # for real over the network: a hardcoded column asserts against a path only one platform installs to.
 sha_column() {
@@ -604,6 +634,52 @@ if [ "$_rc" -eq 0 ]; then
     fail "clean exited 0 for GRUBSTAKE_CACHE=/..: $_out"
 elif [ -f "$_record" ]; then
     fail "the guard let a destructive command run before refusing: $(cat "$_record")"
+else
+    pass
+fi
+
+it "clean racing a concurrent ensure fails fast with the real cause, not a five-second stale-lock stall"
+# #56: clean renames the cache root aside mid-install (see the comment on the mv above), and
+# with_lock's mkdir cannot tell its own ENOENT (the parent just vanished) apart from EEXIST (a real
+# lock held by another run) -- both just fail the mkdir. Pre-fix it spins the full 50-iteration,
+# five-second retry budget and then dies blaming a stale lock that was never there. A legacy
+# (receiptless) entry reaches with_lock the cheapest way: no download, no staging, just
+# install_tool's own write_receipt call, so lock_pause_shim's mkdir pause lands exactly at the
+# mkdir that matters without needing a real download race to get there.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+_shim="$r/mkdir-shim"; _reached="$r/reached"; _go="$r/go"
+lock_pause_shim "$_shim" "$_reached" "$_go"
+( cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure >"$r/out" 2>&1; echo $? > "$r/rc" ) &
+_bgpid=$!
+_w=0
+while [ ! -f "$_reached" ]; do
+    _w=$((_w + 1))
+    [ "$_w" -gt 300 ] && fixture_die "ensure never reached the lock point"
+    sleep 0.05 2>/dev/null || sleep 1
+done
+_cleanout=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh clean 2>&1 ); _cleanrc=$?
+[ "$_cleanrc" -eq 0 ] || fixture_die "clean itself failed while racing ensure: $_cleanout"
+[ -e "$r/.cache" ] && fixture_die "clean did not actually remove the cache root; the race window is not real"
+_t0=$(date +%s)
+: > "$_go"
+wait "$_bgpid" 2>/dev/null
+_t1=$(date +%s)
+[ -f "$r/rc" ] || fixture_die "the backgrounded ensure never recorded an exit status"
+_rc="$(cat "$r/rc")"
+_elapsed=$((_t1 - _t0))
+_out="$(cat "$r/out" 2>/dev/null)"
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 racing clean: $_out"
+elif [ "$_elapsed" -ge 3 ]; then
+    fail "ensure spun ${_elapsed}s instead of failing fast when its cache root vanished mid-lock: $_out"
+elif printf '%s' "$_out" | grep -qi "stale? rmdir it"; then
+    fail "misdiagnosed a vanished cache root as another run's stale lock: $_out"
+elif printf '%s' "$_out" | grep -qi "archive contains"; then
+    fail "misdiagnosed a vanished cache root as a corrupt archive: $_out"
+elif ! printf '%s' "$_out" | grep -Eqi "cache|root|gone|removed|disappear"; then
+    fail "failed fast without naming the real cause: $_out"
 else
     pass
 fi
@@ -1394,6 +1470,78 @@ elif [ -e "$_st" ]; then fail "the loser could not remove its own read-only stag
 elif [ "$(cat "$_d/swiftlint" 2>/dev/null)" != "$_before" ]; then fail "the winner's own executable was disturbed"
 else pass; fi
 chmod -R u+w "$r" 2>/dev/null
+
+it "a race loser's staging cleanup that rm cannot finish is reported in grubstake's voice, not raw rm stderr"
+# #56: install_tool's own "with_lock ... publish_dir ..." call (the real call site, not the
+# fabricated one above) is bare -- no "|| die". cmd_ensure calls install_tool as
+# "install_tool ... || _bad=1", and a shell function called on the left of "||" runs with errexit
+# suspended for its whole body (POSIX 2.8.1 / bash's documented -e behavior for compound commands),
+# so the bare call's nonzero return does not stop the script at all: execution falls through to
+# install_tool's own "[ -x "$_bin" ]" completeness check, which passes because the winner's binary
+# is right there, and the run finishes by logging a false "installed". The user is left with rm's
+# unprefixed complaint sandwiched between two ordinary "[grubstake]" log lines, exit 0, and an
+# orphaned, half-removed staging directory still sitting in the cache. publish_dir's winner branch
+# has no error handling at all around its "rm -rf $1": unlike the debris branch a few lines below
+# it, which at least warns before returning 1, a cleanup failure here never gets a "[grubstake]"
+# line of its own. Reaching this needs a genuine race through the real call site: install_tool's
+# early "already installed" check means a fresh download only ever calls publish_dir once the binary
+# is confirmed absent, so the winner branch is unreachable except when a second install actually
+# wins in between. lock_pause_shim pauses the loser (B) at with_lock's own mkdir, right after B has
+# built and verified its staging but before it takes the lock, which is exactly the window a real
+# winner (A) needs to publish first; the plant script then makes B's own staging partially
+# unremovable the same way "an unremovable partial directory fails loudly instead of nesting the
+# staging" above does to a destination, before B is released to find A already there.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_dest="$r/.cache/swiftlint/$_sha"
+_shim="$r/mkdir-shim"; _reached="$r/reached"; _go="$r/go"
+lock_pause_shim "$_shim" "$_reached" "$_go"
+cat > "$_shim/plant" <<'PLANT'
+#!/bin/sh
+_pd="${1%.lock}"
+for _psd in "$_pd".staging.*; do
+    [ -d "$_psd" ] || continue
+    mkdir -p "$_psd/locked" 2>/dev/null
+    printf x > "$_psd/locked/f" 2>/dev/null
+    chmod 000 "$_psd/locked" 2>/dev/null
+done
+PLANT
+chmod +x "$_shim/plant" || fixture_die "cannot make the plant script executable"
+# B (the eventual loser): staged and paused at the lock, staging deliberately half-unremovable.
+( cd "$r" && PATH="$r/curl-shim:$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure >"$r/b.out" 2>&1; echo $? > "$r/b.rc" ) &
+_bpid=$!
+_w=0
+while [ ! -f "$_reached" ]; do
+    _w=$((_w + 1))
+    [ "$_w" -gt 300 ] && fixture_die "the loser never reached the lock point"
+    sleep 0.05 2>/dev/null || sleep 1
+done
+_stB=$(printf '%s\n' "$_dest".staging.* 2>/dev/null | head -1)
+[ -d "$_stB/locked" ] || fixture_die "the plant script did not create the unremovable subdirectory"
+{ [ -r "$_stB/locked" ] || [ -x "$_stB/locked" ]; } && fixture_die "chmod 000 did not block $_stB/locked (running as root?)"
+# A (the winner): a plain, unshimmed, fully offline install of the same cold pin, run to completion
+# while B sits paused above.
+_outA=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rcA=$?
+[ "$_rcA" -eq 0 ] || fixture_die "the winning install failed while the loser was paused: $_outA"
+[ -x "$_dest/swiftlint" ] || fixture_die "the winner did not actually publish: $_outA"
+: > "$_go"
+wait "$_bpid" 2>/dev/null
+[ -f "$r/b.rc" ] || fixture_die "the backgrounded loser never recorded an exit status"
+_rcB="$(cat "$r/b.rc")"
+_outB="$(cat "$r/b.out" 2>/dev/null)"
+chmod -R u+rwx "$_stB" 2>/dev/null
+if [ "$_rcB" -eq 0 ]; then
+    fail "the losing install exited 0 despite an unremovable staging directory: $_outB"
+elif ! printf '%s\n' "$_outB" | grep -q '^rm:'; then
+    fail "did not actually hit rm's own failure -- the fixture did not reach the real defect: $_outB"
+else
+    _last=$(printf '%s\n' "$_outB" | tail -1)
+    case "$_last" in
+        "[grubstake]"*) pass ;;
+        *) fail "the cleanup failure was left in rm's raw voice, not grubstake's: $_outB" ;;
+    esac
+fi
 
 it "publish_dir publishes a staging directory into a destination that lacks the executable"
 # The other half of the branch above: a destination that exists but does not hold the tool's

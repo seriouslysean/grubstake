@@ -203,6 +203,34 @@ SHIM
     chmod +x "$_mvdir/mv" || fixture_die "cannot make the mv-pause shim executable"
 }
 
+# Pauses "git" only on cmd_install's own hooksPath write ("git -C <root> config core.hooksPath
+# .githooks", five arguments exactly), never the read earlier in the same command ("git -C <root>
+# config core.hooksPath", four arguments, no value) -- pausing that one too would strand the caller
+# before it ever reaches the call under test. Each paused invocation writes "$_reached.$GST_LABEL",
+# a label the caller sets per racer (GST_LABEL=1, GST_LABEL=2), not a pid: measured directly against
+# git's own lock (not through a full "install"), a poll-with-sleep handshake on either side of the
+# release only landed the two racers on top of each other 3-5 times in 15-20 tries -- enough slack
+# for one side to slip through git's lock window before the other arrives. A tight, sleep-free
+# busy-wait on a plain "[ -f ]" test on both sides (no external `find`/`wc` call standing between a
+# racer finishing and the poll noticing) raised that to 12-16 in 15-20. This is still a real race,
+# not a guarantee: a clean run on this half proves nothing beyond itself, the same as every other
+# probabilistic catch in this suite, but a red one is real, and it now fires often enough to trust
+# watching it fail once as real evidence rather than a fluke.
+git_pause_shim() {
+    _gpdir="$1"; _gpreached="$2"; _gpgo="$3"
+    mkdir -p "$_gpdir" || fixture_die "cannot create the git-pause shim dir $_gpdir"
+    _gpreal="$(command -v git)" || fixture_die "no real git on PATH to wrap"
+    cat > "$_gpdir/git" <<SHIM
+#!/bin/sh
+if [ "\$#" -eq 5 ] && [ "\$1" = "-C" ] && [ "\$3" = "config" ] && [ "\$4" = "core.hooksPath" ] && [ "\$5" = ".githooks" ]; then
+    : > "$_gpreached.\${GST_LABEL:-x}"
+    while [ ! -f "$_gpgo" ]; do :; done
+fi
+exec "$_gpreal" "\$@"
+SHIM
+    chmod +x "$_gpdir/git" || fixture_die "cannot make the git-pause git shim executable"
+}
+
 # For tests that cannot pin the same hash in both columns because they read a hash `add` wrote
 # for real over the network: a hardcoded column asserts against a path only one platform installs to.
 sha_column() {
@@ -2333,6 +2361,15 @@ extract_embedded_hook() {
     sed -n "/^# gst-embedded-hook-begin: $1\$/,/^# gst-embedded-hook-end: $1\$/p" "$GS" | sed '1d;$d'
 }
 
+# known_hook_hashes/is_known_hook_hash, for the ratchet test below to assert through the real
+# lookup rather than a bare grep across the whole file: a hash filed under the wrong hook's own
+# case arm (the exact "forgot to append it in the right place" failure #58's ratchet exists to
+# catch) would still satisfy "does this string appear anywhere in grubstake.sh", but must not
+# satisfy is_known_hook_hash called with that hook's own name.
+extract_hook_hash_fns() {
+    sed -n '/^known_hook_hashes() {/,/^}/p;/^is_known_hook_hash() {/,/^}/p' "$GS"
+}
+
 it "the embedded copy of each hook in grubstake.sh cannot drift from hooks/"
 # hooks/ is the reviewable source; grubstake.sh must ship its own verbatim copy so install needs no
 # network. Two copies of the same ~105 lines is exactly how they silently diverge, which is what
@@ -2371,6 +2408,321 @@ elif [ "$_hp" != ".githooks" ]; then
 else
     pass
 fi
+
+it "install refreshes a hook that matches a known previous release, not just the current one"
+# #58: install writes a hook once and never revisits it, so a fix to a shipped hook (like #71's
+# post-commit version validation) is undeliverable to an already-adopted repo except by deleting
+# the hook by hand and reinstalling. The design constraint recorded on the issue itself: overwrite
+# only a hook byte-identical to a KNOWN previous embedded copy, so repo-local edits are never at
+# risk -- an unrecognized hook is a different, separate case below. v0.5.0's post-commit (the
+# pre-#71 bytes) is embedded here as a literal fixture, not fetched: CI is a depth-1 checkout, so no
+# test may shell out to "git show vX:..." for historical bytes. This is grubstake's own published
+# content (v0.5.0/hooks/post-commit), not a leak. Verified once, by hand, against the tag at the
+# time this test was written: byte-identical to what that release's own embedded_hook() produced.
+r=$(new_repo)
+mkdir -p "$r/.githooks"
+cat > "$r/.githooks/post-commit" <<'GST_V0_5_0_POST_COMMIT'
+#!/bin/sh
+# grubstake post-commit: report that a newer grubstake exists. Notify only. It never updates,
+# never blocks, and never fails a commit.
+#
+# post-commit rather than pre-commit on purpose: nothing here should sit in the path that gates a
+# commit. The synchronous cost is one file read; the network refresh is backgrounded and only
+# runs once per TTL, so an offline machine stays silent instead of stalling.
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+GRUBSTAKE="$ROOT/grubstake.sh"
+[ -x "$GRUBSTAKE" ] || exit 0
+
+CACHE="$(git rev-parse --git-dir)/grubstake-latest"   # inside .git, so it needs no gitignore entry
+TTL=86400
+
+CURRENT="$("$GRUBSTAKE" version 2>/dev/null)" || exit 0
+
+now=$(date +%s)
+stamp=0
+[ -f "$CACHE" ] && stamp=$(sed -n 1p "$CACHE" 2>/dev/null || echo 0)
+case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
+
+if [ $((now - stamp)) -gt "$TTL" ]; then
+    # Backgrounded and detached: a slow or unreachable network must not extend a commit.
+    (
+        latest=$(git ls-remote --tags --refs https://github.com/seriouslysean/grubstake 'v*' 2>/dev/null \
+            | awk '{print $2}' | sed 's|refs/tags/v||' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
+        [ -n "$latest" ] && printf '%s\n%s\n' "$now" "$latest" > "$CACHE"
+    ) >/dev/null 2>&1 &
+fi
+
+LATEST=$(sed -n 2p "$CACHE" 2>/dev/null) || exit 0
+[ -n "$LATEST" ] || exit 0
+[ "$LATEST" = "$CURRENT" ] && exit 0
+
+# Only speak when the cached latest is genuinely newer than what is installed.
+newest=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
+[ "$newest" = "$LATEST" ] || exit 0
+
+echo "[grubstake] $LATEST available (pinned $CURRENT) -- run: ./grubstake.sh update"
+exit 0
+GST_V0_5_0_POST_COMMIT
+chmod +x "$r/.githooks/post-commit"
+_shims="$(mktemp -d "$ROOT/no-net-refresh.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+_got="$(mktemp "$ROOT/refresh-check.XXXXXX")" || fixture_die "cannot create a scratch file for post-commit extraction"
+extract_embedded_hook post-commit > "$_got"
+if [ "$_rc" -ne 0 ]; then
+    fail "install failed refreshing a known previous release's post-commit (rc $_rc): $_out"
+elif ! cmp -s "$_got" "$r/.githooks/post-commit"; then
+    fail "post-commit was not refreshed to the current embedded copy: $_out"
+elif ! { printf '%s' "$_out" | grep -qi "post-commit" && printf '%s' "$_out" | grep -qi "refresh"; }; then
+    fail "post-commit was refreshed, but nothing logged it as a refresh: $_out"
+else
+    pass
+fi
+
+it "install leaves a marker-bearing hook with unrecognized edits untouched, but warns"
+# The other side of #58's constraint: a hook that carries grubstake's own marker but matches
+# neither the current embedded copy nor any known previous one may carry repo-local edits install
+# cannot prove it wrote -- it is left alone, not overwritten, and the human is told it differs
+# rather than left to discover that by hand later. Appending one line to the current embedded copy
+# keeps the marker (still line 2) while making the sha256 match nothing on record.
+r=$(new_repo)
+mkdir -p "$r/.githooks"
+extract_embedded_hook pre-commit > "$r/.githooks/pre-commit"
+printf '# a local edit grubstake has never shipped\n' >> "$r/.githooks/pre-commit"
+chmod +x "$r/.githooks/pre-commit"
+_before="$(mktemp "$ROOT/unrecognized-before.XXXXXX")" || fixture_die "cannot snapshot the edited hook"
+cp "$r/.githooks/pre-commit" "$_before"
+_shims="$(mktemp -d "$ROOT/no-net-unrecognized.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "install failed over a hook it should only have warned about (rc $_rc): $_out"
+elif ! cmp -s "$_before" "$r/.githooks/pre-commit"; then
+    fail "a marker-bearing hook with unrecognized edits was overwritten: $_out"
+elif ! { printf '%s' "$_out" | grep -qi "pre-commit" && printf '%s' "$_out" | grep -Eqi "warn|differ|drift"; }; then
+    fail "install left the hook alone but did not warn that it differs: $_out"
+else
+    pass
+fi
+
+it "install leaves a markerless hand-rolled hook alone, without warning about drift"
+# A hook that never carried grubstake's marker predates adoption or was never grubstake's to begin
+# with -- the #59 semantics doctor already applies, now needed at install too, since install is
+# where a hook first gets judged. Silence here matters as much as the warn above does: a repo that
+# rolled its own pre-commit long before adopting grubstake must not be told its own hook "differs"
+# from something it was never trying to match.
+r=$(new_repo)
+mkdir -p "$r/.githooks"
+printf '#!/bin/sh\necho "this repo rolled its own pre-commit hook"\nexit 0\n' > "$r/.githooks/pre-commit"
+chmod +x "$r/.githooks/pre-commit"
+_before="$(mktemp "$ROOT/markerless-before.XXXXXX")" || fixture_die "cannot snapshot the hand-rolled hook"
+cp "$r/.githooks/pre-commit" "$_before"
+_shims="$(mktemp -d "$ROOT/no-net-markerless.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "install failed over a repo-owned hook it should have left alone (rc $_rc): $_out"
+elif ! cmp -s "$_before" "$r/.githooks/pre-commit"; then
+    fail "a markerless, hand-rolled hook was touched: $_out"
+elif printf '%s' "$_out" | grep -qi "pre-commit" && printf '%s' "$_out" | grep -Eqi "warn|differ|drift"; then
+    fail "install warned about drift on a hook that was never grubstake's: $_out"
+else
+    pass
+fi
+
+it "install is idempotent on a hook already at the current embedded copy"
+# The refresh contract must not turn every install into a rewrite: a hook already byte-identical to
+# what would be written needs no touching and no refresh log, or install stops being safe to rerun.
+r=$(new_repo)
+mkdir -p "$r/.githooks"
+extract_embedded_hook pre-commit > "$r/.githooks/pre-commit"
+chmod +x "$r/.githooks/pre-commit"
+_before="$(mktemp "$ROOT/idempotent-before.XXXXXX")" || fixture_die "cannot snapshot the current hook"
+cp "$r/.githooks/pre-commit" "$_before"
+_shims="$(mktemp -d "$ROOT/no-net-idempotent.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "install failed on a hook already at the current embedded copy (rc $_rc): $_out"
+elif ! cmp -s "$_before" "$r/.githooks/pre-commit"; then
+    fail "an already-current hook's bytes changed: $_out"
+elif printf '%s' "$_out" | grep -qi "pre-commit" && printf '%s' "$_out" | grep -qi "refresh"; then
+    fail "install logged a refresh for a hook that was already current: $_out"
+else
+    pass
+fi
+
+it "the current embedded hooks' hashes are in grubstake.sh's own known-hashes list"
+# Constrains the implementer's data structure for #58's refresh contract: whatever list of hashes
+# licenses overwriting an existing hook must contain every historically released variant (per #58:
+# six distinct pre-commit variants, two post-commit) plus whatever is currently embedded, or a
+# future hook edit that forgets to append its own new hash makes every repo running that edit's
+# immediate predecessor unrefreshable without deleting the hook by hand -- the exact manual ceremony
+# #58 exists to remove. The historical entries themselves are not re-derived or verified here: CI
+# is a depth-1 checkout, so no test may shell out to "git show vX:..." for historical bytes; they
+# were verified against the release tags once, by hand, at introduction, and are trusted from then
+# on the same way this suite trusts any other hash or receipt. This test only ever asserts the
+# CURRENT side of that list, which needs no such trust -- it is computed fresh from the embedded
+# copy every run.
+#
+# Asserted through the real is_known_hook_hash, not a bare "does this string appear anywhere in
+# grubstake.sh": a plain grep -qF would pass even if the current hash were filed under the WRONG
+# hook's case arm (pre-commit's hash appended to post-commit's list, say) -- byte-for-byte the same
+# string, present in the file, and yet not what is_known_hook_hash "post-commit" "$sha" would ever
+# find true. That misfiling is exactly the class of forgot-to-append mistake this ratchet exists to
+# catch, so the lookup has to be hook-scoped the same way the real call sites use it.
+_bad=""
+for _hook in pre-commit post-commit; do
+    _got="$(mktemp "$ROOT/ratchet.XXXXXX")" || fixture_die "cannot create a scratch file for $_hook extraction"
+    extract_embedded_hook "$_hook" > "$_got"
+    _sha="$(sha256_of "$_got")"
+    _check="$(mktemp "$ROOT/ratchet-check.XXXXXX")" || fixture_die "cannot create a scratch script for $_hook's hash check"
+    { extract_hook_hash_fns
+      echo 'die() { echo "$1" >&2; exit 1; }'
+      printf 'is_known_hook_hash %s %s\n' "$_hook" "$_sha"
+    } > "$_check"
+    sh "$_check" || _bad="$_bad $_hook"
+done
+[ -z "$_bad" ] && pass || fail "is_known_hook_hash does not recognize the current embedded hash for:$_bad"
+
+it "two concurrent installs against the same refresh-eligible repo do not race each other's tmp"
+# Panel review reproduced two concurrent `install` runs corrupting each other 39/40 times under
+# dash: the refresh path (and the fresh-install path, for whichever hook does not exist yet) wrote
+# the current embedded copy to a single, predictable "$_dest.tmp" name shared by every concurrent
+# invocation of the same command against the same repo, so one process's write, chmod, or cleanup
+# could land on the other's in-flight temp file. The fix moves every write behind a uniquely-named,
+# trap-guarded mktemp beside the destination instead. post-commit is seeded fresh from a known
+# previous release before every iteration, so it is refresh-eligible every time; pre-commit starts
+# absent, so the first iteration also exercises the fresh-install race, and both concurrent
+# processes racing to create it land on the same bytes either way once "mv" wins for whichever one
+# gets there first.
+#
+# Two concurrent installs share more than the hook tmp name: both also run the unconditional
+# `git config core.hooksPath .githooks` write at the end of the command, which races on git's own
+# ".git/config.lock" the same way -- one process's write can lose that race and surface git's own
+# raw "error: could not lock config file" instead of anything grubstake ever voices. Either race is
+# the same class of defect (an unguarded shared write two concurrent installs both make), so both
+# are asserted as one contract here -- "two concurrent installs must not corrupt each other or leak
+# a raw tool error" -- with the failure message naming which one actually fired.
+#
+# A natural race, hoping two full "install" runs happen to reach the same call at the same
+# instant, is what the earlier version of this test relied on -- it caught the git-config race only
+# 1 run in 3 across sh/dash/env-i, which is not something to watch fail and trust. git_pause_shim
+# gives each racer a fixed point to stop at (the hooksPath write, the last shared-state write
+# `install` makes) and releases both together, so the collision this test exists to catch happens on
+# purpose instead of by luck. The hook-tmp write earlier in the same run is not pinned this way: it
+# already has its own isolated, 30/30-vs-0/30 discrimination proof (built at test-authoring time,
+# not part of this file), so here it rides along as a natural, unforced check on top of the forced
+# git-config collision -- same standing as the probabilistic catches elsewhere in this suite (see
+# "two repos sharing one cache" above): a clean run on this half proves nothing beyond itself, but a
+# red one is real.
+#
+# The reaped-loop discipline from #64 still applies to the handful of repeats below: nothing here is
+# sampled or left unreaped, and the loop stops at the first iteration that fails rather than
+# overwriting the evidence with a clean one that runs after it.
+r=$(new_repo)
+_shims="$(mktemp -d "$ROOT/no-net-concurrent-install.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_reached="$r/git-reached"; _go="$r/git-go"
+git_pause_shim "$_shims" "$_reached" "$_go"
+_got="$(mktemp "$ROOT/concurrent-install-current.XXXXXX")" || fixture_die "cannot create a scratch file for post-commit extraction"
+extract_embedded_hook post-commit > "$_got"
+_iterations=5
+_i=0
+_bad=""
+while [ "$_i" -lt "$_iterations" ] && [ -z "$_bad" ]; do
+    _i=$((_i + 1))
+    rm -f "$_reached".* "$_go"
+    mkdir -p "$r/.githooks"
+    cat > "$r/.githooks/post-commit" <<'GST_V0_5_0_POST_COMMIT_RACE'
+#!/bin/sh
+# grubstake post-commit: report that a newer grubstake exists. Notify only. It never updates,
+# never blocks, and never fails a commit.
+#
+# post-commit rather than pre-commit on purpose: nothing here should sit in the path that gates a
+# commit. The synchronous cost is one file read; the network refresh is backgrounded and only
+# runs once per TTL, so an offline machine stays silent instead of stalling.
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+GRUBSTAKE="$ROOT/grubstake.sh"
+[ -x "$GRUBSTAKE" ] || exit 0
+
+CACHE="$(git rev-parse --git-dir)/grubstake-latest"   # inside .git, so it needs no gitignore entry
+TTL=86400
+
+CURRENT="$("$GRUBSTAKE" version 2>/dev/null)" || exit 0
+
+now=$(date +%s)
+stamp=0
+[ -f "$CACHE" ] && stamp=$(sed -n 1p "$CACHE" 2>/dev/null || echo 0)
+case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
+
+if [ $((now - stamp)) -gt "$TTL" ]; then
+    # Backgrounded and detached: a slow or unreachable network must not extend a commit.
+    (
+        latest=$(git ls-remote --tags --refs https://github.com/seriouslysean/grubstake 'v*' 2>/dev/null \
+            | awk '{print $2}' | sed 's|refs/tags/v||' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
+        [ -n "$latest" ] && printf '%s\n%s\n' "$now" "$latest" > "$CACHE"
+    ) >/dev/null 2>&1 &
+fi
+
+LATEST=$(sed -n 2p "$CACHE" 2>/dev/null) || exit 0
+[ -n "$LATEST" ] || exit 0
+[ "$LATEST" = "$CURRENT" ] && exit 0
+
+# Only speak when the cached latest is genuinely newer than what is installed.
+newest=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
+[ "$newest" = "$LATEST" ] || exit 0
+
+echo "[grubstake] $LATEST available (pinned $CURRENT) -- run: ./grubstake.sh update"
+exit 0
+GST_V0_5_0_POST_COMMIT_RACE
+    chmod +x "$r/.githooks/post-commit"
+    ( cd "$r" && GST_LABEL=1 PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install >"$r/out1" 2>&1; echo $? > "$r/rc1" ) &
+    _p1=$!
+    ( cd "$r" && GST_LABEL=2 PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install >"$r/out2" 2>&1; echo $? > "$r/rc2" ) &
+    _p2=$!
+    # Both racers have to be waiting at the hooksPath write, not just one, before releasing either.
+    # No sleep on this poll: a `sleep`-paced check (on either side of the release) is exactly what
+    # let the two racers slip past each other in the tuning that landed on this handshake (see the
+    # comment on git_pause_shim); a plain "[ -f ]" busy-wait removes that gap. A caller stuck here
+    # for real means the shim itself is broken, not that the race under test failed to land, so this
+    # is a fixture_die, not a fail.
+    _w=0
+    while [ ! -f "$_reached.1" ] || [ ! -f "$_reached.2" ]; do
+        _w=$((_w + 1))
+        [ "$_w" -gt 2000000 ] && fixture_die "iteration $_i: both concurrent installs never reached the hooksPath write together"
+    done
+    : > "$_go"
+    wait "$_p1" 2>/dev/null
+    wait "$_p2" 2>/dev/null
+    _rc1="$(cat "$r/rc1" 2>/dev/null)"; case "$_rc1" in ''|*[!0-9]*) _rc1=1 ;; esac
+    _rc2="$(cat "$r/rc2" 2>/dev/null)"; case "$_rc2" in ''|*[!0-9]*) _rc2=1 ;; esac
+    _out1="$(cat "$r/out1" 2>/dev/null)"
+    _out2="$(cat "$r/out2" 2>/dev/null)"
+    _files="$(find "$r/.githooks" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
+    if printf '%s\n%s\n' "$_out1" "$_out2" | grep -qE '^(mv|chmod|error):'; then
+        _bad="iteration $_i: a raw, unvoiced tool error leaked instead of a [grubstake]-voiced failure: $_out1 || $_out2"
+    elif [ "$_rc1" -ne 0 ] || [ "$_rc2" -ne 0 ]; then
+        _bad="iteration $_i: an install exited non-zero (rc1=$_rc1 rc2=$_rc2): $_out1 || $_out2"
+    elif ! cmp -s "$_got" "$r/.githooks/post-commit" 2>/dev/null; then
+        _bad="iteration $_i: post-commit did not end at the current embedded copy"
+    elif [ "$_files" != "2" ]; then
+        _bad="iteration $_i: .githooks has $_files files instead of exactly 2 (pre-commit, post-commit) -- tmp litter: $(ls -la "$r/.githooks" 2>/dev/null)"
+    fi
+done
+rm -f "$r/out1" "$r/out2" "$r/rc1" "$r/rc2"
+[ -z "$_bad" ] && pass || fail "$_bad"
 
 # ---------------------------------------------------------------------------- hooks
 #

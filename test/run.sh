@@ -2724,6 +2724,160 @@ done
 rm -f "$r/out1" "$r/out2" "$r/rc1" "$r/rc2"
 [ -z "$_bad" ] && pass || fail "$_bad"
 
+it "install fails fast with git's own error, not a lock nobody held, when .git itself is unwritable"
+# #85: the retry around the hooksPath write discards every attempt's stderr with "2>/dev/null", so
+# it cannot tell git losing a genuine lock race (retryable) apart from any other reason the write
+# failed (not retryable). A read-only .git is an ordinary way for that write to fail for a reason
+# that will never clear no matter how many times it is retried: chmod 555 leaves .githooks itself
+# writable (a sibling of .git, not inside it), so the hook loop still succeeds, and only the
+# hooksPath write -- which needs to create .git/config.lock -- hits EACCES. Verified directly
+# against git itself before writing this assertion: the real message is "could not lock config
+# file .git/config: Permission denied", never "File exists" (that text is reserved for a lock
+# already held, the case #85 says must still retry). Pre-fix this spins the full ~50-attempt
+# budget and then dies blaming "git kept losing the lock" -- true of no attempt that ran.
+r=$(new_repo)
+_shims="$(mktemp -d "$ROOT/no-net-readonly-git.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+chmod 555 "$r/.git" || fixture_die "cannot make $r/.git read-only"
+_t0=$(date +%s)
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+_t1=$(date +%s)
+chmod 755 "$r/.git" 2>/dev/null
+_elapsed=$((_t1 - _t0))
+if [ "$_rc" -eq 0 ]; then
+    fail "install exited 0 with .git itself read-only: $_out"
+elif [ "$_elapsed" -ge 3 ]; then
+    fail "install spun ${_elapsed}s instead of failing fast on a non-retryable git error: $_out"
+elif printf '%s' "$_out" | grep -qi "kept losing the lock"; then
+    fail "blamed a lock nobody held instead of the real permission failure: $_out"
+elif ! printf '%s' "$_out" | grep -qi "permission denied"; then
+    fail "did not carry git's own error text: $_out"
+else
+    pass
+fi
+
+it "install still wins a genuine git-config lock race once the lock clears"
+# Not proof of #85's fix -- verified directly against pre-#85 HEAD, this already passes there
+# unchanged, because the old blind retry retries through everything regardless of cause. What it
+# guards is a fix that overcorrects: #85's contract is "retry reserved for contention, anything
+# else fails immediately," and a fix that reads that as "only retry on an exact, narrow signature"
+# could start treating real, transient contention as the "anything else" case and die on it. A
+# plain file at .git/config.lock is exactly what git's own locking leaves behind while it holds the
+# write -- confirmed directly: git reports the identical "File exists" either way, whether the
+# holder is a concurrent grubstake install or anything else. Planting it and then releasing it
+# after a beat, rather than never releasing it (that is the case below), reproduces a lock that is
+# genuinely contended and genuinely clears, which the retry exists to wait out. One second is
+# enough of a hold to guarantee install's first attempt lands while the lock is still there even on
+# the whole-second sleep fallback, without demanding a tight race.
+r=$(new_repo)
+_shims="$(mktemp -d "$ROOT/no-net-lock-clears.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+: > "$r/.git/config.lock" || fixture_die "cannot plant a genuine git-config lock in $r"
+( sleep 2; rm -f "$r/.git/config.lock" ) &
+_releaser=$!
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+wait "$_releaser" 2>/dev/null
+_hp=$( cd "$r" && git config core.hooksPath 2>/dev/null )
+if [ "$_rc" -ne 0 ]; then
+    fail "install gave up on a lock that genuinely cleared: $_out"
+elif [ "$_hp" != ".githooks" ]; then
+    fail "install exited 0 but never actually set hooksPath (got '$_hp'): $_out"
+else
+    pass
+fi
+
+it "install exhausting a genuinely stale git-config lock still blames the lock, not a fabricated cause"
+# Also not proof of #85's fix -- verified directly against pre-#85 HEAD, this already passes there
+# unchanged too: the old blind retry exhausts the identical 50-iteration budget on any persistent
+# failure and its die message already contains "lock" regardless of cause. What it guards is a fix
+# that keeps the fast-fail from the read-only-.git test above but loses the honest report when
+# contention is real and simply never clears (its holder crashed, say) -- the die still has to name
+# the lock, not go silent or say something fabricated, once the budget genuinely runs out.
+#
+# A lower bound alone ("some time passed") does not prove the loop ran to its real end rather than
+# a shortened one -- a budget quietly gutted from 50 iterations to a handful would still clear a
+# loose floor on the whole-second sleep fallback (5 iterations * 1s = 5s already clears a flat "3").
+# The floor is derived from the same 0.1-or-1 fallback the loop itself falls back to, so it tracks
+# whichever this machine actually has: a few seconds short of the true ~5s/~50s total, comfortably
+# above what a materially smaller budget would produce on either path, without hardcoding a bound
+# that assumes fractional sleep works everywhere. This is the honest cost of proving exhaustion
+# rather than any death: on a fractional-sleep machine this test alone costs ~5s; on one that falls
+# back to whole-second sleeps, up to ~50s. Not flaky -- the lock never clears here, so every attempt
+# fails the same deterministic way -- just genuinely slow on the fallback path.
+r=$(new_repo)
+_shims="$(mktemp -d "$ROOT/no-net-lock-stale.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+if sleep 0.1 2>/dev/null; then _min_elapsed=4; else _min_elapsed=45; fi
+: > "$r/.git/config.lock" || fixture_die "cannot plant a genuine git-config lock in $r"
+_t0=$(date +%s)
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+_t1=$(date +%s)
+rm -f "$r/.git/config.lock" 2>/dev/null
+_elapsed=$((_t1 - _t0))
+if [ "$_rc" -eq 0 ]; then
+    fail "install exited 0 despite a git-config lock that was never released: $_out"
+elif [ "$_elapsed" -lt "$_min_elapsed" ]; then
+    fail "gave up on the lock after only ${_elapsed}s (expected at least ${_min_elapsed}s) -- the retry budget was not honestly exhausted: $_out"
+elif ! printf '%s' "$_out" | grep -qi "lock"; then
+    fail "exhausted the retry budget without naming the lock as the cause: $_out"
+else
+    pass
+fi
+
+it "install still retries through a locale-translated lock message instead of treating it as fatal"
+# The fast-fail fix reads git's own stderr and only retries on the literal English "File exists" --
+# git's actual signature for its own lock already being held. That match is only reliable if the
+# git subprocess is forced into the C locale for this call: an interactive user's real LC_ALL/LANG
+# reaches every child process by default, and a git built with message translations installed
+# prints a translated line for the identical failure under a non-C locale, which the literal match
+# can never recognize. Unrecognized then falls to the same immediate-death branch the read-only-.git
+# test above depends on, so without forcing C, genuine contention under a translated locale would
+# die on its very first attempt instead of retrying -- the opposite of what #85 wants preserved.
+#
+# A real foreign locale need not be installed on the machine running this suite to prove it: the
+# shim below only ever fabricates git's own two possible strings, choosing between them by reading
+# back whatever LC_ALL it was actually invoked with, so it tests grubstake.sh's own invocation
+# (does it force C on the call it makes), not this machine's locale catalog. The outer LC_ALL below
+# is what a French-locale user's environment would already have set before ever running install; if
+# grubstake.sh's own call does not override it, the shim sees that same value and answers in kind.
+r=$(new_repo)
+_shims="$(mktemp -d "$ROOT/no-net-locale-lock.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_marker="$r/.lock-marker"
+: > "$_marker" || fixture_die "cannot plant the lock marker for $r"
+( sleep 2; rm -f "$_marker" ) &
+_releaser=$!
+_realgit="$(command -v git)" || fixture_die "no real git on PATH to wrap"
+cat > "$_shims/git" <<SHIM
+#!/bin/sh
+if [ "\$#" -eq 5 ] && [ "\$1" = "-C" ] && [ "\$3" = "config" ] && [ "\$4" = "core.hooksPath" ] && [ "\$5" = ".githooks" ]; then
+    if [ -e "$_marker" ]; then
+        if [ "\${LC_ALL:-}" = "C" ]; then
+            echo "error: could not lock config file .git/config: File exists" >&2
+        else
+            echo "erreur : impossible de verrouiller le fichier de configuration .git/config : Le fichier existe" >&2
+        fi
+        exit 255
+    fi
+fi
+exec "$_realgit" "\$@"
+SHIM
+chmod +x "$_shims/git" || fixture_die "cannot make the locale git shim executable"
+_out=$( cd "$r" && LC_ALL=fr_FR.UTF-8 PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+wait "$_releaser" 2>/dev/null
+_hp=$( cd "$r" && git config core.hooksPath 2>/dev/null )
+if [ "$_rc" -ne 0 ]; then
+    fail "install treated a locale-translated lock message as fatal instead of retrying: $_out"
+elif [ "$_hp" != ".githooks" ]; then
+    fail "install exited 0 but hooksPath was never actually set: $_out"
+else
+    pass
+fi
+
 # ---------------------------------------------------------------------------- hooks
 #
 # Nothing here ran either shipped hook before: the suite tested what grubstake does when the suite

@@ -5,9 +5,12 @@ name: network
 # skipped by a job-level `if` still reports, and its name is posted unexpanded, so every pull
 # request would carry a check called `network (${{ matrix.platform }})` forever.
 
+# Dispatchable as well as tag-triggered: on a tag it confirms what was published, which is too late
+# to stop anything. A release runs it against the candidate first, and records the SHA it checked out.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read

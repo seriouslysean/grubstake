@@ -14,6 +14,7 @@ set -u
 
 GS="$(cd "$(dirname "$0")/.." && pwd)/grubstake.sh"
 HOOKS="$(cd "$(dirname "$0")/.." && pwd)/hooks"
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SUITE_PID=$$
 NETWORK=0
 [ "${1:-}" = "--network" ] && NETWORK=1
@@ -4115,6 +4116,83 @@ if ( cd "$r" && ./test/no-leaks.sh ) >/dev/null 2>&1; then
     fail "a capitalized home path was not flagged"
 else
     pass
+fi
+
+# ---------------------------------------------------------------------------- ci workflows
+
+printf '\nci workflows\n'
+
+it "the network workflow declares workflow_dispatch, not just a tag trigger"
+# #86: gating only on the release tag means the network tier reports after the artifacts are
+# already published -- confirmation, not a gate. The fix a release now depends on is dispatching
+# this workflow against the commit about to be tagged, after that commit is known (gst-release/
+# SKILL.md's own gate step -- see the test below for why "step 2" is not a safe way to say that
+# anymore), and checking the run's headSha; that only works while the workflow can actually be
+# dispatched. If a future edit ever drops "workflow_dispatch:" (reverting to tag-only, maybe while
+# "simplifying" the trigger list), the release procedure's own dispatch step starts failing at
+# release time -- this pins the trigger's presence in the file so that regression is caught here
+# instead.
+#
+# What this proves and no more: that the trigger is declared. It does not run a real dispatch (that
+# needs an actual GitHub Actions run, out of reach for an offline suite) and does not prove a
+# dispatched run would actually pass -- only that the capability the release procedure depends on
+# has not silently regressed out of the workflow file.
+_wf="$REPO/.github/workflows/network.yml"
+[ -f "$_wf" ] || fixture_die "cannot find $_wf"
+grep -qE '^[[:space:]]*workflow_dispatch:' "$_wf" && pass || fail "workflow_dispatch is not declared in $_wf"
+
+it "the release skill dispatches the network workflow only after the tagged commit is known, comparing headSha in that same step"
+# Panel review on #86: a first version of this test only pinned that the skill names a dispatch of
+# the workflow SOMEWHERE, which is exactly what let a real bug through review -- the dispatch sat
+# right after the local run, before the version bump and the merge commit that follows it, so the
+# commit the dispatch proved was never the commit that ended up tagged. The gate would have gone
+# green on every release while proving nothing, the same hole #86 exists to close, rebuilt inside
+# its own fix. Presence was never the property that mattered; order is.
+#
+# Anchored on the two commands themselves, not on step numbers or heading prose (both legitimately
+# change; a step could be renamed or renumbered without the procedure regressing at all): the line
+# capturing the commit about to be tagged ("git rev-parse HEAD", the one place in this doc that
+# names the exact SHA a tag will point at) has to appear, in document order, before the line that
+# dispatches the workflow ("gh workflow run <name>"). A doc that reverts to dispatching before that
+# capture -- or drops the capture entirely -- fails here rather than only in production, on the
+# next release.
+#
+# Exactly two structural facts are pinned, and no more: the dispatch's position relative to the SHA
+# capture, and that the literal word "headSha" appears somewhere within the dispatch's own step (its
+# "## " heading through the next one). That second check cannot tell a genuine comparison apart from
+# the bare word surviving by accident -- the panel proved a doc that deletes every sentence enforcing
+# the comparison ("a headSha that is not the SHA from step 5 stops the release") while keeping the
+# `--json ...,headSha,...` flag in the command itself still passes, because the substring was never
+# going anywhere. Anchoring tighter, on enforcement phrasing, would fail on a legitimate reword of
+# that prose -- a test that breaks every time a sentence is improved is worse than one with an
+# honestly-scoped gap. What this catches is the comparison disappearing from the step entirely, not
+# the comparison losing its teeth while the word stays.
+_wf="$REPO/.github/workflows/network.yml"
+_skill="$REPO/.claude/skills/gst-release/SKILL.md"
+[ -f "$_wf" ] || fixture_die "cannot find $_wf"
+[ -f "$_skill" ] || fixture_die "cannot find $_skill"
+# basename, not because a renamed workflow file survives this check -- it does not; $_wf above is a
+# hardcoded path, so a real rename makes the "[ -f ]" guard above fixture_die loudly, which is the
+# right failure, not a silent one -- but so the literal "network.yml" is spelled once here instead
+# of twice within this same test.
+_wfname="$(basename "$_wf")"
+_shaline="$(grep -n '^git rev-parse HEAD$' "$_skill" | head -1 | cut -d: -f1)"
+_dispatchline="$(grep -nE "gh workflow run[[:space:]]+$_wfname" "$_skill" | head -1 | cut -d: -f1)"
+if [ -z "$_dispatchline" ]; then
+    fail "the release skill no longer names a dispatch of $_wfname"
+elif [ -z "$_shaline" ]; then
+    fail "the release skill dispatches $_wfname but no longer captures the commit (git rev-parse HEAD) to compare it against"
+elif [ "$_shaline" -ge "$_dispatchline" ]; then
+    fail "the release skill dispatches $_wfname (line $_dispatchline) before capturing the commit it should prove (line $_shaline), the exact #86 hole rebuilt inside its own fix"
+else
+    _section_start="$(awk -v n="$_dispatchline" '/^## / { h = NR } NR == n { print h }' "$_skill")"
+    _section_end="$(awk -v start="$_section_start" 'NR > start && /^## / { print NR; exit }' "$_skill")"
+    [ -n "$_section_end" ] || _section_end=$(( $(wc -l < "$_skill") + 1 ))
+    if sed -n "${_section_start},$(( _section_end - 1 ))p" "$_skill" | grep -q headSha; then
+        pass
+    else
+        fail "the dispatch step (line $_dispatchline) does not compare headSha in the same step"
+    fi
 fi
 
 # ---------------------------------------------------------------------------- result

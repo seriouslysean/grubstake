@@ -18,7 +18,7 @@ Fetch the script and adopt the repo.
 ```sh
 curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.0.0/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
-./grubstake.sh version   # expect 0.3.2
+./grubstake.sh version   # expect 1.0.0
 ./grubstake.sh install
 ```
 
@@ -87,9 +87,10 @@ write permission back first; `grubstake clean` does both steps and removes the w
 Checks that belong to one repo go in `.githooks/pre-commit.d/`, where the spine will find and run
 them. Do not edit the spine itself.
 
-`update` replaces `grubstake.sh` and nothing else. Hooks are written once by `install`, which
-leaves an existing hook file alone, so a spine fix reaches a repo only when you delete its hook
-and re-run `install`. Release notes say when that is worth doing.
+`update` replaces `grubstake.sh` and nothing else, so run `install` after it: `install` refreshes a
+hook it recognises as one of its own earlier copies, and leaves anything else alone. A hook carrying edits it does not
+recognise is left alone with a warning, and one without its marker is never touched. The test is the
+bytes, not the intent: a hook reverted to an earlier published copy is recognised, and refreshed.
 
 The pre-commit lint reads the working tree rather than the staged blobs, so it checks the current
 contents of files whose paths are staged. Linting a copy would break SwiftLint's config resolution,

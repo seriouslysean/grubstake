@@ -657,6 +657,37 @@ GST_EMBED_POST_COMMIT
     esac
 }
 
+# The one place this ownership-marker grep is spelled out: test/run.sh's own reword-drift test
+# extracts it from here verbatim, so cmd_install and cmd_doctor share this rather than each
+# spelling it out again, and the variable below is named to match what that test expects.
+hook_has_marker() {
+    _hook="$1"
+    grep -q "^# grubstake $_hook" "$2" 2>/dev/null
+}
+
+# Every embedded copy ever released, sha256, plus the current one -- verified once, by hand,
+# against each release tag (git show vX.Y.Z:hooks/<name> | shasum -a 256); CI is a depth-1
+# checkout and cannot re-derive these. A future hook edit must append its own new hash here or
+# the copy it replaces becomes unrefreshable in every repo still running it.
+known_hook_hashes() {
+    case "$1" in
+        pre-commit)
+            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307"
+            ;;
+        post-commit)
+            echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb"
+            ;;
+        *) die "unknown hook: $1" ;;
+    esac
+}
+
+is_known_hook_hash() {
+    # Assigned, not piped: known_hook_hashes' own die exits only the pipe's first stage, and grep on
+    # the empty remainder it leaves behind returns 1 same as a genuine non-match, hiding the die.
+    _khh="$(known_hook_hashes "$1")" || return 1
+    printf '%s\n' "$_khh" | tr ' ' '\n' | grep -qxF "$2"
+}
+
 # ---------------------------------------------------------------------------- commands
 
 add_one() {
@@ -803,14 +834,16 @@ cmd_doctor() {
             if [ ! -f "$_installed" ]; then
                 printf '  %-12s not installed\n' "$_hook"
             else
-                # Marker line is pinned by the suite against hooks/*: reword it there and this check moves too.
-                grep -q "^# grubstake $_hook" "$_installed" 2>/dev/null && _marker_rc=0 || _marker_rc=$?
+                hook_has_marker "$_hook" "$_installed" && _marker_rc=0 || _marker_rc=$?
                 if [ "$_marker_rc" -eq 1 ]; then
                     printf '  %-12s not grubstake'"'"'s (repo-managed; leaving it alone)\n' "$_hook"
                 elif [ "$_marker_rc" -ge 2 ]; then
                     printf '  %-12s cannot be read\n' "$_hook"
                 elif embedded_hook "$_hook" | cmp -s - "$_installed"; then
                     printf '  %-12s ok\n' "$_hook"
+                elif is_known_hook_hash "$_hook" "$(sha256_file "$_installed")"; then
+                    # A known previous copy is refreshed, not deleted: install's own refresh handles this now.
+                    printf '  %-12s DRIFTED from the embedded copy (run: grubstake install to refresh)\n' "$_hook"
                 else
                     printf '  %-12s DRIFTED from the embedded copy (rm it and run: grubstake install)\n' "$_hook"
                 fi
@@ -891,17 +924,61 @@ cmd_install() {
 
     for _hook in pre-commit post-commit; do
         _dest="$_root/.githooks/$_hook"
-        if [ -f "$_dest" ]; then
+        if [ ! -f "$_dest" ]; then
+            # mktemp beside $_dest, not in $TMPDIR: mv across filesystems can silently stop being atomic.
+            _hooktmp="$(mktemp "$_root/.githooks/.$_hook.XXXXXX")" || die "cannot create a temp file to install $_hook"
+            # shellcheck disable=SC2064
+            trap "rm -f $(sq "$_hooktmp")" EXIT HUP INT TERM
+            embedded_hook "$_hook" > "$_hooktmp"
+            chmod +x "$_hooktmp"
+            mv "$_hooktmp" "$_dest"
+            trap - EXIT HUP INT TERM
+            log "$_hook: installed"
+            continue
+        fi
+        # Checked before anything reads the file's content: an unread-able hook must be named as
+        # such, not silently folded into "leaving it alone" the way a marker mismatch is.
+        hook_has_marker "$_hook" "$_dest" && _marker_rc=0 || _marker_rc=$?
+        if [ "$_marker_rc" -eq 1 ]; then
+            # No marker: never grubstake's to begin with (the #59 semantics), hands off, silent.
+            log "$_hook: already present, leaving it alone"
+            continue
+        elif [ "$_marker_rc" -ge 2 ]; then
+            warn "$_hook: cannot be read, leaving it alone"
+            continue
+        fi
+        if embedded_hook "$_hook" | cmp -s - "$_dest"; then
             log "$_hook: already present, leaving it alone"
             continue
         fi
-        embedded_hook "$_hook" > "$_dest.tmp"
-        chmod +x "$_dest.tmp"
-        mv "$_dest.tmp" "$_dest"
-        log "$_hook: installed"
+        # hashed_or_empty, not sha256_file directly: a hook that vanishes or turns unreadable between
+        # the marker check above and here must read as "no known hash", never a raw tool error.
+        _installed_sha="$(hashed_or_empty "$_dest")"
+        if [ -n "$_installed_sha" ] && is_known_hook_hash "$_hook" "$_installed_sha"; then
+            # The recorded constraint licenses re-upgrading any hook byte-identical to a known
+            # previous copy, even a deliberate revert; removing the marker line is how to opt out.
+            _hooktmp="$(mktemp "$_root/.githooks/.$_hook.XXXXXX")" || die "cannot create a temp file to refresh $_hook"
+            # shellcheck disable=SC2064
+            trap "rm -f $(sq "$_hooktmp")" EXIT HUP INT TERM
+            embedded_hook "$_hook" > "$_hooktmp"
+            chmod +x "$_hooktmp"
+            mv "$_hooktmp" "$_dest"
+            trap - EXIT HUP INT TERM
+            log "$_hook: refreshed to the current embedded copy"
+        else
+            warn "$_hook: differs from every known copy, left alone (repo-local edits are never overwritten)"
+        fi
     done
 
-    git -C "$_root" config core.hooksPath .githooks
+    # git's own config lock is not this script's to hold: a concurrent install racing the same
+    # .git/config.lock fails immediately with git's own raw message, not a retryable one, so the
+    # retry has to live here rather than trusting git to wait it out.
+    _gcw=0
+    while ! git -C "$_root" config core.hooksPath .githooks 2>/dev/null; do
+        _gcw=$((_gcw + 1))
+        [ "$_gcw" -gt 50 ] && die "cannot set core.hooksPath: git kept losing the lock on $_root/.git/config"
+        sleep 0.1 2>/dev/null || sleep 1
+    done
     log "hooksPath: .githooks"
 
     [ -f "$(pins_file)" ] || {

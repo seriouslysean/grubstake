@@ -973,10 +973,21 @@ cmd_install() {
     # git's own config lock is not this script's to hold: a concurrent install racing the same
     # .git/config.lock fails immediately with git's own raw message, not a retryable one, so the
     # retry has to live here rather than trusting git to wait it out.
+    # Retried only on git's own "File exists" text -- the literal signature of its own lock file
+    # already being held -- so any other failure (a read-only .git, say) fails on the first attempt
+    # with git's real words instead of spinning the budget and blaming a lock nobody held; an
+    # unrecognized message falls to that same immediate-failure default rather than risking a silent false retry.
     _gcw=0
-    while ! git -C "$_root" config core.hooksPath .githooks 2>/dev/null; do
+    while :; do
+        # LC_ALL=C, the same convention this file already uses at every sort site: the discriminator
+        # below reads git's own message, so that message has to stay in the language it was read in.
+        _gcerr="$(LC_ALL=C git -C "$_root" config core.hooksPath .githooks 2>&1 >/dev/null)" && break
+        case "$_gcerr" in
+            *"File exists"*) : ;;
+            *) die "cannot set core.hooksPath: $_gcerr" ;;
+        esac
         _gcw=$((_gcw + 1))
-        [ "$_gcw" -gt 50 ] && die "cannot set core.hooksPath: git kept losing the lock on $_root/.git/config"
+        [ "$_gcw" -gt 50 ] && die "cannot set core.hooksPath: git kept losing the lock on $_root/.git/config: $_gcerr"
         sleep 0.1 2>/dev/null || sleep 1
     done
     log "hooksPath: .githooks"

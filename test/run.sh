@@ -220,6 +220,92 @@ SHIM
     chmod +x "$_mvdir/mv" || fixture_die "cannot make the mv-pause shim executable"
 }
 
+# Mirrors mv_pause_shim, matched on the SOURCE (mv's own first argument) rather than the
+# destination: cmd_clean's detach-and-verify race needs the pause to land before anything is
+# grabbed off disk, but its destination is a mktemp'd trash directory, unpredictable by design, so
+# there is no exact destination a caller could match the way mv_pause_shim's own callers do.
+mv_source_pause_shim() {
+    _mvsdir="$1"; _mvsreached="$2"; _mvsgo="$3"; _mvssrc="$4"
+    mkdir -p "$_mvsdir" || fixture_die "cannot create the mv-source-pause shim dir $_mvsdir"
+    _mvsreal="$(command -v mv)" || fixture_die "no real mv on PATH to wrap"
+    cat > "$_mvsdir/mv" <<SHIM
+#!/bin/sh
+if [ "\$1" = "$_mvssrc" ]; then
+    echo "\$\$" > "$_mvsreached.pid"
+    : > "$_mvsreached"
+    _mvsw=0
+    while [ ! -f "$_mvsgo" ]; do
+        _mvsw=\$((_mvsw + 1))
+        [ "\$_mvsw" -gt 300 ] && { echo "mv-source-pause shim: timed out waiting for the go flag" >&2; exit 1; }
+        sleep 0.05 2>/dev/null || sleep 1
+    done
+fi
+exec "$_mvsreal" "\$@"
+SHIM
+    chmod +x "$_mvsdir/mv" || fixture_die "cannot make the mv-source-pause shim executable"
+}
+
+# Pauses "sed" only when its last argument (the file it reads) falls under $4, a known prefix --
+# cmd_clean's own post-detach window needs the pause to land after the rename but before
+# sentinel_verified decides anything, and sentinel_verified's own "[ -f ]" existence check is a
+# builtin, not interceptable; its first and only external command is this sed read. Matched by
+# prefix rather than an exact path because the trash directory's own name is mktemp'd and
+# unpredictable by design, the same reason mv_source_pause_shim matches on source rather than
+# destination. Safe against collision with the OTHER "sed -n 1p" reads this script has (receipts):
+# in a clean-only run, nothing else ever reads a path under this prefix.
+sed_pause_shim() {
+    _spdir="$1"; _spreached="$2"; _spgo="$3"; _spprefix="$4"
+    mkdir -p "$_spdir" || fixture_die "cannot create the sed-pause shim dir $_spdir"
+    _spreal="$(command -v sed)" || fixture_die "no real sed on PATH to wrap"
+    cat > "$_spdir/sed" <<SHIM
+#!/bin/sh
+for _a in "\$@"; do _splast="\$_a"; done
+case "\$_splast" in
+    "$_spprefix"*)
+        echo "\$\$" > "$_spreached.pid"
+        : > "$_spreached"
+        _spw=0
+        while [ ! -f "$_spgo" ]; do
+            _spw=\$((_spw + 1))
+            [ "\$_spw" -gt 300 ] && { echo "sed-pause shim: timed out waiting for the go flag" >&2; exit 1; }
+            sleep 0.05 2>/dev/null || sleep 1
+        done
+        ;;
+esac
+exec "$_spreal" "\$@"
+SHIM
+    chmod +x "$_spdir/sed" || fixture_die "cannot make the sed-pause shim executable"
+}
+
+# Pauses "chmod" only on an argument list containing "u+w" -- cmd_clean's own read-only-clearing
+# step ("chmod -R u+w $_trash") before it rm -rf's the detached trash directory. Unambiguous in a
+# clean-only run: publish_dir's own "u+w" chmod never executes on that path, so nothing else on the
+# way to clean can trip this match. Same pid-file-before-flag ordering as mv_pause_shim, for the
+# same reason: a signal sent straight to this recorded pid kills the paused child outright, no need
+# to ever release the go flag to make the kill land.
+chmod_pause_shim() {
+    _cpdir="$1"; _cpreached="$2"; _cpgo="$3"
+    mkdir -p "$_cpdir" || fixture_die "cannot create the chmod-pause shim dir $_cpdir"
+    _cpreal="$(command -v chmod)" || fixture_die "no real chmod on PATH to wrap"
+    cat > "$_cpdir/chmod" <<SHIM
+#!/bin/sh
+case "\$*" in
+    *u+w*)
+        echo "\$\$" > "$_cpreached.pid"
+        : > "$_cpreached"
+        _cpw=0
+        while [ ! -f "$_cpgo" ]; do
+            _cpw=\$((_cpw + 1))
+            [ "\$_cpw" -gt 300 ] && { echo "chmod-pause shim: timed out waiting for the go flag" >&2; exit 1; }
+            sleep 0.05 2>/dev/null || sleep 1
+        done
+        ;;
+esac
+exec "$_cpreal" "\$@"
+SHIM
+    chmod +x "$_cpdir/chmod" || fixture_die "cannot make the chmod-pause shim executable"
+}
+
 # Pauses "git" only on cmd_install's own hooksPath write ("git -C <root> config core.hooksPath
 # .githooks", five arguments exactly), never the read earlier in the same command ("git -C <root>
 # config core.hooksPath", four arguments, no value) -- pausing that one too would strand the caller
@@ -715,6 +801,7 @@ it "a read-only published entry does not defeat cache removal"
 # scenario test/run.sh's own trap already works around. There is no `clean` command yet.
 r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+printf 'cache-root 1\n' > "$r/.cache/.grubstake-cache-root"   # fake_install bypasses install_tool, which is what writes this for real (#95)
 chmod -R a-w "$r/.cache/swiftlint/$SHA_A"
 # A no-op chmod (root, or a filesystem that ignores it) would let a naive rm -rf succeed and prove
 # nothing about the hard case, the same trap "published entries are read-only" already guards
@@ -937,6 +1024,364 @@ elif [ -f "$_record" ]; then
 else
     pass
 fi
+
+# ---------------------------------------------------------------------------- cache integrity: clean ownership
+#
+# #95: clean's checks (absolute, not root, not a symlink) say nothing about whether grubstake is the
+# one that put the directory there. GRUBSTAKE_CACHE is a normal, documented override -- a CI job
+# exporting it alongside a workspace path, a shell profile set once and forgotten -- so the trigger
+# is a routine misconfiguration, not an exotic one, and clean silently destroys whatever it finds.
+
+it "clean refuses a cache root it never created, and leaves its contents untouched"
+# #95's own fix verifies the sentinel AFTER detaching, not before (see the TOCTOU test below), so
+# a plain refusal like this one is no longer "never touched" at the filesystem level -- it is a
+# rename out and a rename back. Content surviving byte-for-byte is not enough to tell that apart
+# from a destroy-and-recreate that happens to reproduce the same bytes; the inode check below is
+# what actually pins "the same file," the same idiom the receipt-in-place tests already use.
+r=$(new_repo)
+_victim="$r/not-a-cache"
+mkdir -p "$_victim/subdir" || fixture_die "cannot create $_victim/subdir"
+printf 'do not delete me\n' > "$_victim/keep.txt" || fixture_die "cannot write $_victim/keep.txt"
+printf 'nested\n' > "$_victim/subdir/nested.txt" || fixture_die "cannot write $_victim/subdir/nested.txt"
+_inode_before="$(ls -i "$_victim/keep.txt" | awk '{print $1}')"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$_victim" ./grubstake.sh clean 2>&1 ); _rc=$?
+_inode_after="$(ls -i "$_victim/keep.txt" 2>/dev/null | awk '{print $1}')"
+if [ "$_rc" -eq 0 ]; then
+    fail "clean exited 0 removing a directory it never created: $_out"
+elif [ ! -e "$_victim" ]; then
+    fail "the directory was removed even though clean refused: $_out"
+elif [ "$(cat "$_victim/keep.txt" 2>/dev/null)" != "do not delete me" ] || [ "$(cat "$_victim/subdir/nested.txt" 2>/dev/null)" != "nested" ]; then
+    fail "clean disturbed the directory's contents even though it refused: $_out"
+elif [ "$_inode_after" != "$_inode_before" ]; then
+    fail "the file was recreated (inode changed) rather than the same bytes surviving a detach-and-restore: $_out"
+else
+    case "$_out" in
+        *"$_victim"*) pass ;;
+        *) fail "refused without naming the path: $_out" ;;
+    esac
+fi
+
+it "clean still removes a cache root grubstake itself created just now"
+# Points GRUBSTAKE_CACHE at a path new_repo never touches -- new_repo's own ".cache" already exists
+# (empty) before this runs, which would leave an implementation that keys the sentinel off "did this
+# exact mkdir just create the directory" untested on the one case that actually matters here.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_cache="$r/fresh-cache"
+[ ! -e "$_cache" ] || fixture_die "fixture cache root already exists before ensure: $_cache"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$_cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+[ "$_rc" -eq 0 ] || fixture_die "cannot seed a real install to clean afterward (rc $_rc): $_out"
+[ -e "$_cache" ] || fixture_die "ensure exited 0 but never created $_cache"
+_cleanout=$( cd "$r" && GRUBSTAKE_CACHE="$_cache" ./grubstake.sh clean 2>&1 ); _cleanrc=$?
+if [ "$_cleanrc" -ne 0 ]; then
+    fail "clean refused a cache root grubstake itself had just created: $_cleanout"
+elif [ -e "$_cache" ]; then
+    fail "clean exited 0 but $_cache is still there"
+else
+    pass
+fi
+
+it "a pre-sentinel cache root is refused by clean even when its layout looks exactly like one grubstake made"
+# The sharpest edge of #95's fix: a directory shaped like a real published entry -- the tool/hash
+# layout, an executable binary, a receipt -- is not proof grubstake put it there, only that its
+# shape matches. Adopting on shape alone reopens the same hole a hand-built decoy would exploit;
+# only the sentinel counts. Built by hand rather than fake_install, which never writes a receipt.
+r=$(new_repo)
+_legacy="$r/legacy-cache"
+mkdir -p "$_legacy/swiftlint/$SHA_A" || fixture_die "cannot create $_legacy/swiftlint/$SHA_A"
+printf '#!/bin/sh\necho 0.63.2\n' > "$_legacy/swiftlint/$SHA_A/swiftlint" || fixture_die "cannot write the fixture binary"
+chmod +x "$_legacy/swiftlint/$SHA_A/swiftlint" || fixture_die "cannot make the fixture binary executable"
+printf 'receipt 1\nbinary-sha256 %s\nversion 0.63.2\n' "$SHA_A" > "$_legacy/swiftlint/$SHA_A/.grubstake-receipt" || fixture_die "cannot write the fixture receipt"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$_legacy" ./grubstake.sh clean 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "clean removed a cache-shaped root with no sentinel, on layout alone: $_out"
+elif [ ! -x "$_legacy/swiftlint/$SHA_A/swiftlint" ]; then
+    fail "the legacy entry was touched even though clean refused: $_out"
+else
+    case "$_out" in
+        *"$_legacy"*) pass ;;
+        *) fail "refused without naming the path: $_out" ;;
+    esac
+fi
+
+it "ensure backfills a pre-sentinel cache root once, so an upgrade does not wedge clean forever"
+# The other half of the same design call: refusing every pre-1.0.1 cache forever would be safe but
+# permanently locks existing users out of clean. install_tool already backfills a missing receipt
+# the same way for an individual legacy entry (see the comment at its own backfill, "the same trust
+# the entry already had, now with a baseline to drift from") -- the root sentinel follows the same
+# rule, backfilled the moment grubstake actively manages the root, never inferred from its shape.
+# Receiptless, not a hand-built receipt: this is exactly the shape a pre-receipt release left
+# behind (same fixture "a legacy entry is upgraded to a receipt without ceremony" uses), and a
+# receipt with a hash that does not match the fixture binary would hit the mismatch branch instead
+# of the backfill one, failing ensure for an unrelated reason.
+r=$(new_repo)
+_legacy="$r/legacy-cache"
+mkdir -p "$_legacy/swiftlint/$SHA_A" || fixture_die "cannot create $_legacy/swiftlint/$SHA_A"
+printf '#!/bin/sh\necho 0.63.2\n' > "$_legacy/swiftlint/$SHA_A/swiftlint" || fixture_die "cannot write the fixture binary"
+chmod +x "$_legacy/swiftlint/$SHA_A/swiftlint" || fixture_die "cannot make the fixture binary executable"
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$_legacy" ./grubstake.sh ensure 2>&1 ); _rc=$?
+[ "$_rc" -eq 0 ] || fixture_die "ensure failed against a legacy entry it should self-heal offline (rc $_rc): $_out"
+_cleanout=$( cd "$r" && GRUBSTAKE_CACHE="$_legacy" ./grubstake.sh clean 2>&1 ); _cleanrc=$?
+if [ "$_cleanrc" -ne 0 ]; then
+    fail "clean still refused a pre-sentinel root after ensure had already run against it: $_cleanout"
+elif [ -e "$_legacy" ]; then
+    fail "clean exited 0 but $_legacy is still there"
+else
+    pass
+fi
+
+it "an unreadable or content-invalid sentinel is repaired by ensure, not left to wedge clean forever"
+# Presence alone was never proof; #95's follow-up panel found the same gap one level deeper: a
+# sentinel that EXISTS but fails verification (interrupted mid-write, clobbered by an unrelated
+# tool, or simply unreadable) wedges clean the same way absence did, unless ensure repairs it the
+# moment it manages the root again -- the same self-heal contract as the receipt/root backfills
+# above. "unreadable" (chmod 000, non-root) turns out to hit this exact same repair path rather than
+# a distinct one: rename() permission is governed by the containing directory's write bit, not the
+# target file's own mode, so mv freely replaces a 000 sentinel the same as an empty or foreign one
+# once ensure_cache_sentinel decides to overwrite it -- confirmed here rather than assumed, folded in
+# as a third case instead of a redundant fourth test.
+for _case in empty foreign unreadable; do
+    r=$(new_repo)
+    pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+    fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+    case "$_case" in
+        empty)      : > "$r/.cache/.grubstake-cache-root" ;;
+        foreign)    printf '.DS_Store\n*.log\nnode_modules/\n' > "$r/.cache/.grubstake-cache-root" ;;
+        unreadable) printf 'cache-root 1\n' > "$r/.cache/.grubstake-cache-root"
+                    chmod 000 "$r/.cache/.grubstake-cache-root" || fixture_die "cannot chmod 000 the fixture sentinel" ;;
+    esac
+    _out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        fail "case '$_case': ensure exited $_rc instead of repairing the sentinel: $_out"; _bad=1; break
+    fi
+    _cleanout=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh clean 2>&1 ); _cleanrc=$?
+    if [ "$_cleanrc" -ne 0 ]; then
+        fail "case '$_case': clean still refused after ensure had a chance to repair the sentinel: $_cleanout"; _bad=1; break
+    elif [ -e "$r/.cache" ]; then
+        fail "case '$_case': clean exited 0 but the cache root is still there"; _bad=1; break
+    fi
+    chmod -R u+w "$r/.cache" 2>/dev/null
+done
+[ "${_bad:-0}" = 0 ] && pass; _bad=0
+
+it "ensure refuses to nest into a directory squatting at the sentinel path, and does not litter tmp files on repeat runs"
+# The other half of the same follow-up finding: a directory (not a plain file) at the sentinel path
+# cannot be repaired by overwriting -- mv nests into an existing directory rather than replacing it,
+# no mv -T on macOS -- so silently proceeding would either nest a real tmp file one level deep on
+# every future install_tool call (never cleaned up, growing forever) or, worse, read as success while
+# never actually recording ownership. Two ensures, not one: a single run cannot tell "wrote nothing"
+# apart from "wrote once, harmlessly," only a second run distinguishes ongoing litter from a one-time
+# no-op.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+mkdir -p "$r/.cache/.grubstake-cache-root" || fixture_die "cannot create the squatting directory"
+_out1=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc1=$?
+_out2=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc2=$?
+_litter=$(find "$r/.cache" -name '.grubstake-cache-root.tmp.*' 2>/dev/null)
+# Litter checked first: it is the assertion #95's follow-up named explicitly (a nested tmp file left
+# behind after two runs), so it must fire on its own rather than always being pre-empted by the
+# no-diagnostic branch below -- both are real defects a naive fix could reintroduce independently.
+if [ -n "$_litter" ]; then
+    fail "ensure littered a stray tmp file at the sentinel path after two runs against a squatting directory: $_litter"
+elif [ "$_rc1" -eq 0 ] && ! printf '%s' "$_out1" | grep -qiE "not a regular file|could not write|refus|leaving it in place"; then
+    fail "ensure exited 0 against a directory squatting at the sentinel path without saying anything about it: $_out1"
+elif [ ! -d "$r/.cache/.grubstake-cache-root" ]; then
+    fail "the squatting directory was replaced rather than left alone -- shape-based adoption, the exact #95 hole this exists to close"
+else
+    pass
+fi
+chmod -R u+w "$r/.cache" 2>/dev/null
+
+it "an interrupted clean does not strand a full copy of the cache beside the root"
+# mv detaches the root, chmod clears read-only, then rm -rf removes the trash. A signal landing
+# between the mv and the rm -rf must not kill the process outright and leave the trash -- a full
+# copy of the cache -- sitting beside the (now-empty) root forever, recoverable only by hand.
+# chmod_pause_shim lands the signal at that exact window; exec replaces the backgrounded subshell
+# with grubstake.sh outright, so "$!" is its own pid, the same technique #62's own signal tests use.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+printf 'cache-root 1\n' > "$r/.cache/.grubstake-cache-root"   # fake_install bypasses install_tool, which is what writes this for real (#95)
+_shim="$r/chmod-shim"; _reached="$r/reached"; _go="$r/go"
+chmod_pause_shim "$_shim" "$_reached" "$_go"
+(
+    cd "$r" || exit 1
+    PATH="$_shim:$PATH"; export PATH
+    GRUBSTAKE_CACHE="$r/.cache"; export GRUBSTAKE_CACHE
+    exec ./grubstake.sh clean >"$r/out" 2>&1
+) &
+_bgpid=$!
+_w=0
+while [ ! -f "$_reached" ]; do
+    _w=$((_w + 1))
+    [ "$_w" -gt 300 ] && fixture_die "clean never reached its own read-only-clearing chmod"
+    sleep 0.05 2>/dev/null || sleep 1
+done
+[ -e "$r/.cache" ] && fixture_die "reached the chmod step but the cache root was never renamed aside first"
+_trash=$(printf '%s\n' "$r/.cache".trash.* 2>/dev/null | head -1)
+[ -n "$_trash" ] && [ -d "$_trash" ] || fixture_die "could not find the trash directory clean should have created by now: the race window is not real"
+_t0=$(date +%s)
+kill -TERM "$_bgpid" 2>/dev/null
+wait "$_bgpid" 2>/dev/null
+_t1=$(date +%s)
+_elapsed=$((_t1 - _t0))
+# The paused chmod shim is a grandchild (forked by the exec'd grubstake.sh, not by this shell), and
+# POSIX "wait" only ever waits on this shell's own direct children -- called on anything else it
+# returns 127 immediately, which had been read here as "waited," giving false confidence the kill
+# had actually landed before the filesystem checks below ran. Polling "kill -0" is what actually
+# confirms the process is gone; timed out separately from _elapsed, above, so a slow-to-reap
+# grandchild cannot itself push a correctly-fast kill over the "signal never landed" threshold.
+if [ -f "$_reached.pid" ]; then
+    _gpid="$(cat "$_reached.pid")"
+    kill -TERM "$_gpid" 2>/dev/null
+    _gw=0
+    while kill -0 "$_gpid" 2>/dev/null; do
+        _gw=$((_gw + 1))
+        [ "$_gw" -gt 100 ] && break
+        sleep 0.05 2>/dev/null || sleep 1
+    done
+fi
+_survivor=$(printf '%s\n' "$r/.cache".trash.* 2>/dev/null | head -1)
+# Two things have to both be true for the assertion below to mean what it says, not just "no trash
+# happened to be lying around": the process the TERM was sent to must actually be gone (kill -0
+# fails), not merely reaped for an unrelated reason, and it must have died fast -- the paused chmod
+# shim's own 15s timeout (300 * 0.05s) is what "completed on its own, TERM never really landed"
+# would look like, so a near-instant death is what tells a real interrupt apart from that.
+if kill -0 "$_bgpid" 2>/dev/null; then
+    fail "the backgrounded clean did not actually die from the TERM signal"
+elif [ "$_elapsed" -ge 5 ]; then
+    fail "took ${_elapsed}s to die: the signal likely never landed, and the paused chmod ran out its own timeout instead of being killed"
+elif [ -n "$_survivor" ] && [ -e "$_survivor" ]; then
+    fail "an interrupted clean stranded a full copy of the cache beside the root: $_survivor"
+else
+    pass
+fi
+chmod -R u+w "$r/.cache" 2>/dev/null
+
+it "a root swapped out between clean's sentinel check and its rename is deleted anyway, sentinel or not"
+# Outside review, post-panel: clean verifies the sentinel, THEN renames the root into the trash --
+# two separate steps, not one atomic operation. Between them, another process can rename the
+# verified root away and drop an unrelated directory at the same path; clean's rename then grabs
+# whatever is there NOW, not what it just checked, and deletes it. The symlink guard does not help
+# here -- a symlink swap is what rm -rf on a symlink already tolerates (it removes the link, not the
+# target), but this is a real directory replacing a real directory at the same path, and mv follows
+# the path, not an identity it verified earlier. mv_source_pause_shim lands the pause before the
+# rename ever touches disk, which is where the swap below happens; the real mv, once released,
+# operates on whatever mkdir/mv left at that path in the meantime, exactly reproducing the race
+# without needing to win a real one.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+printf 'cache-root 1\n' > "$r/.cache/.grubstake-cache-root"   # fake_install bypasses install_tool, which is what writes this for real (#95)
+_marker="important-data.txt"; _markercontent="do not delete me"
+mkdir -p "$r/swap-src" || fixture_die "cannot create the swap-in staging directory"
+printf '%s\n' "$_markercontent" > "$r/swap-src/$_marker" || fixture_die "cannot write the swap-in marker file"
+_shim="$r/mv-shim"; _reached="$r/reached"; _go="$r/go"
+mv_source_pause_shim "$_shim" "$_reached" "$_go" "$r/.cache"
+( cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh clean >"$r/out" 2>&1; echo $? > "$r/rc" ) &
+_bgpid=$!
+_w=0
+while [ ! -f "$_reached" ]; do
+    _w=$((_w + 1))
+    [ "$_w" -gt 300 ] && fixture_die "clean never reached the paused rename"
+    sleep 0.05 2>/dev/null || sleep 1
+done
+# The swap itself: the verified, sentineled root is relocated out of clean's way (standing in for
+# whatever the concurrent process did with it -- irrelevant to this test beyond "not at $r/.cache
+# anymore"), and an unrelated, sentinel-less directory takes its exact path before the paused mv is
+# released to grab it.
+mv "$r/.cache" "$r/.cache-holding" || fixture_die "cannot relocate the verified root for the swap"
+mv "$r/swap-src" "$r/.cache" || fixture_die "cannot swap the unrelated directory into $r/.cache"
+: > "$_go"
+wait "$_bgpid" 2>/dev/null
+[ -f "$r/rc" ] || fixture_die "the backgrounded clean never recorded an exit status"
+_rc="$(cat "$r/rc")"
+_out="$(cat "$r/out" 2>/dev/null)"
+_trashleft=$(printf '%s\n' "$r/.cache".trash.* 2>/dev/null | head -1)
+# "-n" alone cannot tell a real trash directory apart from an unmatched glob: dash's default (no
+# nullglob) leaves the pattern unexpanded when nothing matches, and that literal string is itself
+# non-empty, so "-n" reads "nothing survived" as "something survived" every time. "-e" is what
+# actually asks the filesystem, the same guard the sibling interrupted-clean test's own $_survivor
+# check above already uses.
+if [ "$_rc" -eq 0 ]; then
+    fail "clean exited 0 after the root was swapped mid-race, instead of refusing: $_out"
+elif [ ! -e "$r/.cache" ] && { [ -z "$_trashleft" ] || [ ! -e "$_trashleft" ]; }; then
+    fail "the swapped-in directory was deleted outright: clean verified one directory's sentinel and destroyed a different one at the same path -- the exact TOCTOU this test exists to catch: $_out"
+elif [ ! -e "$r/.cache" ] && [ -n "$_trashleft" ] && [ -e "$_trashleft" ]; then
+    fail "the swapped-in directory was detached into $_trashleft and never restored to $r/.cache after the refusal"
+elif [ -n "$_trashleft" ] && [ -e "$_trashleft" ]; then
+    fail "clean refused correctly but left a trash directory behind: $_trashleft"
+elif [ "$(cat "$r/.cache/$_marker" 2>/dev/null)" != "$_markercontent" ]; then
+    fail "$r/.cache exists but its contents do not match the swapped-in directory -- something else ended up there"
+else
+    pass
+fi
+chmod -R u+w "$r/.cache" "$r/.cache-holding" 2>/dev/null
+
+it "a signal landing after clean detaches the root but before verification decides restores it, not deletes it"
+# Sol's finding, post-panel: the EXIT/HUP/INT/TERM trap arms before the rename (so a signal during
+# the later chmod/rm-rf cannot strand the trash -- the interrupted-clean test above already proves
+# that half, on a root that DID verify) and stays armed straight through verification itself.
+# clean_trash_on_signal deletes $_trash unconditionally, with no idea whether sentinel_verified has
+# had a chance to run yet. A signal landing in that window destroys content that was never checked --
+# the exact property #95 exists to guarantee, reopened one signal-handler away from the fix that
+# closed it for the non-signal path. sed_pause_shim anchors on sentinel_verified's own read (the
+# first and only externally-interceptable step between the rename and the verdict); mv_source_pause_shim
+# cannot reach this window at all, since it pauses BEFORE the rename, not after.
+# sentinel_verified's own "[ -f ]" existence check is a builtin, not something a shim can pause on --
+# a victim directory with no file at all at the sentinel path short-circuits there and never reaches
+# sed, so this one needs a foreign file AT that exact name (a stray dotfile some other tool left, not
+# grubstake's) to make "[ -f ]" true and actually drive execution into the read this test pauses on.
+r=$(new_repo)
+_victim="$r/not-a-cache"
+mkdir -p "$_victim/subdir" || fixture_die "cannot create $_victim/subdir"
+printf 'do not delete me\n' > "$_victim/keep.txt" || fixture_die "cannot write $_victim/keep.txt"
+printf 'not a grubstake sentinel\n' > "$_victim/.grubstake-cache-root" || fixture_die "cannot write the foreign sentinel-path file"
+printf 'nested\n' > "$_victim/subdir/nested.txt" || fixture_die "cannot write $_victim/subdir/nested.txt"
+_shim="$r/sed-shim"; _reached="$r/reached"; _go="$r/go"
+sed_pause_shim "$_shim" "$_reached" "$_go" "$_victim.trash."
+(
+    cd "$r" || exit 1
+    PATH="$_shim:$PATH"; export PATH
+    GRUBSTAKE_CACHE="$_victim"; export GRUBSTAKE_CACHE
+    exec ./grubstake.sh clean >"$r/out" 2>&1
+) &
+_bgpid=$!
+_w=0
+while [ ! -f "$_reached" ]; do
+    _w=$((_w + 1))
+    [ "$_w" -gt 300 ] && fixture_die "clean never reached the paused sentinel read"
+    sleep 0.05 2>/dev/null || sleep 1
+done
+[ -e "$_victim" ] && fixture_die "reached the sentinel read but the root was never detached first: the race window is not real"
+_trash=$(printf '%s\n' "$_victim".trash.* 2>/dev/null | head -1)
+[ -n "$_trash" ] && [ -d "$_trash/detached" ] || fixture_die "could not find the detached content clean should have created by now"
+kill -TERM "$_bgpid" 2>/dev/null
+wait "$_bgpid" 2>/dev/null
+if [ -f "$_reached.pid" ]; then
+    _gpid="$(cat "$_reached.pid")"
+    kill -TERM "$_gpid" 2>/dev/null
+    _gw=0
+    while kill -0 "$_gpid" 2>/dev/null; do
+        _gw=$((_gw + 1))
+        [ "$_gw" -gt 100 ] && break
+        sleep 0.05 2>/dev/null || sleep 1
+    done
+fi
+_trashleft=$(printf '%s\n' "$_victim".trash.* 2>/dev/null | head -1)
+if [ ! -e "$_victim" ]; then
+    fail "the unverified directory was deleted by the signal handler instead of being restored: never checked, destroyed anyway -- the exact property #95 promises: $(cat "$r/out" 2>/dev/null)"
+elif [ -n "$_trashleft" ] && [ -e "$_trashleft" ]; then
+    fail "the root was restored to $_victim but the trash container $_trashleft was left behind"
+elif [ "$(cat "$_victim/keep.txt" 2>/dev/null)" != "do not delete me" ] || [ "$(cat "$_victim/subdir/nested.txt" 2>/dev/null)" != "nested" ]; then
+    fail "the directory came back but its contents do not match what was detached"
+else
+    pass
+fi
+chmod -R u+w "$_victim" 2>/dev/null
 
 it "clean racing a concurrent ensure fails fast with the real cause, not a five-second stale-lock stall"
 # #56: clean renames the cache root aside mid-install (see the comment on the mv above), and

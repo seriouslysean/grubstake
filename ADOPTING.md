@@ -145,9 +145,12 @@ A repo with its own pre-commit logic should keep it. Move repo-specific checks i
 `.githooks/pre-commit.d/`, where the spine runs each one and fails the commit if any fails or has
 lost its executable bit. Never edit the spine itself.
 
-`update` replaces `grubstake.sh` only. Hooks are written once by `install` and left alone after
-that, so a fix to the spine reaches this repo only when you delete the hook file and re-run
-`install`. Check the release notes before assuming a hook fix arrived with an update.
+`update` replaces `grubstake.sh` only, so follow it with `install`: that is what delivers a spine
+fix. `install` refreshes a hook whose bytes match one of grubstake's own earlier copies, warns and
+leaves alone one that carries edits it cannot recognise, and never touches a hook without its
+marker. The test is the bytes rather than the intent, so a hook deliberately held at an
+earlier published copy is recognised as one of grubstake's own and refreshed; to keep a hook out of
+that path, change it in a way grubstake has never published, or drop the marker line.
 
 ## What to know before you hit it
 

@@ -197,6 +197,42 @@ receipt_file() {
     echo "$1/.grubstake-receipt"
 }
 
+cache_sentinel_file() {
+    echo "$1/.grubstake-cache-root"
+}
+
+# Same shape as entry_verified: presence alone is not proof, only a matching header is -- an empty or
+# foreign file at this path must not read as owned. Shared so install_tool's own backfill and
+# cmd_clean's own refusal judge the same file by the same rule.
+sentinel_verified() {
+    _sv_f="$1"
+    [ -f "$_sv_f" ] || return 1
+    [ "$(sed -n 1p "$_sv_f" 2>/dev/null)" = "cache-root 1" ]
+}
+
+# Backfilled the moment install_tool actively manages the root, never inferred later from its shape
+# (#95): a root that already exists, empty, is just as actively managed as one mkdir just created, so
+# gating this write on "did mkdir just create it" would leave an already-adopted repo's cache -- and
+# every one of this suite's own fixtures, which pre-create an empty .cache -- unsentineled forever.
+ensure_cache_sentinel() {
+    _ecs_root="$1"
+    mkdir -p "$_ecs_root" 2>/dev/null || return 1
+    _ecs_file="$(cache_sentinel_file "$_ecs_root")"
+    sentinel_verified "$_ecs_file" && return 0
+    # A directory at the sentinel's own path cannot be replaced by mv -- mv nests into an existing
+    # directory instead of overwriting it, no mv -T on macOS -- so this refuses rather than clearing
+    # something that might not be grubstake's, the same never-infer-never-destroy rule clean itself
+    # follows. Left unresolved, cmd_clean's own refusal is what keeps the root safe in the meantime.
+    if [ -e "$_ecs_file" ] && [ ! -f "$_ecs_file" ]; then
+        warn "$_ecs_file is not a regular file; leaving it in place (clean will keep refusing this root until it is)"
+        return 1
+    fi
+    _ecs_tmp="$_ecs_root/.grubstake-cache-root.tmp.$$"
+    printf 'cache-root 1\n' > "$_ecs_tmp" 2>/dev/null && mv "$_ecs_tmp" "$_ecs_file" 2>/dev/null && return 0
+    rm -f "$_ecs_tmp" 2>/dev/null || true
+    return 1
+}
+
 # Hashes $1 and prints it only if it comes back 64 lowercase hex; prints nothing otherwise. Shared
 # by every receipt write, so a transient hash failure never reaches a printf that would record it.
 hashed_or_empty() {
@@ -358,6 +394,11 @@ install_tool() {
 
     _dest="$(tool_dir "$_tool" "$_want")"
     _bin="$(tool_bin "$_tool" "$_want")"
+    # Ahead of every branch below, not only the fresh-install one: an already-existing entry still
+    # means install_tool is actively managing this root right now (#95).
+    _croot="$(cache_root)" || return 1
+    ensure_cache_sentinel "$_croot" \
+        || warn "$_tool: could not write the cache root's ownership sentinel at $_croot (clean will keep refusing it until one exists)"
     # Existence alone is no longer proof: the receipt is what tells a verified entry apart from debris.
     if [ -x "$_bin" ]; then
         if entry_verified "$_dest" "$_tool"; then
@@ -904,6 +945,62 @@ cmd_doctor() {
     done
 }
 
+# Restores $_trash/detached to $_root, but only calls it success if the rename actually replaced
+# $_root rather than nesting into a directory something else recreated there between the "is it free"
+# check and the mv landing -- mv reports 0 either way, nesting included, so believing that exit status
+# alone is exactly the bug this closes. No lock, no retry: a failed restore only has to be loud and the
+# content findable, not that every interleaving succeeds.
+# Returns 0: restored cleanly, content now genuinely at $_root. 1: $_root was occupied or the mv
+# itself failed; content is unmoved at $_trash/detached. 2: the mv landed nested at $_root/detached
+# instead of replacing $_root, because $_root was recreated in the gap between the check and the rename.
+restore_detached() {
+    [ ! -e "$_root" ] || return 1
+    mv "$_trash/detached" "$_root" 2>/dev/null || return 1
+    [ ! -e "$_root/detached" ] || return 2
+    return 0
+}
+
+# Shared by both the EXIT trap and the HUP/INT/TERM trap -- one handler, not two with different rules
+# to drift out of sync. errexit turns any failing command into an exit exactly like a signal does; an
+# EXIT trap with its own separate, unconditional "always delete" body would still delete an unverified
+# $_trash/detached if some future edit added a fallible command between the detach and the verdict,
+# even though nothing here signaled at all. $_verified gates which of two things any exit through this
+# trap lands as. Unset or 0 means sentinel_verified has not yet had a chance to run, so whatever is
+# sitting in $_trash was never checked and must be restored, not destroyed -- the exact property #95
+# exists to guarantee. 1 means the verdict was already in (verified) before the exit happened, so the
+# trash is known to be grubstake's own and removal proceeds exactly as it did before this flag existed.
+clean_trash_teardown() {
+    if [ "${_verified:-0}" = 1 ]; then
+        # Killed outright, not left to finish on its own: without this, the backgrounded chmod this
+        # signal interrupted is still walking $_trash while the rm -rf below deletes it out from under it.
+        [ -n "${_chpid:-}" ] && kill -TERM "$_chpid" 2>/dev/null
+        rm -rf "$_trash" 2>/dev/null
+        [ -e "$_trash" ] || return 0
+        chmod -R u+w "$_trash" 2>/dev/null || true
+        rm -rf "$_trash"
+    else
+        # Same restore_detached used by the synchronous path in cmd_clean, and the same three
+        # outcomes: this is exactly the drift the last hole came from, two restore sites disagreeing
+        # on when a put-back actually counts as one.
+        if restore_detached; then _rrc=0; else _rrc=$?; fi
+        # $_trash is provably empty here for rc 0 and rc 2 alike -- both moved "detached" out of it,
+        # to $_root or to $_root/detached respectively -- and only rc 1 (the mv itself failed) leaves
+        # anything behind for the container to still be holding.
+        [ "$_rrc" -eq 1 ] || { rmdir "$_trash" 2>/dev/null || rm -rf "$_trash" 2>/dev/null; }
+        if [ "$_rrc" -eq 2 ]; then
+            # Nested, not restored: mv reported success but landed the content at $_root/detached
+            # instead of replacing $_root, because something recreated $_root in the gap. A signal
+            # handler can still write to stderr -- unlike the outright-failure case below, this one is
+            # silent by construction unless said here, so it is said here.
+            warn "clean's restore of an unverified $_root nested at $_root/detached instead of replacing it -- recover it by hand"
+        fi
+        # $_rrc 1 falls through silently: $_root was occupied by something else, or the mv itself
+        # failed. $_trash/detached is untouched -- an rm -rf here would destroy the one thing this
+        # branch exists to save, and it is already exactly where the synchronous path's own equivalent
+        # message points a human to look.
+    fi
+}
+
 # No validate_pins: a malformed grubstake.tools must not block the one command that recovers from
 # a wedged cache. cache_root can now fail outright (unsupported platform, no GRUBSTAKE_CACHE override);
 # a degenerate or relative path is the only case left for the checks below to refuse.
@@ -922,11 +1019,73 @@ cmd_clean() {
     # under root. Renaming it aside is atomic, so a concurrent ensure either finds it gone and starts
     # a fresh tree with mkdir -p, or is already past the rename and lands its publish in the trash,
     # harmless either way since the cache is a rebuildable download cache, never a source of truth.
-    _trash="$_root.trash.$$"
-    mv "$_root" "$_trash" || die "cannot detach cache root for removal: $_root"
+    # mktemp names the trash atomically and unpredictably rather than the old $$-derived name, and the
+    # trap arms before the rename so a signal between the mv and the final rm -rf cannot strand a full
+    # copy of the cache beside the root. mv nests a directory into an existing one rather than
+    # replacing it (no mv -T on macOS), so the detached tree lands at a fixed child name inside the
+    # mktemp'd directory, not at the mktemp'd path itself.
+    _trash="$(mktemp -d "$_root.trash.XXXXXX")" || die "cannot create a trash directory beside $_root"
+    # Set before either trap is armed, not after: clean_trash_teardown reads this to decide restore
+    # versus delete, and any exit through either trap before sentinel_verified ever runs must find it
+    # already 0, never unset -- set -u would otherwise turn that read itself into a crash inside the trap.
+    _verified=0
+    # Disarmed first, inside its own body: without that, this trap's own "exit 1" would refire the
+    # EXIT trap below and run the teardown a second time -- harmless here since it tolerates an
+    # already-gone path, but the disarm is what makes that redundancy a non-issue rather than a race.
+    trap 'trap - EXIT HUP INT TERM; clean_trash_teardown; exit 1' HUP INT TERM
+    # No "exit" of its own: this fires as part of an exit already in progress (errexit, a caught
+    # signal that disarmed and re-exited above, or a plain die), and calling exit again here would
+    # overwrite whatever status was already on its way out with this trap's own last command instead.
+    trap 'clean_trash_teardown' EXIT
+    mv "$_root" "$_trash/detached" || die "cannot detach cache root for removal: $_root"
+    # #95, outside review: verified here, on the detached copy, never before the rename. Checking the
+    # sentinel and renaming the root were two separate steps around an unguarded path, so a concurrent
+    # process could swap the checked root for an unrelated directory in between -- mv follows the
+    # path, not an identity already verified. This way the bytes verified are exactly the bytes about
+    # to be deleted, with nothing observable in between.
+    _dsentinel="$(cache_sentinel_file "$_trash/detached")"
+    if ! sentinel_verified "$_dsentinel"; then
+        # Restored, not deleted: whatever actually landed at $_trash/detached did not verify, so it is
+        # someone else's directory, not grubstake's cache, and goes back rather than getting destroyed
+        # on a guess. restore_detached's own three outcomes, not a bare mv check: mv reports success
+        # even when $_root was recreated in the gap and the rename nested instead of replacing it, so
+        # believing that exit status alone would report a restore that never actually happened.
+        if restore_detached; then _rrc=0; else _rrc=$?; fi
+        # $_trash is provably empty here for rc 0 and rc 2 alike -- both moved "detached" out of it,
+        # to $_root or to $_root/detached respectively -- and only rc 1 (the mv itself failed) leaves
+        # anything behind for the container to still be holding.
+        [ "$_rrc" -eq 1 ] || { rmdir "$_trash" 2>/dev/null || rm -rf "$_trash" 2>/dev/null; }
+        if [ "$_rrc" -eq 0 ]; then
+            die "refusing to remove cache root, it changed underneath clean before the sentinel could be verified: '$_root'"
+        fi
+        # The restore did not cleanly land: either $_root was occupied and the mv itself failed
+        # (content still at $_trash/detached), or $_root was recreated in the gap and the rename
+        # nested instead of replacing it (content now at $_root/detached, misplaced but not lost).
+        # Either way the EXIT trap below must not be allowed to delete what this branch could not
+        # confirm -- that would destroy exactly what it exists to save -- so it is disarmed before
+        # naming where the content actually is.
+        trap - EXIT HUP INT TERM
+        if [ "$_rrc" -eq 2 ]; then
+            die "refusing to remove cache root, it changed underneath clean, and the restore landed nested inside a directory something else created at '$_root' in the meantime -- recover it by hand from $_root/detached"
+        fi
+        die "refusing to remove cache root, it changed underneath clean, and could not be restored to '$_root' -- recover it by hand from $_trash"
+    fi
+    # Flipped only once the sentinel has actually verified: an exit through either trap after this
+    # point deletes, same as before this flag existed; an exit before it (still 0) restores instead.
+    _verified=1
     # Published entries are read-only; unlinking needs write permission on their containing dirs first.
-    chmod -R u+w "$_trash" 2>/dev/null || true
+    # Backgrounded and waited on explicitly rather than run as a plain foreground command: both dash
+    # and bash defer a trapped signal until a foreground external command finishes on its own, but the
+    # "wait" builtin is specifically interruptible and returns the moment the trap runs instead -- the
+    # difference is tens of seconds versus tens of milliseconds, confirmed in scratch first.
+    chmod -R u+w "$_trash" 2>/dev/null &
+    _chpid=$!
+    wait "$_chpid" 2>/dev/null || true
+    # Cleared once reaped: the signal handler kills whatever this names, and a reaped pid can be
+    # reused by an unrelated process before the trap is disarmed a few lines below.
+    _chpid=""
     rm -rf "$_trash"
+    trap - EXIT HUP INT TERM
 }
 
 # An older release fetched this script and handed off with: __replace-self <installed> <version>.

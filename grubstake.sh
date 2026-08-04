@@ -242,14 +242,28 @@ with_lock() {
     # A nested call would clobber this call's own _lk/_wl_saved globals (no `local` in POSIX sh); no caller nests today, so a re-entry dies loud rather than silently losing a saved trap.
     [ -z "${_wl_active:-}" ] || die "with_lock: called re-entrantly, nesting is not supported"
     _lk="$1"; shift
-    _lkdir="$(dirname "$_lk")"
     _w=0
-    while ! mkdir "$_lk" 2>/dev/null; do
-        # mkdir cannot distinguish ENOENT from EEXIST; the parent's absence is what separates them.
-        if [ ! -d "$_lkdir" ]; then
-            warn "$_lk: its directory is gone, most likely a concurrent clean removed the cache mid-install"
-            return 1
-        fi
+    while :; do
+        # The cause comes from mkdir's own words, not a second [ -d ] test taken afterwards: that
+        # test answers "does the parent still exist," which a read-only parent (EACCES) passes same
+        # as genuine contention, and an unreadable ancestor fails same as a parent actually removed.
+        # LC_ALL=C: the discriminator below reads mkdir's own message, so it has to stay in the
+        # language it was written against, the same convention #85 uses for git's own message.
+        _mkerr="$(LC_ALL=C mkdir "$_lk" 2>&1 >/dev/null)" && break
+        # Anchored to the end, not a bare substring: the lock path is interpolated into this very
+        # message, and an unanchored match lets a path that happens to contain "File exists" (or the
+        # ENOENT text) collide with mkdir's own trailing reason instead of reading it.
+        case "$_mkerr" in
+            *": File exists") : ;;
+            *": No such file or directory")
+                warn "$_lk: its directory is gone, most likely a concurrent clean removed the cache mid-install"
+                return 1
+                ;;
+            *)
+                warn "cannot create lock: $_mkerr"
+                return 1
+                ;;
+        esac
         _w=$((_w + 1))
         # Acquisition failure is the caller's to scope; with_lock never decides how loud it is.
         if [ "$_w" -gt 50 ]; then
@@ -717,11 +731,26 @@ add_one() {
     _lock="$_pins.lock"
     _pt="$_pins.$$.tmp"
     # mkdir is the portable atomic lock. Two agents adding pins otherwise write from stale reads.
-    _lockdir="$(dirname "$_lock")"
     _waited=0
-    while ! mkdir "$_lock" 2>/dev/null; do
-        # mkdir cannot distinguish ENOENT from EEXIST; the parent's absence is what separates them.
-        [ -d "$_lockdir" ] || die "$_lock: its directory is gone, most likely the repository was removed mid-add"
+    while :; do
+        # The cause comes from mkdir's own words, not a second [ -d ] test taken afterwards: that
+        # test answers "does the parent still exist," which a read-only parent (EACCES) passes same
+        # as genuine contention, and an unreadable ancestor fails same as a parent actually removed.
+        # LC_ALL=C: the discriminator below reads mkdir's own message, so it has to stay in the
+        # language it was written against, the same convention #85 uses for git's own message.
+        _mkerr="$(LC_ALL=C mkdir "$_lock" 2>&1 >/dev/null)" && break
+        # Anchored to the end, not a bare substring: the lock path is interpolated into this very
+        # message, and an unanchored match lets a path that happens to contain "File exists" (or the
+        # ENOENT text) collide with mkdir's own trailing reason instead of reading it.
+        case "$_mkerr" in
+            *": File exists") : ;;
+            *": No such file or directory")
+                die "$_lock: its directory is gone, most likely the repository was removed mid-add"
+                ;;
+            *)
+                die "cannot create lock: $_mkerr"
+                ;;
+        esac
         _waited=$((_waited + 1))
         [ "$_waited" -gt 50 ] && die "grubstake.tools is locked by another run ($_lock)"
         sleep 0.1 2>/dev/null || sleep 1
@@ -982,8 +1011,11 @@ cmd_install() {
         # LC_ALL=C, the same convention this file already uses at every sort site: the discriminator
         # below reads git's own message, so that message has to stay in the language it was read in.
         _gcerr="$(LC_ALL=C git -C "$_root" config core.hooksPath .githooks 2>&1 >/dev/null)" && break
+        # Anchored to the end, not a bare substring: git's message can itself embed a path (an
+        # ambient GIT_DIR overrides the plain ".git/config" this normally reads), so an unanchored
+        # match would let a path containing "File exists" collide with git's own trailing reason.
         case "$_gcerr" in
-            *"File exists"*) : ;;
+            *": File exists") : ;;
             *) die "cannot set core.hooksPath: $_gcerr" ;;
         esac
         _gcw=$((_gcw + 1))

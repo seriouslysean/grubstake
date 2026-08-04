@@ -71,6 +71,22 @@ new_repo() {
     echo "$_r"
 }
 
+# Mirrors new_repo()'s own construction, but nests the repo one level under a "gate" directory this
+# suite controls, so that directory -- never $ROOT itself, which every other fixture shares -- can
+# be made untraversable (chmod 000) without disturbing anything else running concurrently. Echoes
+# the repo path, same as new_repo(); the caller derives the gate to chmod via "$(dirname "$repo")".
+new_gated_repo() {
+    _gbase="$ROOT/gated-repo.$$.$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
+    mkdir -p "$_gbase/gate/repo" || fixture_die "cannot create $_gbase/gate/repo"
+    _gr="$(cd "$_gbase/gate/repo" && pwd)" || fixture_die "cannot enter $_gbase/gate/repo"
+    ( cd "$_gr" && git init -q . ) || fixture_die "git init failed in $_gr"
+    cp "$GS" "$_gr/grubstake.sh" || fixture_die "cannot copy grubstake.sh into $_gr"
+    mkdir -p "$_gr/.cache" || fixture_die "cannot create $_gr/.cache"
+    [ -d "$_gr/.git" ] && [ -x "$_gr/grubstake.sh" ] && [ -d "$_gr/.cache" ] \
+        || fixture_die "incomplete repo at $_gr"
+    echo "$_gr"
+}
+
 # Run grubstake in a repo with that repo's own cache.
 gs() {
     _repo="$1"; shift
@@ -963,6 +979,157 @@ elif printf '%s' "$_out" | grep -qi "archive contains"; then
     fail "misdiagnosed a vanished cache root as a corrupt archive: $_out"
 elif ! printf '%s' "$_out" | grep -Eqi "cache|root|gone|removed|disappear"; then
     fail "failed fast without naming the real cause: $_out"
+else
+    pass
+fi
+
+it "ensure fails fast on a permission-denied lock, not a five-second contention stall"
+# #88: with_lock decides why its own "mkdir" failed by testing "[ -d "$_lkdir" ]" afterwards, which
+# answers "does the parent still exist," not "why did the write fail." A lock directory whose own
+# parent has lost its write bit fails mkdir with EACCES, but the parent is still perfectly readable
+# and traversable (555 keeps the execute bit), so "[ -d ]" reports true -- the same as ordinary
+# EEXIST contention -- and the retry loop spins its full budget before dying blaming a holder that
+# was never there. fake_install, not fake_release: this needs no download, only a legacy
+# (receiptless) entry that reaches with_lock through install_tool's own write_receipt call, the
+# cheapest path to the mkdir under test, same technique the vanished-cache-root test above uses.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+chmod 555 "$r/.cache/swiftlint" || fixture_die "cannot make $r/.cache/swiftlint read-only"
+_t0=$(date +%s)
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+_t1=$(date +%s)
+chmod 755 "$r/.cache/swiftlint" 2>/dev/null
+_elapsed=$((_t1 - _t0))
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite a permission-denied lock directory: $_out"
+elif [ "$_elapsed" -ge 3 ]; then
+    fail "ensure spun ${_elapsed}s instead of failing fast on a non-retryable permission denial: $_out"
+elif printf '%s' "$_out" | grep -qi "locked by another run"; then
+    fail "blamed a lock nobody held instead of the real permission failure: $_out"
+elif ! printf '%s' "$_out" | grep -qi "permission denied"; then
+    fail "did not carry the real cause (permission denied): $_out"
+else
+    pass
+fi
+
+it "ensure blames an unreadable ancestor honestly, not a cache that was never removed"
+# The other wrong diagnosis at the same site: "[ -d "$_lkdir" ]" is answering the existence
+# question from the lock's own parent, ".cache/<tool>", but an ancestor further up (".cache"
+# itself) can be the thing that becomes untraversable, which fails that existence test too --
+# indistinguishable, to with_lock, from the parent genuinely having been removed by a concurrent
+# clean (the #56 case the vanished-cache-root test above covers). Nothing was removed here; only a
+# permission bit changed. A static pre-chmod cannot isolate this cleanly: install_tool's own
+# "[ -x "$_bin" ]" check reads the identical ".cache" ancestor before with_lock ever runs, so
+# chmod'ing it up front just makes the tool look not-yet-installed and take an entirely different
+# path. Shimming "mkdir" to flip the permission the instant a "*.lock" path is attempted -- the same
+# match lock_pause_shim uses, since that mkdir shape is with_lock's alone -- lands the change after
+# the earlier check has already passed and right before the one under test.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+_shim="$r/mkdir-shim"; mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+_realmkdir="$(command -v mkdir)" || fixture_die "no real mkdir on PATH to wrap"
+cat > "$_shim/mkdir" <<SHIM
+#!/bin/sh
+case "\$*" in
+    *.lock)
+        chmod 000 "$r/.cache"
+        ;;
+esac
+exec "$_realmkdir" "\$@"
+SHIM
+chmod +x "$_shim/mkdir" || fixture_die "cannot make the mkdir shim executable"
+_t0=$(date +%s)
+_out=$( cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+_t1=$(date +%s)
+chmod 755 "$r/.cache" 2>/dev/null
+_elapsed=$((_t1 - _t0))
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite its own cache ancestor being unreadable: $_out"
+elif [ "$_elapsed" -ge 3 ]; then
+    fail "ensure spun ${_elapsed}s on an unreadable ancestor instead of failing fast: $_out"
+elif printf '%s' "$_out" | grep -qi "removed the cache mid-install"; then
+    fail "claimed the cache was removed when only a permission bit changed: $_out"
+elif ! printf '%s' "$_out" | grep -Eqi "permission|denied|access|unreadable|cannot (read|search|traverse)"; then
+    fail "failed fast without naming the real cause: $_out"
+else
+    pass
+fi
+
+it "a cache path containing the discriminator's own match text does not turn a permission denial into contention"
+# Panel review on #88: the fix reads mkdir's own stderr and discriminates with "case ... in
+# *"File exists"*)", but that match is unanchored -- it fires if the substring appears ANYWHERE in
+# the captured text, and the captured text is mkdir's whole message, path included ("mkdir: <path>:
+# <reason>"). A cache rooted at a directory literally named "File exists.cache" makes every lock
+# path under it contain that text regardless of what actually went wrong, so a genuine permission
+# denial on the lock's own parent reads as contention again -- the exact defect this branch exists
+# to remove, reopened by the fix meant to close it. GRUBSTAKE_CACHE can point anywhere; it does not
+# need to live under the repo, so the collision text sits in the cache root itself here.
+r=$(new_repo)
+_cache="$ROOT/lock-collision.$$/File exists.cache"
+mkdir -p "$_cache/swiftlint/$SHA_A" || fixture_die "cannot create $_cache/swiftlint/$SHA_A"
+printf '#!/bin/sh\necho 0.63.2\n' > "$_cache/swiftlint/$SHA_A/swiftlint" || fixture_die "cannot write the fixture binary"
+chmod +x "$_cache/swiftlint/$SHA_A/swiftlint" || fixture_die "cannot make the fixture binary executable"
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+chmod 555 "$_cache/swiftlint" || fixture_die "cannot make $_cache/swiftlint read-only"
+_t0=$(date +%s)
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$_cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+_t1=$(date +%s)
+chmod 755 "$_cache/swiftlint" 2>/dev/null
+_elapsed=$((_t1 - _t0))
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite a permission-denied lock directory: $_out"
+elif [ "$_elapsed" -ge 3 ]; then
+    fail "ensure spun ${_elapsed}s instead of failing fast on a non-retryable permission denial: $_out"
+elif printf '%s' "$_out" | grep -qi "locked by another run"; then
+    fail "a cache path containing the discriminator's own text was misread as contention: $_out"
+elif ! printf '%s' "$_out" | grep -qi "permission denied"; then
+    fail "did not carry the real cause (permission denied): $_out"
+else
+    pass
+fi
+
+it "a cache path containing the discriminator's own match text still reports a genuinely vanished parent as gone, not locked"
+# The mirror the panel asked for: an over-broad fix that matches "File exists" anywhere, rather than
+# only where mkdir's own message actually reports it, can also misfire in the other direction. Here
+# the lock's parent is genuinely removed (mkdir's real message ends "No such file or directory"),
+# but the message still contains "File exists" too, purely because the collision text sits earlier
+# in the same string as the cache root's name -- an unanchored match on a case arm listed before the
+# ENOENT arm wins on substring presence alone, misreporting a real removal as a lock nobody held.
+# The existing mkdir-shim technique still applies: the shim removes the lock's own parent instead of
+# chmod'ing it, right before letting the real mkdir run, which is what actually produces a genuine
+# ENOENT (not read-only-directory noise) here.
+r=$(new_repo)
+_cache="$ROOT/lock-collision-gone.$$/File exists.cache"
+mkdir -p "$_cache/swiftlint/$SHA_A" || fixture_die "cannot create $_cache/swiftlint/$SHA_A"
+printf '#!/bin/sh\necho 0.63.2\n' > "$_cache/swiftlint/$SHA_A/swiftlint" || fixture_die "cannot write the fixture binary"
+chmod +x "$_cache/swiftlint/$SHA_A/swiftlint" || fixture_die "cannot make the fixture binary executable"
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_shim="$r/mkdir-shim"; mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+_realmkdir="$(command -v mkdir)" || fixture_die "no real mkdir on PATH to wrap"
+cat > "$_shim/mkdir" <<SHIM
+#!/bin/sh
+case "\$*" in
+    *.lock)
+        rm -rf "$_cache/swiftlint"
+        ;;
+esac
+exec "$_realmkdir" "\$@"
+SHIM
+chmod +x "$_shim/mkdir" || fixture_die "cannot make the mkdir shim executable"
+_t0=$(date +%s)
+_out=$( cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$_cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+_t1=$(date +%s)
+_elapsed=$((_t1 - _t0))
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite its own cache parent being removed mid-lock: $_out"
+elif [ "$_elapsed" -ge 3 ]; then
+    fail "ensure spun ${_elapsed}s instead of failing fast when its cache parent vanished: $_out"
+elif printf '%s' "$_out" | grep -qi "locked by another run"; then
+    fail "a genuinely vanished parent was misread as contention because the path also contains the discriminator's own text: $_out"
+elif ! printf '%s' "$_out" | grep -qi "removed the cache mid-install"; then
+    fail "failed fast without naming the real cause (the cache parent vanishing): $_out"
 else
     pass
 fi
@@ -2878,6 +3045,43 @@ else
     pass
 fi
 
+it "a repository path containing the discriminator's own match text does not turn a git permission denial into contention"
+# The with_lock/add_one collision above, at the third site the same panel round flagged: install's
+# own fix reads git's stderr and discriminates with "case ... in *": File exists")", anchored to the
+# end because the diff's own comment already names the counter-case -- an ambient GIT_DIR makes git
+# report the config file's full path instead of the usual plain ".git/config", so a repo whose path
+# contains "File exists" would otherwise collide with git's own trailing reason. Verified directly
+# before writing this: with plain "-C" alone (no GIT_DIR), git's message never carries the repo's
+# path at all, which is why the earlier panel round correctly found nothing to test here -- exporting
+# GIT_DIR is what actually makes the collision text reach the matched string. GIT_DIR has to be
+# exported into the same environment "install" runs in, not just handed to a standalone git call, to
+# prove this reaches the discriminator through the real invocation rather than a hand-picked one.
+r="$ROOT/gitdir-collision.$$/File exists.repo"
+mkdir -p "$r" || fixture_die "cannot create $r"
+( cd "$r" && git init -q . ) || fixture_die "git init failed in $r"
+cp "$GS" "$r/grubstake.sh" || fixture_die "cannot copy grubstake.sh into $r"
+chmod +x "$r/grubstake.sh" || fixture_die "cannot make grubstake.sh executable in $r"
+_shims="$(mktemp -d "$ROOT/no-net-gitdir-collision.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+chmod 555 "$r/.git" || fixture_die "cannot make $r/.git read-only"
+_t0=$(date +%s)
+_out=$( cd "$r" && GIT_DIR="$r/.git" PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+_t1=$(date +%s)
+chmod 755 "$r/.git" 2>/dev/null
+_elapsed=$((_t1 - _t0))
+if [ "$_rc" -eq 0 ]; then
+    fail "install exited 0 with .git itself read-only: $_out"
+elif [ "$_elapsed" -ge 3 ]; then
+    fail "install spun ${_elapsed}s instead of failing fast on a non-retryable git error: $_out"
+elif printf '%s' "$_out" | grep -qi "kept losing the lock"; then
+    fail "a repository path containing the discriminator's own text was misread as contention: $_out"
+elif ! printf '%s' "$_out" | grep -qi "permission denied"; then
+    fail "did not carry git's own error text: $_out"
+else
+    pass
+fi
+
 # ---------------------------------------------------------------------------- hooks
 #
 # Nothing here ran either shipped hook before: the suite tested what grubstake does when the suite
@@ -3687,6 +3891,114 @@ elif ! printf '%s' "$_out" | grep -q "locked by another run"; then
     fail "genuine contention was not reported as locked by another run: $_out"
 elif [ "$_elapsed" -lt 3 ]; then
     fail "reported contention after only ${_elapsed}s -- the retry budget was not honestly exhausted: $_out"
+else
+    pass
+fi
+
+it "add fails fast on a permission-denied pins lock, not a five-second contention stall"
+# #88, add_one's own copy of the with_lock gap: "[ -d "$_lockdir" ]" (=the repo root itself here,
+# since the pins lock sits directly in it) only answers "does the parent still exist." A read-only
+# repo root fails add_one's own mkdir with EACCES while remaining perfectly traversable (555 keeps
+# the execute bit), so the existence test still reports true, the same as genuine EEXIST contention
+# -- the retry spins its full budget before dying blaming a holder that was never there. fake_release
+# is required here, not fake_install: add always downloads and hashes before it ever reaches its own
+# lock, so nothing short of a real (if fixture-served) fetch reaches the mkdir under test.
+r=$(new_repo)
+fake_release "$r" 1.0.0 >/dev/null
+chmod 555 "$r" || fixture_die "cannot make $r read-only"
+_t0=$(date +%s)
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1 ); _rc=$?
+_t1=$(date +%s)
+chmod 755 "$r" 2>/dev/null
+_elapsed=$((_t1 - _t0))
+if [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 despite a permission-denied pins lock: $_out"
+elif [ "$_elapsed" -ge 3 ]; then
+    fail "add spun ${_elapsed}s instead of failing fast on a non-retryable permission denial: $_out"
+elif printf '%s' "$_out" | grep -qi "locked by another run"; then
+    fail "blamed a lock nobody held instead of the real permission failure: $_out"
+elif ! printf '%s' "$_out" | grep -qi "permission denied"; then
+    fail "did not carry the real cause (permission denied): $_out"
+else
+    pass
+fi
+
+it "add blames an unreadable ancestor honestly, not a repository that was never removed"
+# The other wrong diagnosis at add_one's site: an ancestor of the repo itself -- not the repo root,
+# which "[ -d "$_lockdir" ]" checks, but something above it -- can be the thing that becomes
+# untraversable, which fails that same existence test, indistinguishable to add_one from the #68
+# case (the repo directory genuinely renamed away mid-add) the vanished-directory test above covers.
+# Nothing was removed here; only a permission bit changed on a directory the repo sits inside.
+# new_gated_repo, not new_repo: the ancestor under test has to be a directory this suite controls
+# and nothing else shares, never $ROOT itself. A static pre-chmod on it does not isolate this
+# cleanly, though: with the ancestor already broken, the shell cannot even absolute-path back into
+# the repo to start the run, and a relative "./grubstake.sh" invocation sidesteps the break entirely
+# (script_dir()'s own "cd . && pwd" never needs to leave a cwd it is already validly inside). Same
+# fix as with_lock's equivalent test above: shim "mkdir" to flip the permission the instant the
+# pins-lock path is attempted, landing the change after add_one's own hash/download phase -- which
+# never touches the repo; the download lands in system $TMPDIR -- and right before the mkdir under
+# test, with grubstake.sh itself still reached via the repo's own absolute path throughout.
+r=$(new_gated_repo)
+_gate="$(dirname "$r")"
+fake_release "$r" 1.0.0 >/dev/null
+_shim="$r/mkdir-shim"; mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+_realmkdir="$(command -v mkdir)" || fixture_die "no real mkdir on PATH to wrap"
+cat > "$_shim/mkdir" <<SHIM
+#!/bin/sh
+case "\$*" in
+    *.lock)
+        chmod 000 "$_gate"
+        ;;
+esac
+exec "$_realmkdir" "\$@"
+SHIM
+chmod +x "$_shim/mkdir" || fixture_die "cannot make the mkdir shim executable"
+_t0=$(date +%s)
+_out=$( cd "$r" && PATH="$_shim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1 ); _rc=$?
+_t1=$(date +%s)
+chmod 755 "$_gate" 2>/dev/null
+_elapsed=$((_t1 - _t0))
+if [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 despite its own repository ancestor being unreadable: $_out"
+elif [ "$_elapsed" -ge 3 ]; then
+    fail "add spun ${_elapsed}s on an unreadable ancestor instead of failing fast: $_out"
+elif printf '%s' "$_out" | grep -qi "removed mid-add"; then
+    fail "claimed the repository was removed when only a permission bit changed: $_out"
+elif ! printf '%s' "$_out" | grep -Eqi "permission|denied|access|unreadable|cannot (read|search|traverse)"; then
+    fail "failed fast without naming the real cause: $_out"
+else
+    pass
+fi
+
+it "a repository path containing the discriminator's own match text does not turn a permission denial into contention"
+# add_one's mirror of the with_lock collision above: its own fix reads the identical unanchored
+# "case ... in *"File exists"*)" shape against mkdir's own message for "$_pins.lock", which sits
+# directly in the repo root -- so here the collision text has to be in the repo's own path, not a
+# separate cache root the way with_lock's equivalent test manages it. new_repo builds its own name
+# from a timestamp and pass/fail counters, with no hook to choose that name, so this is built
+# inline instead, mirroring new_repo()'s own steps (git init, copy grubstake.sh, create .cache) at a
+# chosen path -- the one part of this dispatch's fixtures new_repo could not carry as asked.
+r="$ROOT/repo-collision.$$/File exists.repo"
+mkdir -p "$r" || fixture_die "cannot create $r"
+( cd "$r" && git init -q . ) || fixture_die "git init failed in $r"
+cp "$GS" "$r/grubstake.sh" || fixture_die "cannot copy grubstake.sh into $r"
+chmod +x "$r/grubstake.sh" || fixture_die "cannot make grubstake.sh executable in $r"
+mkdir -p "$r/.cache" || fixture_die "cannot create $r/.cache"
+fake_release "$r" 1.0.0 >/dev/null
+chmod 555 "$r" || fixture_die "cannot make $r read-only"
+_t0=$(date +%s)
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1 ); _rc=$?
+_t1=$(date +%s)
+chmod 755 "$r" 2>/dev/null
+_elapsed=$((_t1 - _t0))
+if [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 despite a permission-denied pins lock: $_out"
+elif [ "$_elapsed" -ge 3 ]; then
+    fail "add spun ${_elapsed}s instead of failing fast on a non-retryable permission denial: $_out"
+elif printf '%s' "$_out" | grep -qi "locked by another run"; then
+    fail "a repository path containing the discriminator's own text was misread as contention: $_out"
+elif ! printf '%s' "$_out" | grep -qi "permission denied"; then
+    fail "did not carry the real cause (permission denied): $_out"
 else
     pass
 fi

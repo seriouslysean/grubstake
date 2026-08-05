@@ -802,10 +802,40 @@ add_one() {
     # only known-good once the lock that guards the rewrite below is held.
     validate_pins
     [ -f "$_pins" ] || printf '# grubstake pins: name version sha256-darwin sha256-linux\n' > "$_pins"
-    grep -v -E "^$_tool[[:space:]]" "$_pins" 2>/dev/null | grep -v '^$' > "$_pt" || true
+    # grep -v exits 1 when it selects nothing, the ordinary shape of the first pin in an empty or
+    # tool-only file; anything else is a real read failure and must abort before the rename below.
+    # A pipeline's own exit status is its last stage's, not grep's, so neither stage can run inside
+    # one and still have its own failure seen.
+    if grep -v -E "^$_tool[[:space:]]" "$_pins" 2>/dev/null > "$_tmp/pins-sel"; then _selrc=0; else _selrc=$?; fi
+    case "$_selrc" in
+        0|1) : ;;
+        *) die "$_pins: cannot read pins file (grep exit $_selrc), $_tool@$_ver was not recorded" ;;
+    esac
+    if grep -v '^$' "$_tmp/pins-sel" > "$_pt"; then _filtrc=0; else _filtrc=$?; fi
+    case "$_filtrc" in
+        0|1) : ;;
+        *) die "$_pins: cannot read pins file (grep exit $_filtrc), $_tool@$_ver was not recorded" ;;
+    esac
+    # Counted, not just read: a rewrite that drops pins without erroring is indistinguishable from
+    # grep's own "selected nothing" by exit status alone, so only a pin count catches it. Same filter
+    # pinned_tools uses, so the header comment and a blank line are never mistaken for a pin lost.
+    if _before="$(grep -vcE '^[[:space:]]*(#|$)' "$_pins" 2>/dev/null)"; then _bnrc=0; else _bnrc=$?; fi
+    case "$_bnrc" in
+        0|1) : ;;
+        *) die "$_pins: cannot read pins file (grep exit $_bnrc), $_tool@$_ver was not recorded" ;;
+    esac
     # shellcheck disable=SC2086
     printf '%s %s%s\n' "$_tool" "$_ver" "$_shas" >> "$_pt"
-    LC_ALL=C sort -o "$_pt" "$_pt"
+    # sort's own failure here must not let a partial or unchanged $_pt reach the count check below
+    # unnoticed, since that check is the one guard standing between a bad write and the rename.
+    if LC_ALL=C sort -o "$_pt" "$_pt"; then _srtrc=0; else _srtrc=$?; fi
+    [ "$_srtrc" -eq 0 ] || die "$_pins: cannot sort pins file (sort exit $_srtrc), $_tool@$_ver was not recorded"
+    # The pin appended above guarantees this always matches; anything else is a real read failure on
+    # the file just written, not zero pins, and must not reach the comparison below.
+    if _after="$(grep -vcE '^[[:space:]]*(#|$)' "$_pt")"; then _anrc=0; else _anrc=$?; fi
+    [ "$_anrc" -eq 0 ] || die "$_pins: cannot verify the rewritten pins file (grep exit $_anrc), $_tool@$_ver was not recorded"
+    [ "$_before" -eq 0 ] || [ "$_after" -ge "$_before" ] \
+        || die "$_pins: rewrite would drop pins ($_before -> $_after), $_tool@$_ver was not recorded"
     mv "$_pt" "$_pins"
     rmdir "$_lock" 2>/dev/null || true
 

@@ -4449,6 +4449,115 @@ else
     pass
 fi
 
+it "an unreadable pins file is left alone, not collapsed down to the one new pin"
+# #96: add_one's own rewrite ends "grep -v ... > \"\$_pt\" || true" -- the "|| true" exists so an
+# empty pins file (grep selects nothing, exit 1) is not mistaken for failure, but it swallows a
+# genuine read failure the same way: $_pt stays empty, the new pin is appended to nothing, and the
+# mv installs a one-line pins file. Confirmed on disk, not just by exit status, per CLAUDE.md's own
+# rule that a fix verified once by hand is a fix the next change can break silently.
+#
+# ./grubstake.sh always execs via its own "#!/bin/sh" shebang, unaffected by which shell runs this
+# suite -- so all three of sh/dash/env-i test/run.sh reproduce this the same way here, because this
+# machine's own /bin/sh is bash: it runs the permission-denied read past validate_pins and reaches
+# add_one's rewrite. AGENTS.md says CI's /bin/sh is dash, and there validate_pins' own
+# "< \"\$_f\"" redirect aborts first with its own fatal error -- an accident of dash's harsher
+# redirection semantics, not a guard add_one owns -- so this specific fixture would likely pass on
+# CI for the wrong reason even unfixed. Test 3 below reproduces the same contract violation without
+# depending on that redirect at all, so it does not share this gap.
+r=$(new_repo)
+pins "$r" "periphery 3.7.4 $SHA_A $SHA_A
+swiftformat 0.61.1 $SHA_B $SHA_B"
+_before=$(cat "$r/grubstake.tools")
+fake_release "$r" 1.0.0 >/dev/null
+chmod 000 "$r/grubstake.tools" || fixture_die "cannot make $r/grubstake.tools unreadable"
+[ ! -r "$r/grubstake.tools" ] || fixture_die "chmod 000 did not take; the unreadable-pins fixture proves nothing"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1 ); _rc=$?
+chmod u+rw "$r/grubstake.tools" 2>/dev/null
+_after=$(cat "$r/grubstake.tools" 2>/dev/null)
+if [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 despite an unreadable pins file. pins file now:
+$_after"
+elif [ "$_after" != "$_before" ]; then
+    fail "add refused, but the pins file was rewritten anyway (data lost). before:
+$_before
+after:
+$_after"
+elif [ -e "$r/grubstake.tools.lock" ]; then
+    fail "add refused, but left the pins lock behind: $r/grubstake.tools.lock"
+elif ! printf '%s' "$_out" | grep -Eqi "read|unreadable|permission|denied|cannot"; then
+    fail "refused, but without saying why: $_out"
+else
+    pass
+fi
+
+it "the first pin still lands when the pins file starts empty or absent"
+# Guards against a fix that turns the ordinary case -- grep selecting nothing -- into a refusal
+# along with the genuine failure it is meant to catch. Two distinct starting shapes: "absent"
+# exercises the header-line creation at add_one's own "[ -f \"\$_pins\" ] || printf ..."; "empty"
+# (an existing, zero-byte file) skips that write and is the shape the contract's own exception
+# ("unless the original genuinely had none") has to cover. Watched green on unfixed code, on
+# purpose: the "|| true" this issue removes exists to make exactly this case work, and this is the
+# regression guard that must stay green once the fix lands, not a defect this issue is proving.
+_bad=""
+for _case in absent empty; do
+    [ -z "$_bad" ] || break
+    r=$(new_repo)
+    [ "$_case" = empty ] && : > "$r/grubstake.tools"
+    fake_release "$r" 1.0.0 >/dev/null
+    _out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1 ); _rc=$?
+    _n=$(grep -cvE '^[[:space:]]*(#|$)' "$r/grubstake.tools" 2>/dev/null || echo 0)
+    [ "$_rc" -eq 0 ] && [ "$_n" = "1" ] || _bad="$_case pins file: rc=$_rc, pin count=$_n, output: $_out"
+done
+if [ -n "$_bad" ]; then fail "add over an $_bad"; else pass; fi
+
+it "a rewrite that silently drops unrelated pins is refused, not just one that cannot read the file"
+# #96's second half: refuse any replacement with fewer pins than the original, not only ones caused
+# by an unreadable file. add_one's own rewrite line is grep -v -E "^$_tool[[:space:]]" "$_pins" |
+# grep -v '^$' > "$_pt" -- a grep shim intercepts only that exact invocation (double-quoted, so
+# [[:space:]] matches as literal text rather than expanding as a glob bracket expression in the
+# case pattern) and exits 1 with no output, the same shape a real grep -v takes when it genuinely
+# selects nothing, so this cannot be told apart from an ordinary empty match by anything short of
+# comparing pin counts. The pins file itself stays perfectly readable throughout, unlike the test
+# above -- proving the guard has to be a count check, not just a read-failure detector. A sentinel
+# file proves the shim actually fired, so this stays a real test rather than passing vacuously the
+# moment a fix changes the shape of the read.
+r=$(new_repo)
+pins "$r" "periphery 3.7.4 $SHA_A $SHA_A
+swiftformat 0.61.1 $SHA_B $SHA_B"
+_before=$(cat "$r/grubstake.tools")
+fake_release "$r" 1.0.0 >/dev/null
+_fired="$r/grep-shim-fired"
+_gshim="$r/grep-shim"; mkdir -p "$_gshim" || fixture_die "cannot create $_gshim"
+_realgrep="$(command -v grep)" || fixture_die "no real grep on PATH to wrap"
+cat > "$_gshim/grep" <<SHIM
+#!/bin/sh
+case "\$*" in
+    "-v -E ^swiftlint[[:space:]] $r/grubstake.tools")
+        : > "$_fired"
+        exit 1
+        ;;
+esac
+exec "$_realgrep" "\$@"
+SHIM
+chmod +x "$_gshim/grep" || fixture_die "cannot make the grep shim executable"
+_out=$( cd "$r" && PATH="$_gshim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1 ); _rc=$?
+_after=$(cat "$r/grubstake.tools")
+if [ ! -f "$_fired" ]; then
+    fail "fixture never intercepted add's rewrite grep; the shim did not run as expected"
+elif [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 despite a rewrite that dropped every unrelated pin. pins file now:
+$_after"
+elif [ "$_after" != "$_before" ]; then
+    fail "add refused, but the pins file was rewritten anyway (data lost). before:
+$_before
+after:
+$_after"
+elif [ -e "$r/grubstake.tools.lock" ]; then
+    fail "add refused, but left the pins lock behind: $r/grubstake.tools.lock"
+else
+    pass
+fi
+
 if [ "$NETWORK" = 1 ]; then
     printf '\nadd, network\n'
 

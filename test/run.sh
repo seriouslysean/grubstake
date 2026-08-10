@@ -803,6 +803,42 @@ else
     esac
 fi
 
+# "$_l"/"$_ps_line" are unquoted in the split that reads a pins line, so a field shaped like a glob
+# undergoes pathname expansion against cwd before any hex check ever sees it. A decoy file whose name
+# happens to match is a silent substitution, not a parse. Single-quoted so the literal "?" reaches
+# the pins file rather than being glob-expanded while this test itself is being evaluated.
+it "a positional sha shaped like a glob does not silently resolve to a decoy file in cwd"
+r=$(new_repo)
+_glob='?aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+_decoy='baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+printf '# grubstake pins: name version sha256-darwin sha256-linux\nswiftlint 0.63.2 %s %s\n' "$_glob" "$SHA_B" > "$r/grubstake.tools"
+: > "$r/$_decoy"
+_out=$(gs "$r" check); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "check exited 0 with a glob-shaped sha and a matching decoy file in cwd: $_out"
+else
+    case "$_out" in
+        *"sha256 must be 64 hex chars or -"*) pass ;;
+        *) fail "refused, but not with validate_pins' own malformed-sha message (decoy filename silently resolved instead): $_out" ;;
+    esac
+fi
+
+it "a keyed sha shaped like a glob does not silently resolve to a decoy file in cwd"
+r=$(new_repo)
+_glob='darwin=?aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+_decoy='darwin=baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+printf '# grubstake pins: name version sha256-darwin sha256-linux\nswiftlint 0.63.2 %s linux=%s\n' "$_glob" "$SHA_B" > "$r/grubstake.tools"
+: > "$r/$_decoy"
+_out=$(gs "$r" check); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "check exited 0 with a keyed glob-shaped sha and a matching decoy file in cwd: $_out"
+else
+    case "$_out" in
+        *"malformed keyed field"*) pass ;;
+        *) fail "refused, but not with validate_pins' own malformed-keyed-field message (decoy filename silently resolved instead): $_out" ;;
+    esac
+fi
+
 # ---------------------------------------------------------------------------- cache integrity
 
 printf '\ncache integrity\n'

@@ -149,10 +149,29 @@ pin_field() {
 
 pin_version() { pin_field "$1" 2 ; }
 
+# A "=" in field 3 marks the keyed form (key=sha256; unknown keys ignored, so a later platform is additive); add still only writes positional, forever -- see STABILITY.md.
 pin_sha() {
-    case "$2" in
-        darwin) pin_field "$1" 3 ;;
-        linux)  pin_field "$1" 4 ;;
+    _ps_tool="$1"
+    _ps_plat="$2"
+    _ps_line=$(grep -E "^$_ps_tool[[:space:]]" "$(pins_file)" 2>/dev/null || true)
+    [ -n "$_ps_line" ] || return 1
+    set -- $_ps_line
+    case "${3:-}" in
+        *=*)
+            shift 2
+            for _ps_kv in "$@"; do
+                case "$_ps_kv" in
+                    "$_ps_plat"=*) echo "${_ps_kv#*=}"; return 0 ;;
+                esac
+            done
+            echo -
+            ;;
+        *)
+            case "$_ps_plat" in
+                darwin) echo "${3:-}" ;;
+                linux)  echo "${4:-}" ;;
+            esac
+            ;;
     esac
 }
 
@@ -174,13 +193,30 @@ validate_pins() {
         case "$_l" in ''|\#*) continue ;; esac
         case "$_l" in [[:space:]]*) die "grubstake.tools:$_n line must not be indented" ;; esac
         set -- $_l
-        [ $# -eq 4 ] || die "grubstake.tools:$_n expected 4 fields, got $#"
-        is_known_tool "$1" || die "grubstake.tools:$_n unknown tool: $1"
-        echo "$2" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || die "grubstake.tools:$_n bad version: $2"
-        for _h in "$3" "$4"; do
-            [ "$_h" = "-" ] || echo "$_h" | grep -qE '^[0-9a-f]{64}$' \
-                || die "grubstake.tools:$_n sha256 must be 64 hex chars or -, got: $_h"
-        done
+        is_known_tool "${1:-}" || die "grubstake.tools:$_n unknown tool: ${1:-}"
+        echo "${2:-}" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || die "grubstake.tools:$_n bad version: ${2:-}"
+        case "${3:-}" in
+            *=*)
+                shift 2
+                _seen=""
+                for _kv in "$@"; do
+                    echo "$_kv" | grep -qE '^[a-z0-9_]+=[0-9a-f]{64}$' \
+                        || die "grubstake.tools:$_n malformed keyed field: $_kv"
+                    _key="${_kv%%=*}"
+                    case " $_seen " in
+                        *" $_key "*) die "grubstake.tools:$_n duplicate key: $_key" ;;
+                    esac
+                    _seen="$_seen $_key"
+                done
+                ;;
+            *)
+                [ $# -eq 4 ] || die "grubstake.tools:$_n expected 4 fields, got $#"
+                for _h in "$3" "$4"; do
+                    [ "$_h" = "-" ] || echo "$_h" | grep -qE '^[0-9a-f]{64}$' \
+                        || die "grubstake.tools:$_n sha256 must be 64 hex chars or -, got: $_h"
+                done
+                ;;
+        esac
     done < "$_f"
     _dupes="$(pinned_tools | LC_ALL=C sort | uniq -d)"
     [ -z "$_dupes" ] || die "grubstake.tools pins a tool more than once: $_dupes"

@@ -1690,6 +1690,31 @@ else
     pass
 fi
 
+it "a failing ensure never claims ok, even when every binary still verifies"
+# Same tamper as "ensure refuses a binary that no longer matches its receipt, rather than
+# reinstalling over it" just above: install_tool's mismatch branch flags the run, but the tampered
+# binary is still executable at the pinned path, so verify_tool's existence-only pass -- and
+# cmd_check's "ok" line, which cmd_ensure prints via cmd_check at the end of its own run -- has
+# nothing in front of it that can see the earlier failure. A red exit status with an "ok" line
+# above it is the bug: CI would read the tail and call the run green.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+[ "$_rc" -eq 0 ] || fixture_die "cannot seed a clean install to tamper with (rc $_rc): $_out"
+_bin="$r/.cache/swiftlint/$_sha/swiftlint"
+chmod u+w "$_bin"
+printf '#!/bin/sh\necho tampered\n' > "$_bin"
+chmod +x "$_bin"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 over a binary that no longer matches its receipt: $_out"
+elif printf '%s' "$_out" | grep -q '^\[grubstake\] ok ('; then
+    fail "ensure printed an ok line despite exiting $_rc over a receipt mismatch: $_out"
+else
+    pass
+fi
+
 it "a legacy entry is upgraded to a receipt without ceremony"
 # The receipt is written beside the existing binary in place, offline: no download, no destroy.
 # AGENTS.md 2 already covers what arrived over the network; this only records the hash of what is

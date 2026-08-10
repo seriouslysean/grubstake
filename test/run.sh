@@ -1970,6 +1970,31 @@ else
     pass
 fi
 
+it "a failing ensure never claims ok, even when every binary still verifies"
+# Same tamper as "ensure refuses a binary that no longer matches its receipt, rather than
+# reinstalling over it" just above: install_tool's mismatch branch flags the run, but the tampered
+# binary is still executable at the pinned path, so verify_tool's existence-only pass -- and
+# the "ok" line, which cmd_ensure now prints itself after calling verify_pinned at the end of its
+# own run -- has nothing in front of it that can see the earlier failure. A red exit status with
+# an "ok" line above it is the bug: CI would read the tail and call the run green.
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+[ "$_rc" -eq 0 ] || fixture_die "cannot seed a clean install to tamper with (rc $_rc): $_out"
+_bin="$r/.cache/swiftlint/$_sha/swiftlint"
+chmod u+w "$_bin"
+printf '#!/bin/sh\necho tampered\n' > "$_bin"
+chmod +x "$_bin"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 over a binary that no longer matches its receipt: $_out"
+elif printf '%s' "$_out" | grep -q '^\[grubstake\] ok ('; then
+    fail "ensure printed an ok line despite exiting $_rc over a receipt mismatch: $_out"
+else
+    pass
+fi
+
 it "a legacy entry is upgraded to a receipt without ceremony"
 # The receipt is written beside the existing binary in place, offline: no download, no destroy.
 # AGENTS.md 2 already covers what arrived over the network; this only records the hash of what is
@@ -2319,8 +2344,15 @@ elif [ ! -f "$_fmt_receipt" ]; then
     # `mkdir "$_lk" 2>/dev/null` discards the real errno either way -- so the diagnostic below is
     # what the next occurrence needs to tell those apart, per AGENTS.md 15.
     fail "ensure stopped at swiftlint's lock instead of continuing: swiftformat was never reached, no receipt recorded (swiftformat entry: $(ls -la "$r/.cache/swiftformat" 2>&1 | tr '\n' ';'); its lock: $([ -d "$r/.cache/swiftformat/$SHA_B.lock" ] && echo present || echo absent)): $_out"
-elif ! printf '%s' "$_out" | grep -q '^\[grubstake\] ok ('; then
-    fail "check's own summary never ran: $_out"
+# The old evidence here was the ok line's presence, standing in for "check's own summary ran" --
+# 33ae543 makes that proof invalid, since ok now only prints on a fully green run and this one never
+# is. Direct output evidence that swiftformat's own backfill actually ran replaces it, without
+# leaning on the receipt-file check above alone; the inverse right after is the ratified contract
+# itself, the same one "a failing ensure never claims ok, even when every binary still verifies" checks.
+elif ! printf '%s' "$_out" | grep -F -q "swiftformat 0.61.1: recorded a receipt for the existing entry"; then
+    fail "ensure's own output shows no sign swiftformat was reached after swiftlint's lock failure: $_out"
+elif printf '%s' "$_out" | grep -q '^\[grubstake\] ok ('; then
+    fail "ensure printed an ok line despite a lock failure leaving the run red: $_out"
 else
     pass
 fi
@@ -2372,8 +2404,8 @@ it "a lock failure on a cold install is scoped to that tool, and check runs its 
 # pre-planted so it never lands; swiftformat is pinned second as a plain receiptless legacy entry,
 # proving the install loop itself is scoped exactly as the sibling tests above already prove.
 # The install loop being scoped is not the same claim as check's own pass being scoped: verify_tool
-# still dies outright on a missing binary today, and cmd_ensure calls cmd_check after the install
-# loop, so that die is what kills the whole run before it ever reaches its own summary line. A
+# still dies outright on a missing binary today, and cmd_ensure calls verify_pinned after the
+# install loop, so that die is what kills the whole run before it ever reaches its own summary line. A
 # second, direct "check" invocation with a third tool that has no entry at all is what actually
 # discriminates that -- swiftformat's own binary exists either way, so it proves nothing about
 # whether check's loop can survive a missing one; xcbeautify's absence does, since it is only ever

@@ -32,15 +32,15 @@ usage() {
     cat <<'USAGE'
 grubstake: pinned, verified build tooling for iOS repos.
 
-  grubstake install            adopt this repo: write config, wire hooks, install tools
-  grubstake update [<tag>]     fetch a newer grubstake, replace this script, leave the diff
-  grubstake ensure             install and verify every pinned tool
-  grubstake check              confirm every pinned tool is installed for this platform
-  grubstake add <tool>@<ver>   pin a tool: download, hash, record it
-  grubstake path <tool>        absolute path to a pinned tool
-  grubstake doctor             report install health
-  grubstake clean              remove the entire cache, read-only entries included
-  grubstake version            print the version of this script
+  grubstake install                  adopt this repo: write config, wire hooks, install tools
+  grubstake update [<tag>]           fetch a newer grubstake, replace this script, leave the diff
+  grubstake ensure                   install and verify every pinned tool
+  grubstake check                    confirm every pinned tool is installed for this platform
+  grubstake add <tool>@<version>...  pin one or more tools: download, hash, record
+  grubstake path <tool>              absolute path to a pinned tool
+  grubstake doctor                   report install health
+  grubstake clean                    remove the entire cache, read-only entries included
+  grubstake version                  print the version of this script
 
 Tools: swiftlint, swiftformat, xcbeautify, periphery
 USAGE
@@ -151,10 +151,33 @@ pin_field() {
 
 pin_version() { pin_field "$1" 2 ; }
 
+# A "=" in field 3 marks the keyed form (key=sha256; unknown keys ignored, so a later platform is additive); add still only writes positional, forever -- see STABILITY.md.
 pin_sha() {
-    case "$2" in
-        darwin) pin_field "$1" 3 ;;
-        linux)  pin_field "$1" 4 ;;
+    _ps_tool="$1"
+    _ps_plat="$2"
+    _ps_line=$(grep -E "^$_ps_tool[[:space:]]" "$(pins_file)" 2>/dev/null || true)
+    [ -n "$_ps_line" ] || return 1
+    # Unquoted on purpose to split the line into fields, but that also pathname-expands any field
+    # shaped like a glob against cwd -- set -f/+f keeps a "?"-shaped sha from resolving to a decoy file.
+    set -f
+    set -- $_ps_line
+    set +f
+    case "${3:-}" in
+        *=*)
+            shift 2
+            for _ps_kv in "$@"; do
+                case "$_ps_kv" in
+                    "$_ps_plat"=*) printf '%s\n' "${_ps_kv#*=}"; return 0 ;;
+                esac
+            done
+            echo -
+            ;;
+        *)
+            case "$_ps_plat" in
+                darwin) printf '%s\n' "${3:-}" ;;
+                linux)  printf '%s\n' "${4:-}" ;;
+            esac
+            ;;
     esac
 }
 
@@ -175,14 +198,34 @@ validate_pins() {
         _n=$((_n + 1))
         case "$_l" in ''|\#*) continue ;; esac
         case "$_l" in [[:space:]]*) die "grubstake.tools:$_n line must not be indented" ;; esac
+        # Same reason as pin_sha's own set -f: an unquoted split pathname-expands a glob-shaped field.
+        set -f
         set -- $_l
-        [ $# -eq 4 ] || die "grubstake.tools:$_n expected 4 fields, got $#"
-        is_known_tool "$1" || die "grubstake.tools:$_n unknown tool: $1"
-        echo "$2" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || die "grubstake.tools:$_n bad version: $2"
-        for _h in "$3" "$4"; do
-            [ "$_h" = "-" ] || echo "$_h" | grep -qE '^[0-9a-f]{64}$' \
-                || die "grubstake.tools:$_n sha256 must be 64 hex chars or -, got: $_h"
-        done
+        set +f
+        is_known_tool "${1:-}" || die "grubstake.tools:$_n unknown tool: ${1:-}"
+        printf '%s\n' "${2:-}" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || die "grubstake.tools:$_n bad version: ${2:-}"
+        case "${3:-}" in
+            *=*)
+                shift 2
+                _seen=""
+                for _kv in "$@"; do
+                    printf '%s\n' "$_kv" | grep -qE '^[a-z0-9_]+=[0-9a-f]{64}$' \
+                        || die "grubstake.tools:$_n malformed keyed field: $_kv"
+                    _key="${_kv%%=*}"
+                    case " $_seen " in
+                        *" $_key "*) die "grubstake.tools:$_n duplicate key: $_key" ;;
+                    esac
+                    _seen="$_seen $_key"
+                done
+                ;;
+            *)
+                [ $# -eq 4 ] || die "grubstake.tools:$_n expected 4 fields, got $#"
+                for _h in "$3" "$4"; do
+                    [ "$_h" = "-" ] || printf '%s\n' "$_h" | grep -qE '^[0-9a-f]{64}$' \
+                        || die "grubstake.tools:$_n sha256 must be 64 hex chars or -, got: $_h"
+                done
+                ;;
+        esac
     done < "$_f"
     _dupes="$(pinned_tools | LC_ALL=C sort | uniq -d)"
     [ -z "$_dupes" ] || die "grubstake.tools pins a tool more than once: $_dupes"

@@ -880,20 +880,26 @@ cmd_ensure() {
         install_tool "$_tool" "$(pin_version "$_tool")" || _bad=1
     done
     [ "$_any" = 1 ] || warn "no tools pinned yet (run: grubstake add swiftlint@x.y.z)"
-    # Bare would let cmd_check's own now-possible non-zero return trip set -e before the line below runs.
-    cmd_check || _bad=1
-    # cmd_check's status alone still cannot stand in for this: a receipt mismatch above already left
-    # a binary that passes check's existence-only pass, so folding it in here is additive, not a substitute.
+    # Bare would let verify_pinned's own now-possible non-zero return trip set -e before the line below runs.
+    verify_pinned || _bad=1
+    # verify_pinned's status alone still cannot stand in for this: a receipt mismatch above already left
+    # a binary that passes verify's existence-only pass, so folding it in here is additive, not a substitute.
     [ "$_bad" = 0 ] || return 1
+    log "ok ($GRUBSTAKE_VERSION)"
 }
 
-cmd_check() {
-    validate_pins
+# No validate_pins and no ok line: shared by cmd_check and cmd_ensure, which each gate the ok line on their own failures too.
+verify_pinned() {
     _cbad=0
     for _tool in $(pinned_tools); do
         verify_tool "$_tool" "$(pin_version "$_tool")" || _cbad=1
     done
     [ "$_cbad" = 0 ] || return 1
+}
+
+cmd_check() {
+    validate_pins
+    verify_pinned || return 1
     log "ok ($GRUBSTAKE_VERSION)"
 }
 

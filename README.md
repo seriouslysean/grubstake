@@ -53,15 +53,15 @@ anything.
 ## Commands
 
 ```
-install            adopt this repo by wiring hooks, creating pins, and installing tools
-update [<tag>]     replace this script with a newer release
-ensure             install and verify every pinned tool
-check              confirm every pinned tool is installed for this platform
-add <tool>@<ver>   pin a tool by downloading it, hashing both platforms, and recording it
-path <tool>        print the absolute path to a pinned tool
-doctor             report the health of this install
-clean              remove the entire cache, read-only entries included
-version            print the version of this script
+install                   adopt this repo by wiring hooks, creating pins, and installing tools
+update [<tag>]            replace this script with a newer release
+ensure                    install and verify every pinned tool
+check                     confirm every pinned tool is installed for this platform
+add <tool>@<version>...   pin one or more tools by downloading, hashing, and recording them
+path <tool>               print the absolute path to a pinned tool
+doctor                    report the health of this install
+clean                     remove the entire cache, read-only entries included
+version                   print the version of this script
 ```
 
 ## Files

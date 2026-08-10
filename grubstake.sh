@@ -13,6 +13,8 @@ GRUBSTAKE_REPO_DEFAULT="https://github.com/seriouslysean/grubstake"
 GRUBSTAKE_RAW_DEFAULT="https://raw.githubusercontent.com/seriouslysean/grubstake"
 GRUBSTAKE_REPO="${GRUBSTAKE_REPO:-$GRUBSTAKE_REPO_DEFAULT}"
 GRUBSTAKE_RAW="${GRUBSTAKE_RAW:-$GRUBSTAKE_RAW_DEFAULT}"
+# Seeded here, not on first use: install_tool calls warn_sentinel_once once per pinned tool, and set -u would crash on an unset read from whichever tool happens to run first.
+_gst_sentinel_warned=0
 
 # ---------------------------------------------------------------------------- output
 
@@ -224,13 +226,27 @@ ensure_cache_sentinel() {
     # something that might not be grubstake's, the same never-infer-never-destroy rule clean itself
     # follows. Left unresolved, cmd_clean's own refusal is what keeps the root safe in the meantime.
     if [ -e "$_ecs_file" ] && [ ! -f "$_ecs_file" ]; then
-        warn "$_ecs_file is not a regular file; leaving it in place (clean will keep refusing this root until it is)"
-        return 1
+        return 2
     fi
     _ecs_tmp="$_ecs_root/.grubstake-cache-root.tmp.$$"
     printf 'cache-root 1\n' > "$_ecs_tmp" 2>/dev/null && mv "$_ecs_tmp" "$_ecs_file" 2>/dev/null && return 0
     rm -f "$_ecs_tmp" 2>/dev/null || true
     return 1
+}
+
+# install_tool calls this once per pinned tool; without a per-process latch the same wedged-root
+# fault would report once per tool instead of once per run, and the noise would scale with the pin
+# count rather than with the fault. rc 2 is the squat case ensure_cache_sentinel returns for a
+# non-regular-file at the sentinel path; anything else collapses to the generic could-not-write case,
+# which also covers the root itself being a plain file -- mkdir -p can never fix that, only removal can.
+warn_sentinel_once() {
+    [ "$_gst_sentinel_warned" = 0 ] || return 0
+    _gst_sentinel_warned=1
+    if [ "$1" = 2 ]; then
+        warn "$(cache_sentinel_file "$2") is not a regular file; remove or chown it by hand, or clean will keep refusing $2 until then"
+    else
+        warn "could not write the ownership sentinel under $2; chown or chmod the root by hand if it is a permissions problem, or remove $2 by hand if it is not even a directory, or clean will keep refusing it"
+    fi
 }
 
 # Hashes $1 and prints it only if it comes back 64 lowercase hex; prints nothing otherwise. Shared
@@ -397,8 +413,9 @@ install_tool() {
     # Ahead of every branch below, not only the fresh-install one: an already-existing entry still
     # means install_tool is actively managing this root right now (#95).
     _croot="$(cache_root)" || return 1
-    ensure_cache_sentinel "$_croot" \
-        || warn "$_tool: could not write the cache root's ownership sentinel at $_croot (clean will keep refusing it until one exists)"
+    # Captured, not chained on $?: dash's own $? after `if !` reads the negated status, not ensure_cache_sentinel's.
+    if ensure_cache_sentinel "$_croot"; then _secrc=0; else _secrc=$?; fi
+    [ "$_secrc" = 0 ] || warn_sentinel_once "$_secrc" "$_croot"
     # Existence alone is no longer proof: the receipt is what tells a verified entry apart from debris.
     if [ -x "$_bin" ]; then
         if entry_verified "$_dest" "$_tool"; then
@@ -919,6 +936,26 @@ cmd_doctor() {
     # unredirected by cache_root's own capture, so it must be silenced here or it leaks past this report.
     if _cache="$(cache_root 2>/dev/null)"; then
         printf 'cache      %s\n' "$_cache"
+        # Skipped when the cache dir does not exist yet: nothing has run against this root, so there is
+        # nothing to report -- install_tool's own backfill is what first writes the sentinel (#95).
+        # -L checked before -d: test -d follows a symlink to whatever real directory sits at the far
+        # end, which would call a symlinked root healthy when cmd_clean refuses that exact root outright.
+        if [ -L "$_cache" ]; then
+            printf 'sentinel   %s is a symlink; clean refuses this root outright, so its sentinel is never checked\n' "$_cache"
+        elif [ -e "$_cache" ] && [ ! -d "$_cache" ]; then
+            printf 'sentinel   %s is not a directory; clean refuses this root until it is removed or chowned by hand\n' "$_cache"
+        elif [ -d "$_cache" ]; then
+            _dsent="$(cache_sentinel_file "$_cache")"
+            if sentinel_verified "$_dsent"; then
+                printf 'sentinel   ok\n'
+            elif [ -e "$_dsent" ] && [ ! -f "$_dsent" ]; then
+                printf 'sentinel   %s is not a regular file; clean refuses this root until it is removed or chowned by hand\n' "$_dsent"
+            elif [ -f "$_dsent" ]; then
+                printf 'sentinel   %s is not grubstake'"'"'s; clean refuses this root\n' "$_dsent"
+            else
+                printf 'sentinel   nothing recorded yet, will be written on the next ensure\n'
+            fi
+        fi
     else
         printf 'cache      unresolved (platform unsupported)\n'
     fi

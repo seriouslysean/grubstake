@@ -775,6 +775,34 @@ else
     esac
 fi
 
+# dash's builtin echo is XSI: it interprets "\c" mid-argument as "stop output here", so validate_pins
+# and pin_sha piping a pins-file value through echo would silently truncate at "\c" and validate (or
+# resolve) the surviving prefix. Invoked with an explicit dash interpreter, not through the shebang,
+# because /bin/sh on this box is bash, which does not have this defect and so would not catch it.
+it "a keyed sha carrying a literal backslash-c is not silently truncated by dash's XSI echo"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 darwin=$SHA_A linux=$SHA_A\cJUNK"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" dash ./grubstake.sh check 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "check exited 0 under dash over a keyed sha with trailing garbage after a backslash-c: $_out"
+else
+    case "$_out" in
+        *"malformed keyed field"*) pass ;;
+        *) fail "refused, but not with the keyed-field guard's own message: $_out" ;;
+    esac
+fi
+
+it "a positional sha carrying a literal backslash-c is not silently truncated by dash's XSI echo"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A\cJUNK $SHA_B"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" dash ./grubstake.sh check 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "check exited 0 under dash over a positional sha with trailing garbage after a backslash-c: $_out"
+else
+    case "$_out" in
+        *"sha256 must be 64 hex chars or -"*) pass ;;
+        *) fail "refused, but not with the positional sha guard's own message: $_out" ;;
+    esac
+fi
+
 # ---------------------------------------------------------------------------- cache integrity
 
 printf '\ncache integrity\n'

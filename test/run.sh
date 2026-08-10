@@ -1694,9 +1694,9 @@ it "a failing ensure never claims ok, even when every binary still verifies"
 # Same tamper as "ensure refuses a binary that no longer matches its receipt, rather than
 # reinstalling over it" just above: install_tool's mismatch branch flags the run, but the tampered
 # binary is still executable at the pinned path, so verify_tool's existence-only pass -- and
-# cmd_check's "ok" line, which cmd_ensure prints via cmd_check at the end of its own run -- has
-# nothing in front of it that can see the earlier failure. A red exit status with an "ok" line
-# above it is the bug: CI would read the tail and call the run green.
+# the "ok" line, which cmd_ensure now prints itself after calling verify_pinned at the end of its
+# own run -- has nothing in front of it that can see the earlier failure. A red exit status with
+# an "ok" line above it is the bug: CI would read the tail and call the run green.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -2124,8 +2124,8 @@ it "a lock failure on a cold install is scoped to that tool, and check runs its 
 # pre-planted so it never lands; swiftformat is pinned second as a plain receiptless legacy entry,
 # proving the install loop itself is scoped exactly as the sibling tests above already prove.
 # The install loop being scoped is not the same claim as check's own pass being scoped: verify_tool
-# still dies outright on a missing binary today, and cmd_ensure calls cmd_check after the install
-# loop, so that die is what kills the whole run before it ever reaches its own summary line. A
+# still dies outright on a missing binary today, and cmd_ensure calls verify_pinned after the
+# install loop, so that die is what kills the whole run before it ever reaches its own summary line. A
 # second, direct "check" invocation with a third tool that has no entry at all is what actually
 # discriminates that -- swiftformat's own binary exists either way, so it proves nothing about
 # whether check's loop can survive a missing one; xcbeautify's absence does, since it is only ever

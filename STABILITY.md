@@ -12,7 +12,7 @@ install                    adopt this repo: write config, wire hooks, install to
 update [<tag>]             fetch a newer grubstake, replace this script
 ensure                     install and verify every pinned tool
 check                      confirm every pinned tool is installed for this platform
-add <tool>@<version> ...   pin one or more tools: download, hash, record
+add <tool>@<version>...   pin one or more tools: download, hash, record
 path <tool>                print the absolute path to a pinned tool
 doctor                     report install health
 clean                      remove the entire cache

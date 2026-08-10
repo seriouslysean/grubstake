@@ -4571,8 +4571,8 @@ _out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubs
 _after=$(cat "$_pins_path" 2>/dev/null || echo '')
 if [ "$_rc" -eq 0 ]; then
     fail "add exited 0 despite a later spec (notatool) failing: $_out"
-elif ! printf '%s\n' "$_after" | grep -qE '^swiftlint[[:space:]]'; then
-    fail "the earlier spec's pin (swiftlint) did not survive the later spec's failure. pins file now:
+elif ! printf '%s\n' "$_after" | grep -qE '^swiftlint[[:space:]]+0\.63\.2[[:space:]]'; then
+    fail "the earlier spec's pin (swiftlint 0.63.2) did not survive the later spec's failure. pins file now:
 $_after"
 elif printf '%s' "$_out" | grep -qiE 'untouched|unchanged|left alone|nothing was written|no changes (were )?made'; then
     fail "the failure output claims the pins file was left alone, but it was rewritten: $_out"
@@ -4585,7 +4585,10 @@ it "all specs in one add land in the pins file together, sorted"
 # result has to read as one coherent file (loop-append order is not sort order). tool_member names
 # swiftlint's and swiftformat's own archive entries differently only on linux, so one zip carrying
 # all four platform-qualified names lets a single curl shim serve every hash and install call for
-# both tools without a second fixture or a real network fetch.
+# both tools without a second fixture or a real network fetch. Every pin check below matches the
+# whole line -- name, version, and both 64-hex sha columns -- so a regression that records the
+# right tool name with the wrong version, or a real version with an empty ("-") or malformed sha
+# column, cannot read as "present" the way a bare name-anchored grep would.
 r=$(new_repo)
 _msrc="$r/multi-src"
 mkdir -p "$_msrc" || fixture_die "cannot create $_msrc"
@@ -4615,10 +4618,10 @@ _pins_path="$r/grubstake.tools"
 _out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@0.63.2 swiftformat@0.61.1 2>&1 ); _rc=$?
 if [ "$_rc" -ne 0 ]; then
     fail "add exited non-zero over two valid specs: $_out"
-elif ! grep -qE '^swiftlint[[:space:]]' "$_pins_path" 2>/dev/null; then
-    fail "swiftlint's pin is missing after a successful batched add: $_out"
-elif ! grep -qE '^swiftformat[[:space:]]' "$_pins_path" 2>/dev/null; then
-    fail "swiftformat's pin is missing after a successful batched add: $_out"
+elif ! grep -qE '^swiftlint[[:space:]]+0\.63\.2[[:space:]]+[0-9a-f]{64}[[:space:]]+[0-9a-f]{64}$' "$_pins_path" 2>/dev/null; then
+    fail "swiftlint's pin is not 0.63.2 with a real sha256 in both platform columns: $(grep '^swiftlint' "$_pins_path" 2>/dev/null)"
+elif ! grep -qE '^swiftformat[[:space:]]+0\.61\.1[[:space:]]+[0-9a-f]{64}[[:space:]]+[0-9a-f]{64}$' "$_pins_path" 2>/dev/null; then
+    fail "swiftformat's pin is not 0.61.1 with a real sha256 in both platform columns: $(grep '^swiftformat' "$_pins_path" 2>/dev/null)"
 elif [ "$(LC_ALL=C sort "$_pins_path")" != "$(cat "$_pins_path" 2>/dev/null)" ]; then
     fail "grubstake.tools is not sorted after a batched add:
 $(cat "$_pins_path" 2>/dev/null)"

@@ -68,9 +68,10 @@ Tags are annotated, so `git clone --branch vX.Y.Z` prints `refs/tags/... is not 
 then checks out the commit the tag points at. That is git dereferencing a tag object and is
 expected; the checkout is correct.
 
-Tags matching `v*` are protected against deletion, update, and force-push, because a version pin is
-only meaningful if the tag it names cannot move. A release cannot be corrected in place, so a
-mistake costs a patch version. That is deliberate.
+Tags matching `v*` are protected against deletion, update, and force-push, so a published tag
+cannot move silently. A release that may have been consumed is never corrected in place, and a
+mistake there costs a patch version. Deleting and re-cutting through the admin bypass is reserved
+for a release known to be unconsumed.
 
 `main` is protected the same way, so a rewrite requires disabling the ruleset first.
 

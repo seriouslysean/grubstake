@@ -673,6 +673,108 @@ r=$(new_repo); pins "$r" "garbage 1.0.0 $SHA_A $SHA_B"; expect_fail "$r" check
 it "a malformed pin fails doctor too"
 r=$(new_repo); pins "$r" "garbage 1.0.0 $SHA_A $SHA_B"; expect_fail "$r" doctor
 
+# ---------------------------------------------------------------------------- keyed pins
+
+printf '\nkeyed pins format\n'
+
+it "a keyed line resolves the version and both platforms' shas"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 darwin=$SHA_A linux=$SHA_B"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_B"
+_dshim="$r/uname-darwin"; mkdir -p "$_dshim" || fixture_die "cannot create the darwin uname shim dir"
+cat > "$_dshim/uname" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    -s) echo Darwin ;;
+    *)  echo Darwin ;;
+esac
+SHIM
+chmod +x "$_dshim/uname" || fixture_die "cannot make the darwin uname shim executable"
+_lshim="$r/uname-linux"; mkdir -p "$_lshim" || fixture_die "cannot create the linux uname shim dir"
+cat > "$_lshim/uname" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    -s) echo Linux ;;
+    -m) echo x86_64 ;;
+    *)  echo Linux ;;
+esac
+SHIM
+chmod +x "$_lshim/uname" || fixture_die "cannot make the linux uname shim executable"
+_dout=$( cd "$r" && PATH="$_dshim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftlint 2>/dev/null )
+_lout=$( cd "$r" && PATH="$_lshim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftlint 2>/dev/null )
+_dver=$(gs "$r" doctor | awk '/^  swiftlint/{print $2}')
+if [ "$_dout" != "$r/.cache/swiftlint/$SHA_A/swiftlint" ]; then
+    fail "darwin key did not resolve to the darwin-keyed sha: $_dout"
+elif [ "$_lout" != "$r/.cache/swiftlint/$SHA_B/swiftlint" ]; then
+    fail "linux key did not resolve to the linux-keyed sha: $_lout"
+elif [ "$_dver" != "0.63.2" ]; then
+    fail "version did not resolve off a keyed line: $_dver"
+else
+    pass
+fi
+
+it "positional and keyed lines coexist in one pins file"
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A
+xcbeautify 1.6.2 darwin=$SHA_B linux=$SHA_B"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+fake_install "$r" xcbeautify 1.6.2 "$SHA_B"
+expect_ok "$r" check
+
+it "an unknown key on a keyed line is tolerated, and the known key still resolves"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 darwin=$SHA_A linux=$SHA_A windows=$SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+expect_ok "$r" check
+
+it "a key omitted from a keyed line behaves like a positional '-'"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 darwin=$SHA_A"
+_lshim="$r/uname-linux"; mkdir -p "$_lshim" || fixture_die "cannot create the linux uname shim dir"
+cat > "$_lshim/uname" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    -s) echo Linux ;;
+    -m) echo x86_64 ;;
+    *)  echo Linux ;;
+esac
+SHIM
+chmod +x "$_lshim/uname" || fixture_die "cannot make the linux uname shim executable"
+_out=$( cd "$r" && PATH="$_lshim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftlint 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "path exited 0 on linux with no linux key pinned: $_out"
+else
+    case "$_out" in
+        *"no linux hash"*) pass ;;
+        *) fail "refused, but not with install_tool's own missing-hash message: $_out" ;;
+    esac
+fi
+
+it "a malformed keyed field is rejected as malformed, not merely non-zero"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 darwin=$SHA_A linux=nothex"
+_out=$(gs "$r" check); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "check exited 0 over a malformed keyed field: $_out"
+else
+    case "$_out" in
+        *"malformed keyed field"*) pass ;;
+        *) fail "refused, but not with the keyed-field guard's own message: $_out" ;;
+    esac
+fi
+
+it "a positional line missing both shas still dies under the keyed-aware parser"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2"; expect_fail "$r" check
+
+it "a keyed line with a duplicate key is rejected as a duplicate, not merely non-zero"
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 darwin=$SHA_A darwin=$SHA_B"
+_out=$(gs "$r" check); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "check exited 0 over a duplicate key: $_out"
+else
+    case "$_out" in
+        *"duplicate key"*) pass ;;
+        *) fail "refused, but not with the duplicate-key guard's own message: $_out" ;;
+    esac
+fi
+
 # ---------------------------------------------------------------------------- cache integrity
 
 printf '\ncache integrity\n'

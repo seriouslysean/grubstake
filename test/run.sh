@@ -1310,6 +1310,86 @@ else
 fi
 chmod -R u+w "$r/.cache" 2>/dev/null
 
+it "the sentinel warning for a non-directory cache root does not promise chown or chmod can fix it"
+# warn_sentinel_once's rc-2 branch (a directory squatting at the sentinel's own path, one level inside
+# the root) really is fixable by chown or chmod, and says so. rc 1 covers every other
+# ensure_cache_sentinel failure, and the cache ROOT itself being a plain file is one of them: mkdir -p
+# on that path can never succeed no matter who owns it or what mode it has, so the generic "chown or
+# chmod the root by hand" wording there promises a remedy that cannot work. Only removing the file
+# can. A curl that always fails (the same deliberate offline idiom the arch-guard tests above use)
+# keeps this offline: with the root unusable nothing can actually be installed, so install_tool falls
+# through past the sentinel warning to its own download attempt, and this test only cares about the
+# message already on stderr by then, not whether the install itself succeeds or what it fails on.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+rm -rf "$r/.cache" || fixture_die "cannot remove the fixture .cache directory"
+: > "$r/.cache" || fixture_die "cannot create a plain file at the cache root path"
+_curlshim="$r/curl-blocked"; mkdir -p "$_curlshim" || fixture_die "cannot create the blocked-curl shim dir"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_curlshim/curl"
+chmod +x "$_curlshim/curl" || fixture_die "cannot make the blocked curl shim executable"
+_out=$( cd "$r" && PATH="$_curlshim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 )
+_line=$(printf '%s\n' "$_out" | grep -F "$r/.cache")
+if [ -z "$_line" ]; then
+    fail "no line of ensure's output named the cache root's path at all: $_out"
+elif printf '%s\n' "$_line" | grep -qiE "run: grubstake"; then
+    fail "the sentinel warning points at a grubstake subcommand, but nothing grubstake can run fixes a root that is a plain file: $_line"
+elif ! printf '%s\n' "$_line" | grep -qi "remov"; then
+    fail "the sentinel warning for a non-directory cache root never says the root must be removed, the only remedy that can actually work: $_line"
+else
+    pass
+fi
+rm -f "$r/.cache" 2>/dev/null
+mkdir -p "$r/.cache" 2>/dev/null
+
+it "doctor names a non-directory cache root as broken instead of silently skipping the sentinel field"
+# The sentinel field is gated on "[ -d "\$_cache" ]", so a cache root that is a plain file -- the
+# worst state ensure_cache_sentinel can hit, per the test above -- skips the whole sentinel block
+# rather than reporting anything wrong. doctor exists to tell someone what is broken; silence here is
+# strictly worse than the squatting-directory case above, which at least prints a line.
+# The "not a directory" phrase is checked against the whole output, not scoped to whatever line also
+# names the root: cmd_doctor's own sibling branches are inconsistent about repeating the path (the
+# squatting-directory and foreign-sentinel branches embed it, the never-recorded-yet branch does not),
+# so requiring both on one line would fail a correct fix that follows the no-path-repeat branch's
+# style. The cache root's path is already guaranteed to appear on its own "cache      <root>" line
+# above, unconditionally, so this only needs the phrase to show up somewhere.
+r=$(new_repo)
+rm -rf "$r/.cache" || fixture_die "cannot remove the fixture .cache directory"
+: > "$r/.cache" || fixture_die "cannot create a plain file at the cache root path"
+_out=$(gs "$r" doctor)
+if printf '%s\n' "$_out" | grep -qE '^sentinel[[:space:]]+ok'; then
+    fail "doctor printed sentinel ok for a cache root that is not even a directory: $_out"
+elif ! printf '%s\n' "$_out" | grep -qiE "not a directory"; then
+    fail "doctor's output never said the cache root is not a directory, the one thing wrong with it: $_out"
+else
+    pass
+fi
+rm -f "$r/.cache" 2>/dev/null
+mkdir -p "$r/.cache" 2>/dev/null
+
+it "doctor does not report a symlinked cache root's sentinel as ok when clean refuses that same root outright"
+# cmd_clean refuses any symlink root outright ("rm -rf on a symlink unlinks the link and leaves its
+# target untouched while still reporting success"). doctor's own sentinel check follows the symlink
+# with a plain "[ -d ]" and reads whatever real sentinel sits at the far end, so a symlinked root with
+# a valid sentinel behind it prints "sentinel   ok" -- doctor calling healthy exactly what clean will
+# never touch.
+r=$(new_repo)
+rm -rf "$r/.cache" || fixture_die "cannot remove the fixture .cache directory"
+_real="$r/real-cache"
+mkdir -p "$_real" || fixture_die "cannot create the real cache directory"
+printf 'cache-root 1\n' > "$_real/.grubstake-cache-root" || fixture_die "cannot write a valid sentinel into the real cache directory"
+ln -s "$_real" "$r/.cache" || fixture_die "cannot symlink the cache root"
+_out=$(gs "$r" doctor)
+if printf '%s\n' "$_out" | grep -qE '^sentinel[[:space:]]+ok'; then
+    fail "doctor printed sentinel ok for a symlinked cache root, the exact root clean refuses outright: $_out"
+elif ! printf '%s\n' "$_out" | grep -qi "symlink"; then
+    fail "doctor's output never acknowledged the cache root is a symlink: $_out"
+else
+    pass
+fi
+rm -f "$r/.cache" 2>/dev/null
+rm -rf "$_real" 2>/dev/null
+mkdir -p "$r/.cache" 2>/dev/null
+
 it "an interrupted clean does not strand a full copy of the cache beside the root"
 # mv detaches the root, chmod clears read-only, then rm -rf removes the trash. A signal landing
 # between the mv and the rm -rf must not kill the process outright and leave the trash -- a full

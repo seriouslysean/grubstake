@@ -30,15 +30,15 @@ usage() {
     cat <<'USAGE'
 grubstake: pinned, verified build tooling for iOS repos.
 
-  grubstake install            adopt this repo: write config, wire hooks, install tools
-  grubstake update [<tag>]     fetch a newer grubstake, replace this script, leave the diff
-  grubstake ensure             install and verify every pinned tool
-  grubstake check              confirm every pinned tool is installed for this platform
-  grubstake add <tool>@<ver>   pin a tool: download, hash, record it
-  grubstake path <tool>        absolute path to a pinned tool
-  grubstake doctor             report install health
-  grubstake clean              remove the entire cache, read-only entries included
-  grubstake version            print the version of this script
+  grubstake install                  adopt this repo: write config, wire hooks, install tools
+  grubstake update [<tag>]           fetch a newer grubstake, replace this script, leave the diff
+  grubstake ensure                   install and verify every pinned tool
+  grubstake check                    confirm every pinned tool is installed for this platform
+  grubstake add <tool>@<version>...  pin one or more tools: download, hash, record
+  grubstake path <tool>              absolute path to a pinned tool
+  grubstake doctor                   report install health
+  grubstake clean                    remove the entire cache, read-only entries included
+  grubstake version                  print the version of this script
 
 Tools: swiftlint, swiftformat, xcbeautify, periphery
 USAGE

@@ -161,15 +161,15 @@ pin_sha() {
             shift 2
             for _ps_kv in "$@"; do
                 case "$_ps_kv" in
-                    "$_ps_plat"=*) echo "${_ps_kv#*=}"; return 0 ;;
+                    "$_ps_plat"=*) printf '%s\n' "${_ps_kv#*=}"; return 0 ;;
                 esac
             done
             echo -
             ;;
         *)
             case "$_ps_plat" in
-                darwin) echo "${3:-}" ;;
-                linux)  echo "${4:-}" ;;
+                darwin) printf '%s\n' "${3:-}" ;;
+                linux)  printf '%s\n' "${4:-}" ;;
             esac
             ;;
     esac
@@ -194,13 +194,13 @@ validate_pins() {
         case "$_l" in [[:space:]]*) die "grubstake.tools:$_n line must not be indented" ;; esac
         set -- $_l
         is_known_tool "${1:-}" || die "grubstake.tools:$_n unknown tool: ${1:-}"
-        echo "${2:-}" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || die "grubstake.tools:$_n bad version: ${2:-}"
+        printf '%s\n' "${2:-}" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || die "grubstake.tools:$_n bad version: ${2:-}"
         case "${3:-}" in
             *=*)
                 shift 2
                 _seen=""
                 for _kv in "$@"; do
-                    echo "$_kv" | grep -qE '^[a-z0-9_]+=[0-9a-f]{64}$' \
+                    printf '%s\n' "$_kv" | grep -qE '^[a-z0-9_]+=[0-9a-f]{64}$' \
                         || die "grubstake.tools:$_n malformed keyed field: $_kv"
                     _key="${_kv%%=*}"
                     case " $_seen " in
@@ -212,7 +212,7 @@ validate_pins() {
             *)
                 [ $# -eq 4 ] || die "grubstake.tools:$_n expected 4 fields, got $#"
                 for _h in "$3" "$4"; do
-                    [ "$_h" = "-" ] || echo "$_h" | grep -qE '^[0-9a-f]{64}$' \
+                    [ "$_h" = "-" ] || printf '%s\n' "$_h" | grep -qE '^[0-9a-f]{64}$' \
                         || die "grubstake.tools:$_n sha256 must be 64 hex chars or -, got: $_h"
                 done
                 ;;

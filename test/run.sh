@@ -2064,8 +2064,15 @@ elif [ ! -f "$_fmt_receipt" ]; then
     # `mkdir "$_lk" 2>/dev/null` discards the real errno either way -- so the diagnostic below is
     # what the next occurrence needs to tell those apart, per AGENTS.md 15.
     fail "ensure stopped at swiftlint's lock instead of continuing: swiftformat was never reached, no receipt recorded (swiftformat entry: $(ls -la "$r/.cache/swiftformat" 2>&1 | tr '\n' ';'); its lock: $([ -d "$r/.cache/swiftformat/$SHA_B.lock" ] && echo present || echo absent)): $_out"
-elif ! printf '%s' "$_out" | grep -q '^\[grubstake\] ok ('; then
-    fail "check's own summary never ran: $_out"
+# The old evidence here was the ok line's presence, standing in for "check's own summary ran" --
+# 33ae543 makes that proof invalid, since ok now only prints on a fully green run and this one never
+# is. Direct output evidence that swiftformat's own backfill actually ran replaces it, without
+# leaning on the receipt-file check above alone; the inverse right after is the ratified contract
+# itself, the same one "a failing ensure never claims ok, even when every binary still verifies" checks.
+elif ! printf '%s' "$_out" | grep -F -q "swiftformat 0.61.1: recorded a receipt for the existing entry"; then
+    fail "ensure's own output shows no sign swiftformat was reached after swiftlint's lock failure: $_out"
+elif printf '%s' "$_out" | grep -q '^\[grubstake\] ok ('; then
+    fail "ensure printed an ok line despite a lock failure leaving the run red: $_out"
 else
     pass
 fi

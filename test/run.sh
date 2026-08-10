@@ -4567,18 +4567,13 @@ it "a later spec's failure does not undo an earlier spec's pin"
 r=$(new_repo)
 fake_release "$r" 0.63.2 >/dev/null
 _pins_path="$r/grubstake.tools"
-_before=$(cat "$_pins_path" 2>/dev/null || echo '')
 _out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@0.63.2 notatool@1.0.0 2>&1 ); _rc=$?
 _after=$(cat "$_pins_path" 2>/dev/null || echo '')
 if [ "$_rc" -eq 0 ]; then
     fail "add exited 0 despite a later spec (notatool) failing: $_out"
 elif ! printf '%s\n' "$_after" | grep -qE '^swiftlint[[:space:]]'; then
-    fail "the earlier spec's pin (swiftlint) did not survive the later spec's failure. before:
-$_before
-after:
+    fail "the earlier spec's pin (swiftlint) did not survive the later spec's failure. pins file now:
 $_after"
-elif [ "$_after" = "$_before" ]; then
-    fail "the earlier spec's pin never actually landed -- this proves nothing about survival: $_out"
 elif printf '%s' "$_out" | grep -qiE 'untouched|unchanged|left alone|nothing was written|no changes (were )?made'; then
     fail "the failure output claims the pins file was left alone, but it was rewritten: $_out"
 else

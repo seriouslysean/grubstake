@@ -57,8 +57,8 @@ The pre-commit and post-commit behaviour is a contract, not the hook files' byte
 
 - pre-commit verifies pinned tools and lints staged Swift only when relevant files are staged,
   runs any repo-local gates in `.githooks/pre-commit.d/`, and blocks the commit on failure.
-- post-commit reports when a newer grubstake release exists. It only reports, and never changes
-  anything, and never blocks a commit.
+- post-commit reports when a newer grubstake release exists. It only reports, touches nothing
+  but its own advisory cache inside `.git`, and never blocks a commit.
 
 The hook scripts themselves may be rewritten release to release; only this behaviour is promised.
 

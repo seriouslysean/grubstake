@@ -155,7 +155,11 @@ pin_sha() {
     _ps_plat="$2"
     _ps_line=$(grep -E "^$_ps_tool[[:space:]]" "$(pins_file)" 2>/dev/null || true)
     [ -n "$_ps_line" ] || return 1
+    # Unquoted on purpose to split the line into fields, but that also pathname-expands any field
+    # shaped like a glob against cwd -- set -f/+f keeps a "?"-shaped sha from resolving to a decoy file.
+    set -f
     set -- $_ps_line
+    set +f
     case "${3:-}" in
         *=*)
             shift 2
@@ -192,7 +196,10 @@ validate_pins() {
         _n=$((_n + 1))
         case "$_l" in ''|\#*) continue ;; esac
         case "$_l" in [[:space:]]*) die "grubstake.tools:$_n line must not be indented" ;; esac
+        # Same reason as pin_sha's own set -f: an unquoted split pathname-expands a glob-shaped field.
+        set -f
         set -- $_l
+        set +f
         is_known_tool "${1:-}" || die "grubstake.tools:$_n unknown tool: ${1:-}"
         printf '%s\n' "${2:-}" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || die "grubstake.tools:$_n bad version: ${2:-}"
         case "${3:-}" in

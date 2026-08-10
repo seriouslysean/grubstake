@@ -4558,6 +4558,79 @@ else
     pass
 fi
 
+it "a later spec's failure does not undo an earlier spec's pin"
+# #102: cmd_add loops add_one over every argument, committing each spec's pin (and rewriting
+# grubstake.tools) before the next spec is even looked at. A batch that fails partway through must
+# not cost the specs that already landed -- and whatever reports the failure must not claim the
+# file was left alone when it was not. notatool fails inside is_known_tool, before add_one ever
+# looks at the network, so this stays offline and deterministic without a second curl fixture.
+r=$(new_repo)
+fake_release "$r" 0.63.2 >/dev/null
+_pins_path="$r/grubstake.tools"
+_before=$(cat "$_pins_path" 2>/dev/null || echo '')
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@0.63.2 notatool@1.0.0 2>&1 ); _rc=$?
+_after=$(cat "$_pins_path" 2>/dev/null || echo '')
+if [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 despite a later spec (notatool) failing: $_out"
+elif ! printf '%s\n' "$_after" | grep -qE '^swiftlint[[:space:]]'; then
+    fail "the earlier spec's pin (swiftlint) did not survive the later spec's failure. before:
+$_before
+after:
+$_after"
+elif [ "$_after" = "$_before" ]; then
+    fail "the earlier spec's pin never actually landed -- this proves nothing about survival: $_out"
+elif printf '%s' "$_out" | grep -qiE 'untouched|unchanged|left alone|nothing was written|no changes (were )?made'; then
+    fail "the failure output claims the pins file was left alone, but it was rewritten: $_out"
+else
+    pass
+fi
+
+it "all specs in one add land in the pins file together, sorted"
+# #102's other half: every spec in a batched call has to be recorded, not just processed, and the
+# result has to read as one coherent file (loop-append order is not sort order). tool_member names
+# swiftlint's and swiftformat's own archive entries differently only on linux, so one zip carrying
+# all four platform-qualified names lets a single curl shim serve every hash and install call for
+# both tools without a second fixture or a real network fetch.
+r=$(new_repo)
+_msrc="$r/multi-src"
+mkdir -p "$_msrc" || fixture_die "cannot create $_msrc"
+printf '#!/bin/sh\necho 0.63.2\n' > "$_msrc/swiftlint" || fixture_die "cannot write the fixture swiftlint member"
+printf '#!/bin/sh\necho 0.63.2\n' > "$_msrc/swiftlint-static" || fixture_die "cannot write the fixture swiftlint-static member"
+printf '#!/bin/sh\necho 0.61.1\n' > "$_msrc/swiftformat" || fixture_die "cannot write the fixture swiftformat member"
+printf '#!/bin/sh\necho 0.61.1\n' > "$_msrc/swiftformat_linux" || fixture_die "cannot write the fixture swiftformat_linux member"
+chmod +x "$_msrc/swiftlint" "$_msrc/swiftlint-static" "$_msrc/swiftformat" "$_msrc/swiftformat_linux" \
+    || fixture_die "cannot make the fixture archive members executable"
+_mzip="$r/multi-release.zip"
+( cd "$_msrc" && zip -q "$_mzip" swiftlint swiftlint-static swiftformat swiftformat_linux ) \
+    || fixture_die "cannot zip the multi-tool fixture release"
+_mshim="$r/curl-shim"
+mkdir -p "$_mshim" || fixture_die "cannot create the fixture curl shim dir"
+cat > "$_mshim/curl" <<SHIM
+#!/bin/sh
+_out=""; _prev=""
+for a in "\$@"; do
+    [ "\$_prev" = "-o" ] && _out="\$a"
+    _prev="\$a"
+done
+[ -n "\$_out" ] || exit 1
+cp "$_mzip" "\$_out"
+SHIM
+chmod +x "$_mshim/curl" || fixture_die "cannot make the fixture curl shim executable"
+_pins_path="$r/grubstake.tools"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@0.63.2 swiftformat@0.61.1 2>&1 ); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "add exited non-zero over two valid specs: $_out"
+elif ! grep -qE '^swiftlint[[:space:]]' "$_pins_path" 2>/dev/null; then
+    fail "swiftlint's pin is missing after a successful batched add: $_out"
+elif ! grep -qE '^swiftformat[[:space:]]' "$_pins_path" 2>/dev/null; then
+    fail "swiftformat's pin is missing after a successful batched add: $_out"
+elif [ "$(LC_ALL=C sort "$_pins_path")" != "$(cat "$_pins_path" 2>/dev/null)" ]; then
+    fail "grubstake.tools is not sorted after a batched add:
+$(cat "$_pins_path" 2>/dev/null)"
+else
+    pass
+fi
+
 if [ "$NETWORK" = 1 ]; then
     printf '\nadd, network\n'
 

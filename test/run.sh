@@ -245,6 +245,41 @@ SHIM
     chmod +x "$_mvsdir/mv" || fixture_die "cannot make the mv-source-pause shim executable"
 }
 
+# Pauses "mv" only when its shape matches restore_detached's own rename: last argument exactly $4
+# (the cache root) AND first argument ending in "/detached". Neither test alone can distinguish
+# restore_detached's rename from cmd_clean's own earlier detach rename, because the two calls name
+# the same pair of paths in reversed argument order -- matching only the destination happens to work
+# today (nothing else in cmd_clean's own mv calls targets the root), but that is incidental to this
+# call site, not a property the shape guarantees. Matching only the source is not an option at all:
+# the source is $_trash/detached, and $_trash is mktemp'd, unpredictable by design, the same reason
+# mv_source_pause_shim above cannot be pointed at this call either.
+mv_restore_pause_shim() {
+    _mvrdir="$1"; _mvrreached="$2"; _mvrgo="$3"; _mvrroot="$4"
+    mkdir -p "$_mvrdir" || fixture_die "cannot create the mv-restore-pause shim dir $_mvrdir"
+    _mvrreal="$(command -v mv)" || fixture_die "no real mv on PATH to wrap"
+    cat > "$_mvrdir/mv" <<SHIM
+#!/bin/sh
+_mvrlast=""
+for _a in "\$@"; do _mvrlast="\$_a"; done
+case "\$1" in
+    */detached)
+        if [ "\$_mvrlast" = "$_mvrroot" ]; then
+            echo "\$\$" > "$_mvrreached.pid"
+            : > "$_mvrreached"
+            _mvrw=0
+            while [ ! -f "$_mvrgo" ]; do
+                _mvrw=\$((_mvrw + 1))
+                [ "\$_mvrw" -gt 300 ] && { echo "mv-restore-pause shim: timed out waiting for the go flag" >&2; exit 1; }
+                sleep 0.05 2>/dev/null || sleep 1
+            done
+        fi
+        ;;
+esac
+exec "$_mvrreal" "\$@"
+SHIM
+    chmod +x "$_mvrdir/mv" || fixture_die "cannot make the mv-restore-pause shim executable"
+}
+
 # Pauses "sed" only when its last argument (the file it reads) falls under $4, a known prefix --
 # cmd_clean's own post-detach window needs the pause to land after the rename but before
 # sentinel_verified decides anything, and sentinel_verified's own "[ -f ]" existence check is a
@@ -1382,6 +1417,56 @@ else
     pass
 fi
 chmod -R u+w "$_victim" 2>/dev/null
+
+it "a root recreated during an unverified restore nests the content instead of replacing it, and clean names the nested path"
+# restore_detached's own finding: mv reports 0 whether it replaces $_root or nests into a directory
+# something else recreated there in the gap, so believing that exit status alone cannot tell a real
+# restore from a nest -- the "[ ! -e "$_root/detached" ]" check after the mv is what closes that gap,
+# and this is the one race it exists for that nothing here yet forces. No sentinel at all in the
+# fixture, not a foreign one like the swap test above: this only needs to route clean into
+# restore_detached, and an absent sentinel fails sentinel_verified's own "[ -f ]" outright before it
+# ever reaches sed, so mv_restore_pause_shim is the only shim needed here. The pause has to land on
+# the RESTORE mv specifically, not the detach mv that runs first -- the two calls name the same pair
+# of paths in reversed argument order, so matching only a destination or only a source cannot always
+# tell them apart; matching the shape (source ending "/detached", destination the known root) can.
+# Recreating $_root with a valid sentinel inside the pause window is what makes the real mv, once
+# released, nest instead of replace: the root is occupied again by the time it lands. The assertion
+# is on the message naming the NESTED path, not just the root -- drop the outcome check and
+# restore_detached still returns 0 (the mv itself succeeded), so clean dies blaming a root that
+# "changed underneath clean before the sentinel could be verified," a message that reads plausible
+# and never says the content actually landed one level down from where it points.
+r=$(new_repo)
+_marker="untracked.txt"; _markercontent="do not delete me"
+printf '%s\n' "$_markercontent" > "$r/.cache/$_marker" || fixture_die "cannot write $r/.cache/$_marker"
+_shim="$r/mv-shim"; _reached="$r/reached"; _go="$r/go"
+mv_restore_pause_shim "$_shim" "$_reached" "$_go" "$r/.cache"
+( cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh clean >"$r/out" 2>&1; echo $? > "$r/rc" ) &
+_bgpid=$!
+_w=0
+while [ ! -f "$_reached" ]; do
+    _w=$((_w + 1))
+    [ "$_w" -gt 300 ] && fixture_die "clean never reached the paused restore"
+    sleep 0.05 2>/dev/null || sleep 1
+done
+mkdir -p "$r/.cache" || fixture_die "cannot recreate $r/.cache during the pause window"
+printf 'cache-root 1\n' > "$r/.cache/.grubstake-cache-root" || fixture_die "cannot write a valid sentinel into the recreated root"
+: > "$_go"
+wait "$_bgpid" 2>/dev/null
+[ -f "$r/rc" ] || fixture_die "the backgrounded clean never recorded an exit status"
+_rc="$(cat "$r/rc")"
+_out="$(cat "$r/out" 2>/dev/null)"
+if [ "$_rc" -eq 0 ]; then
+    fail "clean exited 0 after its restore landed nested instead of replacing the root: $_out"
+elif [ ! -f "$_reached" ]; then
+    fail "the restore-mv shim never fired, so this run proves nothing about the nest: $_out"
+elif [ ! -d "$r/.cache/detached" ] || [ "$(cat "$r/.cache/detached/$_marker" 2>/dev/null)" != "$_markercontent" ]; then
+    fail "the detached content is not at $r/.cache/detached where a nested restore would leave it: $_out"
+else
+    case "$_out" in
+        *"$r/.cache/detached"*) pass ;;
+        *) fail "clean refused correctly and the content is nested at $r/.cache/detached, but the message never names that nested path: $_out" ;;
+    esac
+fi
 
 it "clean racing a concurrent ensure fails fast with the real cause, not a five-second stale-lock stall"
 # #56: clean renames the cache root aside mid-install (see the comment on the mv above), and

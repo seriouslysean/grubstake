@@ -237,14 +237,15 @@ ensure_cache_sentinel() {
 # install_tool calls this once per pinned tool; without a per-process latch the same wedged-root
 # fault would report once per tool instead of once per run, and the noise would scale with the pin
 # count rather than with the fault. rc 2 is the squat case ensure_cache_sentinel returns for a
-# non-regular-file at the sentinel path; anything else collapses to the generic could-not-write case.
+# non-regular-file at the sentinel path; anything else collapses to the generic could-not-write case,
+# which also covers the root itself being a plain file -- mkdir -p can never fix that, only removal can.
 warn_sentinel_once() {
     [ "$_gst_sentinel_warned" = 0 ] || return 0
     _gst_sentinel_warned=1
     if [ "$1" = 2 ]; then
         warn "$(cache_sentinel_file "$2") is not a regular file; remove or chown it by hand, or clean will keep refusing $2 until then"
     else
-        warn "could not write the ownership sentinel under $2; chown or chmod the root by hand, or clean will keep refusing it"
+        warn "could not write the ownership sentinel under $2; chown or chmod the root by hand if it is a permissions problem, or remove $2 by hand if it is not even a directory, or clean will keep refusing it"
     fi
 }
 
@@ -937,7 +938,13 @@ cmd_doctor() {
         printf 'cache      %s\n' "$_cache"
         # Skipped when the cache dir does not exist yet: nothing has run against this root, so there is
         # nothing to report -- install_tool's own backfill is what first writes the sentinel (#95).
-        if [ -d "$_cache" ]; then
+        # -L checked before -d: test -d follows a symlink to whatever real directory sits at the far
+        # end, which would call a symlinked root healthy when cmd_clean refuses that exact root outright.
+        if [ -L "$_cache" ]; then
+            printf 'sentinel   %s is a symlink; clean refuses this root outright, so its sentinel is never checked\n' "$_cache"
+        elif [ -e "$_cache" ] && [ ! -d "$_cache" ]; then
+            printf 'sentinel   %s is not a directory; clean refuses this root until it is removed or chowned by hand\n' "$_cache"
+        elif [ -d "$_cache" ]; then
             _dsent="$(cache_sentinel_file "$_cache")"
             if sentinel_verified "$_dsent"; then
                 printf 'sentinel   ok\n'

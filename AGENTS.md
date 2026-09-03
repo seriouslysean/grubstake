@@ -6,7 +6,7 @@ Rules for working in this repo.
 2. Verify downloaded bytes against a recorded hash, because a version tag is not a checksum.
 3. Assert that a tool reports the version it was pinned to, since the hash only proves what arrived.
 4. Let the machine write pins and let a human review the diff.
-5. Never update automatically, and never commit on the user's behalf.
+5. Never update automatically, and commit and open pull requests on the user's behalf, because the user reviews the diff and merges.
 6. Wrap the whole script in `main()` and call it on the last line, so a truncated file is a syntax error rather than a half-executed one.
 7. Never rewrite a file that is currently being read, and stage the replacement first instead.
 8. Replace files by renaming, because a rename swaps the inode and leaves existing readers intact.

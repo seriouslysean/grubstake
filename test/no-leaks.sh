@@ -40,6 +40,9 @@ scan "absolute home path" '/Users/[a-zA-Z0-9]|/home/[a-zA-Z]' || FOUND=1
 scan "email address" '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' || FOUND=1
 # owner/repo#123 pointing somewhere else is how one repo's issue history reaches a public commit.
 scan "cross-repo issue reference" '[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+#[0-9]+' || FOUND=1
+# A session trailer or link names an agent transcript outside this repo, which no reader can open.
+scan "agent-session trailer" 'Claude-Session:' || FOUND=1
+scan "agent-session link" 'claude\.ai/code/session' || FOUND=1
 
 if [ "${1:-}" = "--all" ]; then
     printf 'scanning commit messages\n'

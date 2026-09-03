@@ -5241,6 +5241,49 @@ else
     pass
 fi
 
+it "scan-for-leaks refuses an agent-session trailer typed into a commit message"
+# The tracked-file tier reads committed content, so a leak typed into a message is invisible to it.
+_m="$ROOT/msg-trailer"
+printf 'fix: something\n\nClaude-Session: a-transcript-identifier\n' > "$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+if "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "an agent-session trailer in a commit message was not refused"
+else
+    pass
+fi
+
+it "scan-for-leaks accepts a commit message carrying none of the refused shapes"
+# The banner is asserted, not just the exit status: an unrecognised flag falls through to the
+# tracked-file scan, which passes on this repo's own clean tree and looks exactly like a scanned
+# message. Green off the wrong tier is the failure this assertion exists to catch.
+_m="$ROOT/msg-clean"
+printf 'fix: pins resolve from the script\n\nCloses #14\n' > "$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+_out="$("$REPO/test/scan-for-leaks.sh" --message "$_m" 2>&1)"; _rc=$?
+case "$_out" in *'scanning the commit message'*) : ;; *) _rc=99 ;; esac
+if [ "$_rc" -eq 0 ]; then pass; else fail "a clean commit message was not scanned clean (rc $_rc): $_out"; fi
+
+it "scan-for-leaks reads only what becomes the message, never git's comments or verbose diff"
+# git strips neither before commit-msg runs, and the verbose diff of a change to the scanner itself
+# carries every shape the scanner refuses, so an unstripped read would refuse its own commit.
+_m="$ROOT/msg-verbose"
+{
+    printf 'fix: something\n#\n# Claude-Session: a comment git will strip\n'
+    printf '# ------------------------ >8 ------------------------\n'
+    printf 'diff --git a/x b/x\n+Claude-Session: inside the verbose diff\n'
+} > "$_m" || fixture_die "cannot write the message fixture at $_m"
+_out="$("$REPO/test/scan-for-leaks.sh" --message "$_m" 2>&1)"; _rc=$?
+case "$_out" in *'scanning the commit message'*) : ;; *) _rc=99 ;; esac
+if [ "$_rc" -eq 0 ]; then pass; else fail "the scan read a comment or past the scissors line (rc $_rc): $_out"; fi
+
+it "scan-for-leaks refuses a commit message file it cannot read"
+# Rule 16: a gate handed nothing to scan has not passed, it has not run.
+if "$REPO/test/scan-for-leaks.sh" --message "$ROOT/msg-absent" >/dev/null 2>&1; then
+    fail "a missing commit message file was treated as clean"
+else
+    pass
+fi
+
 # ---------------------------------------------------------------------------- ci workflows
 
 printf '\nci workflows\n'

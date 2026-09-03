@@ -5318,6 +5318,31 @@ else
     pass
 fi
 
+it "the commit-msg hook refuses a leaky message and accepts a clean one"
+# The message tier is only a gate if git actually runs it: the hook has to carry git's own event
+# name, keep its exec bit, and sit under the wired hooksPath. Rule 16 -- a hook that skips silently
+# is the failure, so drive it through a real commit rather than by calling the script.
+r=$(leaks_repo)
+if [ ! -x "$REPO/.githooks/commit-msg" ]; then
+    fail "no executable .githooks/commit-msg in this repo, so nothing gates a commit message"
+else
+    mkdir -p "$r/.githooks" || fixture_die "cannot create $r/.githooks"
+    cp "$REPO/.githooks/commit-msg" "$r/.githooks/commit-msg" || fixture_die "cannot copy the commit-msg hook into $r"
+    chmod +x "$r/.githooks/commit-msg" || fixture_die "cannot make the commit-msg hook executable in $r"
+    # git -C, not cd-then-config: the target repo is named on the command rather than inferred from
+    # a cwd, which is how a fixture's hooksPath has escaped into the invoking repo before.
+    git -C "$r" config core.hooksPath .githooks || fixture_die "cannot set core.hooksPath in $r"
+    printf 'chore: fixture\n\nClaude-Session: a-transcript-identifier\n' > "$r/leaky-msg" \
+        || fixture_die "cannot write the leaky message fixture in $r"
+    if ! ( cd "$r" && git commit -q --allow-empty -m 'chore: a clean fixture message' ) >/dev/null 2>&1; then
+        fail "the commit-msg hook refused a message carrying none of the refused shapes"
+    elif ( cd "$r" && git commit -q --allow-empty -F leaky-msg ) >/dev/null 2>&1; then
+        fail "the commit-msg hook accepted a message carrying an agent-session trailer"
+    else
+        pass
+    fi
+fi
+
 # ---------------------------------------------------------------------------- ci workflows
 
 printf '\nci workflows\n'

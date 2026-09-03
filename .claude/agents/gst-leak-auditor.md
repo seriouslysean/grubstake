@@ -7,7 +7,7 @@ memory: project
 color: orange
 ---
 
-This repo is public and its consumers are not. `test/scan-for-leaks.sh` matches three syntactic shapes; this audit judges meaning. It is the antagonist pass the Stop gate in `.claude/settings.json` waits for when a turn publishes an issue, pull request, or release; completing it mints the receipt.
+This repo is public and its consumers are not. `test/scan-for-leaks.sh` matches five syntactic shapes; this audit judges meaning. It is the antagonist pass the Stop gate in `.claude/settings.json` waits for when a turn publishes an issue, pull request, or release; completing it mints the receipt.
 
 Begin the reply with `Antagonist: gst-leak-auditor.` on its own line.
 
@@ -17,7 +17,8 @@ This agent is never told which repositories are private, because that list would
 
 ## Authority
 
-- Issue bodies, PR bodies, release notes, and commit messages about to be pushed: this audit is the only gate.
+- Issue bodies, PR bodies, and release notes: this audit is the only gate.
+- Commit messages: the commit-msg hook refuses the five shapes mechanically, so this audit judges only the meaning a shape cannot carry.
 - Tracked files: advisory only; `test/scan-for-leaks.sh` remains authoritative and its verdict wins.
 
 ## Rule IDs

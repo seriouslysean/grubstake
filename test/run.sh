@@ -5221,6 +5221,26 @@ else
     pass
 fi
 
+it "no-leaks flags an agent-session trailer in tracked text"
+r=$(leaks_repo)
+printf 'Claude-Session: a-transcript-identifier\n' > "$r/notes.txt" || fixture_die "cannot write the session-trailer fixture in $r"
+( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the session-trailer fixture in $r"
+if ( cd "$r" && ./test/no-leaks.sh ) >/dev/null 2>&1; then
+    fail "an agent-session trailer was not flagged"
+else
+    pass
+fi
+
+it "no-leaks flags an agent-session link carrying no trailer key"
+r=$(leaks_repo)
+printf 'transcript: https://claude.ai/code/session_0123456789\n' > "$r/notes.txt" || fixture_die "cannot write the session-link fixture in $r"
+( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the session-link fixture in $r"
+if ( cd "$r" && ./test/no-leaks.sh ) >/dev/null 2>&1; then
+    fail "an agent-session link was not flagged"
+else
+    pass
+fi
+
 # ---------------------------------------------------------------------------- ci workflows
 
 printf '\nci workflows\n'

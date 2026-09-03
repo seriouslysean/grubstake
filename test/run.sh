@@ -3479,6 +3479,16 @@ for _hook in pre-commit post-commit; do
 done
 [ -z "$_bad" ] && pass || fail "embedded copy differs from (or is missing for) hooks/:$_bad"
 
+it "this repo's own installed hooks cannot drift from hooks/"
+# Dogfooding puts a third copy of each hook in .githooks/, committed. install refreshes it, but
+# nothing re-runs install on its own, so an edit to hooks/ would leave the copy this repo actually
+# executes a version behind without a sound.
+_bad=""
+for _hook in pre-commit post-commit; do
+    cmp -s "$HOOKS/$_hook" "$REPO/.githooks/$_hook" || _bad="$_bad $_hook"
+done
+[ -z "$_bad" ] && pass || fail ".githooks/ differs from (or is missing) hooks/:$_bad -- re-run ./grubstake.sh install"
+
 it "install adopts a repo with no network access"
 # Shadowing curl, rather than trusting this sandbox's real reachability (which has open egress to
 # GitHub -- v0.3.2/hooks/pre-commit already resolves there), is what makes this test fail today for
@@ -5183,9 +5193,9 @@ if "$(dirname "$0")/gates.sh" >/dev/null 2>&1; then pass; else fail "$("$(dirnam
 printf '\npublication safety\n'
 
 it "nothing tracked identifies a consumer, a person, or a machine"
-if "$(dirname "$0")/no-leaks.sh" >/dev/null 2>&1; then pass; else fail "$("$(dirname "$0")/no-leaks.sh" 2>&1 | tail -3)"; fi
+if "$(dirname "$0")/scan-for-leaks.sh" >/dev/null 2>&1; then pass; else fail "$("$(dirname "$0")/scan-for-leaks.sh" 2>&1 | tail -3)"; fi
 
-# The test above only proves no-leaks.sh's exit code against this repo's own, already-clean tree --
+# The test above only proves scan-for-leaks.sh's exit code against this repo's own, already-clean tree --
 # it cannot prove either scan path below actually fires, and a no-op regression in either one would
 # leave it green. A throwaway repo with a known-dirty shape closes that.
 leaks_repo() {
@@ -5196,49 +5206,151 @@ leaks_repo() {
       && git config user.name "grubstake suite" \
       && git config commit.gpgsign false ) || fixture_die "cannot configure $_lr"
     mkdir -p "$_lr/test" || fixture_die "cannot create $_lr/test"
-    cp "$(dirname "$0")/no-leaks.sh" "$_lr/test/no-leaks.sh" || fixture_die "cannot copy no-leaks.sh into $_lr"
-    chmod +x "$_lr/test/no-leaks.sh" || fixture_die "cannot make no-leaks.sh executable in $_lr"
+    cp "$(dirname "$0")/scan-for-leaks.sh" "$_lr/test/scan-for-leaks.sh" || fixture_die "cannot copy scan-for-leaks.sh into $_lr"
+    chmod +x "$_lr/test/scan-for-leaks.sh" || fixture_die "cannot make scan-for-leaks.sh executable in $_lr"
     echo "$_lr"
 }
 
-it "no-leaks flags a leaky filename even when its content is clean"
+it "scan-for-leaks flags a leaky filename even when its content is clean"
 r=$(leaks_repo)
 : > "$r/notes-admin@example.com.txt" || fixture_die "cannot write the filename fixture in $r"
 ( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the filename fixture in $r"
-if ( cd "$r" && ./test/no-leaks.sh ) >/dev/null 2>&1; then
+if ( cd "$r" && ./test/scan-for-leaks.sh ) >/dev/null 2>&1; then
     fail "a leaky filename with clean content was not flagged"
 else
     pass
 fi
 
-it "no-leaks flags a capitalized home path a lowercase-only pattern would miss"
+it "scan-for-leaks flags a capitalized home path a lowercase-only pattern would miss"
 r=$(leaks_repo)
 printf 'built at /home/Jenkins/workspace/app\n' > "$r/deploy-log.txt" || fixture_die "cannot write the home-path fixture in $r"
 ( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the home-path fixture in $r"
-if ( cd "$r" && ./test/no-leaks.sh ) >/dev/null 2>&1; then
+if ( cd "$r" && ./test/scan-for-leaks.sh ) >/dev/null 2>&1; then
     fail "a capitalized home path was not flagged"
 else
     pass
 fi
 
-it "no-leaks flags an agent-session trailer in tracked text"
+it "scan-for-leaks flags an agent-session trailer in tracked text"
 r=$(leaks_repo)
 printf 'Claude-Session: a-transcript-identifier\n' > "$r/notes.txt" || fixture_die "cannot write the session-trailer fixture in $r"
 ( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the session-trailer fixture in $r"
-if ( cd "$r" && ./test/no-leaks.sh ) >/dev/null 2>&1; then
+if ( cd "$r" && ./test/scan-for-leaks.sh ) >/dev/null 2>&1; then
     fail "an agent-session trailer was not flagged"
 else
     pass
 fi
 
-it "no-leaks flags an agent-session link carrying no trailer key"
+it "scan-for-leaks flags an agent-session link carrying no trailer key"
 r=$(leaks_repo)
 printf 'transcript: https://claude.ai/code/session_0123456789\n' > "$r/notes.txt" || fixture_die "cannot write the session-link fixture in $r"
 ( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the session-link fixture in $r"
-if ( cd "$r" && ./test/no-leaks.sh ) >/dev/null 2>&1; then
+if ( cd "$r" && ./test/scan-for-leaks.sh ) >/dev/null 2>&1; then
     fail "an agent-session link was not flagged"
 else
     pass
+fi
+
+it "the self-exclusion pathspec still names the scanner's own path"
+# The scanner excludes itself by a hardcoded pathspec, so a rename that misses it turns the scan on
+# the scanner. Three of the five patterns cannot match their own source (each is written with the
+# literal broken by a bracket), so that failure can be a silent no-op rather than a refusal. Plant
+# the same known-bad line in the scanner and in a sibling: the sibling must be reported, the
+# scanner must not.
+r=$(leaks_repo)
+printf '# Claude-Session: a-transcript-identifier\n' >> "$r/test/scan-for-leaks.sh" \
+    || fixture_die "cannot plant the leak inside the scanner copy in $r"
+printf 'Claude-Session: a-transcript-identifier\n' > "$r/notes.txt" \
+    || fixture_die "cannot write the sibling fixture in $r"
+( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the fixture in $r"
+_out=$( cd "$r" && ./test/scan-for-leaks.sh 2>&1 )
+case "$_out" in
+    *scan-for-leaks.sh*) fail "the scanner reported its own source, so the self-exclusion no longer names it" ;;
+    *notes.txt*)         pass ;;
+    *)                   fail "the planted leak in a sibling file was not reported: $_out" ;;
+esac
+
+it "a scanner moved off its own exclusion pathspec scans itself"
+# The known-bad half of the test above. Without it an exclusion that had stopped matching anything
+# at all would leave that test green forever, which is rule 15 exactly.
+r=$(leaks_repo)
+mv "$r/test/scan-for-leaks.sh" "$r/test/renamed-scan.sh" \
+    || fixture_die "cannot rename the scanner copy in $r"
+printf '# Claude-Session: a-transcript-identifier\n' >> "$r/test/renamed-scan.sh" \
+    || fixture_die "cannot plant the leak inside the renamed scanner in $r"
+( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the fixture in $r"
+_out=$( cd "$r" && ./test/renamed-scan.sh 2>&1 )
+case "$_out" in
+    *renamed-scan.sh*) pass ;;
+    *)                 fail "a scanner off its exclusion pathspec did not report the leak planted in it: $_out" ;;
+esac
+
+it "scan-for-leaks refuses an agent-session trailer typed into a commit message"
+# The tracked-file tier reads committed content, so a leak typed into a message is invisible to it.
+_m="$ROOT/msg-trailer"
+printf 'fix: something\n\nClaude-Session: a-transcript-identifier\n' > "$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+if "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "an agent-session trailer in a commit message was not refused"
+else
+    pass
+fi
+
+it "scan-for-leaks accepts a commit message carrying none of the refused shapes"
+# The banner is asserted, not just the exit status: an unrecognised flag falls through to the
+# tracked-file scan, which passes on this repo's own clean tree and looks exactly like a scanned
+# message. Green off the wrong tier is the failure this assertion exists to catch.
+_m="$ROOT/msg-clean"
+printf 'fix: pins resolve from the script\n\nCloses #14\n' > "$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+_out="$("$REPO/test/scan-for-leaks.sh" --message "$_m" 2>&1)"; _rc=$?
+case "$_out" in *'scanning the commit message'*) : ;; *) _rc=99 ;; esac
+if [ "$_rc" -eq 0 ]; then pass; else fail "a clean commit message was not scanned clean (rc $_rc): $_out"; fi
+
+it "scan-for-leaks reads only what becomes the message, never git's comments or verbose diff"
+# git strips neither before commit-msg runs, and the verbose diff of a change to the scanner itself
+# carries every shape the scanner refuses, so an unstripped read would refuse its own commit.
+_m="$ROOT/msg-verbose"
+{
+    printf 'fix: something\n#\n# Claude-Session: a comment git will strip\n'
+    printf '# ------------------------ >8 ------------------------\n'
+    printf 'diff --git a/x b/x\n+Claude-Session: inside the verbose diff\n'
+} > "$_m" || fixture_die "cannot write the message fixture at $_m"
+_out="$("$REPO/test/scan-for-leaks.sh" --message "$_m" 2>&1)"; _rc=$?
+case "$_out" in *'scanning the commit message'*) : ;; *) _rc=99 ;; esac
+if [ "$_rc" -eq 0 ]; then pass; else fail "the scan read a comment or past the scissors line (rc $_rc): $_out"; fi
+
+it "scan-for-leaks refuses a commit message file it cannot read"
+# Rule 16: a gate handed nothing to scan has not passed, it has not run.
+if "$REPO/test/scan-for-leaks.sh" --message "$ROOT/msg-absent" >/dev/null 2>&1; then
+    fail "a missing commit message file was treated as clean"
+else
+    pass
+fi
+
+it "the commit-msg hook refuses a leaky message and accepts a clean one"
+# The message tier is only a gate if git actually runs it: the hook has to carry git's own event
+# name, keep its exec bit, and sit under the wired hooksPath. Rule 16 -- a hook that skips silently
+# is the failure, so drive it through a real commit rather than by calling the script.
+r=$(leaks_repo)
+if [ ! -x "$REPO/.githooks/commit-msg" ]; then
+    fail "no executable .githooks/commit-msg in this repo, so nothing gates a commit message"
+else
+    mkdir -p "$r/.githooks" || fixture_die "cannot create $r/.githooks"
+    cp "$REPO/.githooks/commit-msg" "$r/.githooks/commit-msg" || fixture_die "cannot copy the commit-msg hook into $r"
+    chmod +x "$r/.githooks/commit-msg" || fixture_die "cannot make the commit-msg hook executable in $r"
+    # git -C, not cd-then-config: the target repo is named on the command rather than inferred from
+    # a cwd, which is how a fixture's hooksPath has escaped into the invoking repo before.
+    git -C "$r" config core.hooksPath .githooks || fixture_die "cannot set core.hooksPath in $r"
+    printf 'chore: fixture\n\nClaude-Session: a-transcript-identifier\n' > "$r/leaky-msg" \
+        || fixture_die "cannot write the leaky message fixture in $r"
+    if ! ( cd "$r" && git commit -q --allow-empty -m 'chore: a clean fixture message' ) >/dev/null 2>&1; then
+        fail "the commit-msg hook refused a message carrying none of the refused shapes"
+    elif ( cd "$r" && git commit -q --allow-empty -F "$r/leaky-msg" ) >/dev/null 2>&1; then
+        fail "the commit-msg hook accepted a message carrying an agent-session trailer"
+    else
+        pass
+    fi
 fi
 
 # ---------------------------------------------------------------------------- ci workflows

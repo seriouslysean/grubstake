@@ -1,0 +1,6 @@
+#!/bin/sh
+# The published-text gate, hung off the spine's extension point the way an adopting repo hangs one.
+
+set -eu
+
+exec "$(git rev-parse --show-toplevel)/test/scan-for-leaks.sh"

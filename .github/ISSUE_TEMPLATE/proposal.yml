@@ -4,7 +4,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        **This issue will be published, and no hook can gate it.** `test/no-leaks.sh` refuses
+        **This issue will be published, and no hook can gate it.** `test/scan-for-leaks.sh` refuses
         tracked files that identify a consumer. It cannot read an issue body, so this form is the
         only gate there is.
 

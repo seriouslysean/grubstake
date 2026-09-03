@@ -3479,6 +3479,16 @@ for _hook in pre-commit post-commit; do
 done
 [ -z "$_bad" ] && pass || fail "embedded copy differs from (or is missing for) hooks/:$_bad"
 
+it "this repo's own installed hooks cannot drift from hooks/"
+# Dogfooding puts a third copy of each hook in .githooks/, committed. install refreshes it, but
+# nothing re-runs install on its own, so an edit to hooks/ would leave the copy this repo actually
+# executes a version behind without a sound.
+_bad=""
+for _hook in pre-commit post-commit; do
+    cmp -s "$HOOKS/$_hook" "$REPO/.githooks/$_hook" || _bad="$_bad $_hook"
+done
+[ -z "$_bad" ] && pass || fail ".githooks/ differs from (or is missing) hooks/:$_bad -- re-run ./grubstake.sh install"
+
 it "install adopts a repo with no network access"
 # Shadowing curl, rather than trusting this sandbox's real reachability (which has open egress to
 # GitHub -- v0.3.2/hooks/pre-commit already resolves there), is what makes this test fail today for
@@ -5336,7 +5346,7 @@ else
         || fixture_die "cannot write the leaky message fixture in $r"
     if ! ( cd "$r" && git commit -q --allow-empty -m 'chore: a clean fixture message' ) >/dev/null 2>&1; then
         fail "the commit-msg hook refused a message carrying none of the refused shapes"
-    elif ( cd "$r" && git commit -q --allow-empty -F leaky-msg ) >/dev/null 2>&1; then
+    elif ( cd "$r" && git commit -q --allow-empty -F "$r/leaky-msg" ) >/dev/null 2>&1; then
         fail "the commit-msg hook accepted a message carrying an agent-session trailer"
     else
         pass

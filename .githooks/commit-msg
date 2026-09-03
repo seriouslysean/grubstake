@@ -1,0 +1,7 @@
+#!/bin/sh
+# Gate the message itself. The pre-commit scan reads tracked files, so a leak typed into a commit
+# message reaches a public history unrefused, which is the shape rule 28 names.
+
+set -eu
+
+exec "$(git rev-parse --show-toplevel)/test/scan-for-leaks.sh" --message "$1"

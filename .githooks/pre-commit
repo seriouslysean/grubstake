@@ -1,0 +1,71 @@
+#!/bin/sh
+# grubstake pre-commit spine. Verifies pinned tools, lints staged Swift, then runs repo-local
+# gates. Repo-specific checks belong in .githooks/pre-commit.d/, not in this file, which is
+# overwritten whenever the hooks are reinstalled.
+
+set -eu
+
+ROOT="$(git rev-parse --show-toplevel)"
+GRUBSTAKE="$ROOT/grubstake.sh"
+
+[ -x "$GRUBSTAKE" ] || {
+    echo "[pre-commit] grubstake.sh missing or not executable at repo root" >&2
+    exit 1
+}
+
+# Only verify tools when something this spine gates is staged. A cold cache should not refuse a
+# docs-only commit, and a repo with no pins has nothing to verify.
+STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
+[ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
+
+# Only lint if the repo pinned swiftlint. A repo that does not use it should not be blocked by
+# the shared spine; its own gates in pre-commit.d decide. One line per tool, so grep is enough.
+if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.tools" 2>/dev/null; then
+    SWIFTLINT="$("$GRUBSTAKE" path swiftlint)" || exit 1
+    # Verify and refuse rather than format-and-restage: re-adding after a fix folds unrelated
+    # hunks into a partial `git add -p` and re-stages a working-tree deletion of a file staged
+    # as new. The developer fixes and re-stages; the hook never touches the index.
+    #
+    # Known limitation: SwiftLint reads the working tree, so this checks the current contents of
+    # files whose paths are staged, not the staged blobs. Linting a temp copy would break config
+    # resolution, and stashing the remainder to lint the index is what strands work in the tools
+    # that do it. AD/MD is refused below and AM/MM is warned about, and CI lints the committed tree.
+    STATUS=$(git status --porcelain -- '*.swift')
+    # AD/MD: the worktree copy is gone, so the linter would read nothing at all. Decide this
+    # ourselves rather than trust the linter's exit status, which a batched run can mask.
+    GONE=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMR]D //p')
+    # "--" ends option parsing, so a staged path starting with "-" is a path, never a linter flag.
+    OUT=$(git diff --cached --name-only -z --diff-filter=ACMR -- '*.swift' \
+        | xargs -0 "$SWIFTLINT" lint --strict --quiet -- 2>&1) && RC=0 || RC=$?
+    if [ -n "$GONE" ]; then
+        # Print first: a real violation in a co-staged file the linter did read must not be
+        # swallowed by this refusal, or the developer only learns about it on a second retry.
+        [ -n "$OUT" ] && echo "$OUT" >&2
+        echo "[pre-commit] staged Swift file(s) missing from the working tree, so nothing was linted:" >&2
+        printf '%s\n' "$GONE" | sed 's/^/[pre-commit]   /' >&2
+        exit 1
+    fi
+    if [ "$RC" -ne 0 ]; then
+        echo "$OUT" >&2
+        echo "[pre-commit] swiftlint failed on working-tree contents of staged Swift paths." >&2
+        echo "[pre-commit] fix, re-stage, retry." >&2
+        exit 1
+    fi
+    [ -n "$OUT" ] && echo "$OUT"
+
+    # AM/MM/CM/RM: the linter read different content than what is staged. Advisory only, since this
+    # is legitimate under `git add -p`; AD/MD above already refuses when there is nothing to read.
+    if printf '%s\n' "$STATUS" | grep -q '^[ACMR]M '; then
+        echo "[pre-commit] warning: staged Swift files have unstaged edits. Lint read the working" >&2
+        echo "[pre-commit] tree, not what is being committed. Re-stage if the fix belongs here." >&2
+    fi
+fi
+
+for gate in "$ROOT"/.githooks/pre-commit.d/*; do
+    [ -e "$gate" ] || continue
+    # A gate that lost its exec bit must not look like one that passed.
+    [ -x "$gate" ] || { echo "[pre-commit] gate not executable: $gate" >&2; exit 1; }
+    "$gate" || { echo "[pre-commit] gate failed: $(basename "$gate")" >&2; exit 1; }
+done
+
+exit 0

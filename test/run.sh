@@ -5183,9 +5183,9 @@ if "$(dirname "$0")/gates.sh" >/dev/null 2>&1; then pass; else fail "$("$(dirnam
 printf '\npublication safety\n'
 
 it "nothing tracked identifies a consumer, a person, or a machine"
-if "$(dirname "$0")/no-leaks.sh" >/dev/null 2>&1; then pass; else fail "$("$(dirname "$0")/no-leaks.sh" 2>&1 | tail -3)"; fi
+if "$(dirname "$0")/scan-for-leaks.sh" >/dev/null 2>&1; then pass; else fail "$("$(dirname "$0")/scan-for-leaks.sh" 2>&1 | tail -3)"; fi
 
-# The test above only proves no-leaks.sh's exit code against this repo's own, already-clean tree --
+# The test above only proves scan-for-leaks.sh's exit code against this repo's own, already-clean tree --
 # it cannot prove either scan path below actually fires, and a no-op regression in either one would
 # leave it green. A throwaway repo with a known-dirty shape closes that.
 leaks_repo() {
@@ -5196,46 +5196,46 @@ leaks_repo() {
       && git config user.name "grubstake suite" \
       && git config commit.gpgsign false ) || fixture_die "cannot configure $_lr"
     mkdir -p "$_lr/test" || fixture_die "cannot create $_lr/test"
-    cp "$(dirname "$0")/no-leaks.sh" "$_lr/test/no-leaks.sh" || fixture_die "cannot copy no-leaks.sh into $_lr"
-    chmod +x "$_lr/test/no-leaks.sh" || fixture_die "cannot make no-leaks.sh executable in $_lr"
+    cp "$(dirname "$0")/scan-for-leaks.sh" "$_lr/test/scan-for-leaks.sh" || fixture_die "cannot copy scan-for-leaks.sh into $_lr"
+    chmod +x "$_lr/test/scan-for-leaks.sh" || fixture_die "cannot make scan-for-leaks.sh executable in $_lr"
     echo "$_lr"
 }
 
-it "no-leaks flags a leaky filename even when its content is clean"
+it "scan-for-leaks flags a leaky filename even when its content is clean"
 r=$(leaks_repo)
 : > "$r/notes-admin@example.com.txt" || fixture_die "cannot write the filename fixture in $r"
 ( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the filename fixture in $r"
-if ( cd "$r" && ./test/no-leaks.sh ) >/dev/null 2>&1; then
+if ( cd "$r" && ./test/scan-for-leaks.sh ) >/dev/null 2>&1; then
     fail "a leaky filename with clean content was not flagged"
 else
     pass
 fi
 
-it "no-leaks flags a capitalized home path a lowercase-only pattern would miss"
+it "scan-for-leaks flags a capitalized home path a lowercase-only pattern would miss"
 r=$(leaks_repo)
 printf 'built at /home/Jenkins/workspace/app\n' > "$r/deploy-log.txt" || fixture_die "cannot write the home-path fixture in $r"
 ( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the home-path fixture in $r"
-if ( cd "$r" && ./test/no-leaks.sh ) >/dev/null 2>&1; then
+if ( cd "$r" && ./test/scan-for-leaks.sh ) >/dev/null 2>&1; then
     fail "a capitalized home path was not flagged"
 else
     pass
 fi
 
-it "no-leaks flags an agent-session trailer in tracked text"
+it "scan-for-leaks flags an agent-session trailer in tracked text"
 r=$(leaks_repo)
 printf 'Claude-Session: a-transcript-identifier\n' > "$r/notes.txt" || fixture_die "cannot write the session-trailer fixture in $r"
 ( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the session-trailer fixture in $r"
-if ( cd "$r" && ./test/no-leaks.sh ) >/dev/null 2>&1; then
+if ( cd "$r" && ./test/scan-for-leaks.sh ) >/dev/null 2>&1; then
     fail "an agent-session trailer was not flagged"
 else
     pass
 fi
 
-it "no-leaks flags an agent-session link carrying no trailer key"
+it "scan-for-leaks flags an agent-session link carrying no trailer key"
 r=$(leaks_repo)
 printf 'transcript: https://claude.ai/code/session_0123456789\n' > "$r/notes.txt" || fixture_die "cannot write the session-link fixture in $r"
 ( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the session-link fixture in $r"
-if ( cd "$r" && ./test/no-leaks.sh ) >/dev/null 2>&1; then
+if ( cd "$r" && ./test/scan-for-leaks.sh ) >/dev/null 2>&1; then
     fail "an agent-session link was not flagged"
 else
     pass

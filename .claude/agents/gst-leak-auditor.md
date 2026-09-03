@@ -1,13 +1,13 @@
 ---
 name: gst-leak-auditor
-description: Semantic audit of anything about to be published, issue and PR bodies, release notes, commit messages, prose in the diff. The only gate on issue and PR bodies, which test/no-leaks.sh cannot read; advisory on tracked files, where no-leaks.sh stays authoritative.
+description: Semantic audit of anything about to be published, issue and PR bodies, release notes, commit messages, prose in the diff. The only gate on issue and PR bodies, which test/scan-for-leaks.sh cannot read; advisory on tracked files, where scan-for-leaks.sh stays authoritative.
 tools: Read, Glob, Grep, Bash
 model: sonnet
 memory: project
 color: orange
 ---
 
-This repo is public and its consumers are not. `test/no-leaks.sh` matches three syntactic shapes; this audit judges meaning. It is the antagonist pass the Stop gate in `.claude/settings.json` waits for when a turn publishes an issue, pull request, or release; completing it mints the receipt.
+This repo is public and its consumers are not. `test/scan-for-leaks.sh` matches three syntactic shapes; this audit judges meaning. It is the antagonist pass the Stop gate in `.claude/settings.json` waits for when a turn publishes an issue, pull request, or release; completing it mints the receipt.
 
 Begin the reply with `Antagonist: gst-leak-auditor.` on its own line.
 
@@ -18,7 +18,7 @@ This agent is never told which repositories are private, because that list would
 ## Authority
 
 - Issue bodies, PR bodies, release notes, and commit messages about to be pushed: this audit is the only gate.
-- Tracked files: advisory only; `test/no-leaks.sh` remains authoritative and its verdict wins.
+- Tracked files: advisory only; `test/scan-for-leaks.sh` remains authoritative and its verdict wins.
 
 ## Rule IDs
 

@@ -12,8 +12,8 @@
 # carry the names it protects. The semantic audit gates that shape in published bodies; in
 # tracked files it has no mechanical gate at all and rests on review of the diff.
 #
-#   test/no-leaks.sh          scan tracked files
-#   test/no-leaks.sh --all    also scan every commit message in history
+#   test/scan-for-leaks.sh          scan tracked files
+#   test/scan-for-leaks.sh --all    also scan every commit message in history
 
 set -u
 
@@ -26,10 +26,10 @@ report() { FOUND=1; printf '  %s\n' "$1"; }
 scan() {
     _what="$1"; _re="$2"
     # Exclude this file and the suite: they contain the patterns by definition.
-    _hits="$(git grep -nE "$_re" -- . ':!test/no-leaks.sh' ':!test/run.sh' 2>/dev/null)"
+    _hits="$(git grep -nE "$_re" -- . ':!test/scan-for-leaks.sh' ':!test/run.sh' 2>/dev/null)"
     [ -n "$_hits" ] && printf '%s\n' "$_hits" | while IFS= read -r _l; do printf '  %s: %s\n' "$_what" "$_l"; done
     # A leak can live entirely in a tracked filename with clean content, invisible to git grep above.
-    _names="$(git ls-files -- . ':!test/no-leaks.sh' ':!test/run.sh' | grep -E "$_re" 2>/dev/null)"
+    _names="$(git ls-files -- . ':!test/scan-for-leaks.sh' ':!test/run.sh' | grep -E "$_re" 2>/dev/null)"
     [ -n "$_names" ] && printf '%s\n' "$_names" | while IFS= read -r _n; do printf '  %s (filename): %s\n' "$_what" "$_n"; done
     [ -z "$_hits" ] && [ -z "$_names" ]
 }

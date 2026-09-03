@@ -34,7 +34,7 @@ Deduplicate findings on rule id. Present survivors as `[SEVERITY] rule-id — se
 
 ## 4. Published prose
 
-When the turn writes an issue, pull request, release, or commit message, dispatch `gst-leak-auditor` with the exact text about to be published. Its findings block publication until a human clears them, because it is the only gate on bodies that `test/no-leaks.sh` cannot read.
+When the turn writes an issue, pull request, release, or commit message, dispatch `gst-leak-auditor` with the exact text about to be published. Its findings block publication until a human clears them, because it is the only gate on bodies that `test/scan-for-leaks.sh` cannot read.
 
 ## 5. Report
 

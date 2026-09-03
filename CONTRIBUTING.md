@@ -44,8 +44,8 @@ This repo is public. The repos that use it are not, and the development model is
 from inside one of them, so a comment written in that context can carry a private repo name or an
 issue number into a public commit. Prose is the leak, not code.
 
-`test/no-leaks.sh` runs as part of the suite and refuses absolute home paths, email addresses, and
-cross-repo issue references. It matches shapes that point outside this repo.
+`test/scan-for-leaks.sh` runs as part of the suite and refuses absolute home paths, email
+addresses, and cross-repo issue references. It matches shapes that point outside this repo.
 
 **Issues and pull requests are published too, and no hook can gate them.** Before filing, read the
 body back and remove anything that is not about this repository: which repo hit the bug, what its

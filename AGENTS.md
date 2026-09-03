@@ -29,3 +29,4 @@ Rules for working in this repo.
 25. Keep the orchestrating session to routing and judgement, and dispatch implementation and review to the project agents where a harness provides them.
 26. Run the adversarial pass over concurrency, portability, and published prose before reporting work done, because the suite only re-proves past failures.
 27. State the reason in one sentence when dispatching above an agent's pinned model, since escalation is a decision rather than a default.
+28. Keep agent-session links and session trailers out of commit messages, issues, and pull request bodies, because they point outside this repository and the no-leaks rule refuses that shape.

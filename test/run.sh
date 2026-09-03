@@ -5241,6 +5241,40 @@ else
     pass
 fi
 
+it "the self-exclusion pathspec still names the scanner's own path"
+# The scanner excludes itself by a hardcoded pathspec, so a rename that misses it turns the scan on
+# the scanner. Three of the five patterns cannot match their own source (each is written with the
+# literal broken by a bracket), so that failure can be a silent no-op rather than a refusal. Plant
+# the same known-bad line in the scanner and in a sibling: the sibling must be reported, the
+# scanner must not.
+r=$(leaks_repo)
+printf '# Claude-Session: a-transcript-identifier\n' >> "$r/test/scan-for-leaks.sh" \
+    || fixture_die "cannot plant the leak inside the scanner copy in $r"
+printf 'Claude-Session: a-transcript-identifier\n' > "$r/notes.txt" \
+    || fixture_die "cannot write the sibling fixture in $r"
+( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the fixture in $r"
+_out=$( cd "$r" && ./test/scan-for-leaks.sh 2>&1 )
+case "$_out" in
+    *scan-for-leaks.sh*) fail "the scanner reported its own source, so the self-exclusion no longer names it" ;;
+    *notes.txt*)         pass ;;
+    *)                   fail "the planted leak in a sibling file was not reported: $_out" ;;
+esac
+
+it "a scanner moved off its own exclusion pathspec scans itself"
+# The known-bad half of the test above. Without it an exclusion that had stopped matching anything
+# at all would leave that test green forever, which is rule 15 exactly.
+r=$(leaks_repo)
+mv "$r/test/scan-for-leaks.sh" "$r/test/renamed-scan.sh" \
+    || fixture_die "cannot rename the scanner copy in $r"
+printf '# Claude-Session: a-transcript-identifier\n' >> "$r/test/renamed-scan.sh" \
+    || fixture_die "cannot plant the leak inside the renamed scanner in $r"
+( cd "$r" && git add -A && git commit -q -m fixture ) || fixture_die "cannot commit the fixture in $r"
+_out=$( cd "$r" && ./test/renamed-scan.sh 2>&1 )
+case "$_out" in
+    *renamed-scan.sh*) pass ;;
+    *)                 fail "a scanner off its exclusion pathspec did not report the leak planted in it: $_out" ;;
+esac
+
 it "scan-for-leaks refuses an agent-session trailer typed into a commit message"
 # The tracked-file tier reads committed content, so a leak typed into a message is invisible to it.
 _m="$ROOT/msg-trailer"

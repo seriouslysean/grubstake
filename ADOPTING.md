@@ -175,8 +175,10 @@ drop the marker line.
 
 The pre-commit lint reads the working tree, not the staged blobs, so it checks the current contents
 of files whose paths are staged. When the two diverge it refuses the commit and names the paths, so
-`git add -p` over a Swift file means stashing the remainder before committing. Stage the rest or
-stash it, then retry. This is deliberate and documented; do not try to fix it locally.
+`git add -p` over a Swift file means stashing the remainder before committing. Stage the rest, or
+`git stash push --keep-index` and pop after the commit -- a plain `git stash` takes the staged hunk
+with it and leaves the retry committing nothing. This is deliberate and documented; do not try to
+fix it locally.
 
 `periphery` publishes no Linux build, so it is skipped there rather than failing.
 

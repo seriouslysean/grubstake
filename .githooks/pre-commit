@@ -81,7 +81,9 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     if [ -n "$PARTIAL" ]; then
         echo "[pre-commit] staged Swift file(s) have unstaged edits, so the lint read bytes that are not being committed:" >&2
         printf '%s\n' "$PARTIAL" | sed 's/^/[pre-commit]   /' >&2
-        echo "[pre-commit] stage the rest or stash it, then retry." >&2
+        # --keep-index by name: a plain `git stash` takes the staged hunk with it and the retry
+        # then commits nothing, so naming the bare command would destroy what this is protecting.
+        echo "[pre-commit] stage the rest, or: git stash push --keep-index; commit; git stash pop" >&2
         exit 1
     fi
 fi

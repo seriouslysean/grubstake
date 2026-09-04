@@ -107,8 +107,9 @@ earlier published copy is recognised, and refreshed.
 The pre-commit lint reads the working tree rather than the staged blobs, so it checks the current
 contents of files whose paths are staged. Linting a copy would break SwiftLint's config resolution,
 and stashing the unstaged remainder is what strands work in the tools that do it, so a staged Swift
-file carrying unstaged edits is refused by name instead: stage the rest or stash it, then retry. CI
-lints the committed tree.
+file carrying unstaged edits is refused by name instead. Stage the rest, or stash it with
+`git stash push --keep-index` and pop it after the commit; a plain `git stash` would take the
+staged hunk with it. CI lints the committed tree.
 
 ## Tools
 

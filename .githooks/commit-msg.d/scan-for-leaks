@@ -1,0 +1,8 @@
+#!/bin/sh
+# The published-text gate on the message itself, hung off the spine's extension point the way an
+# adopting repo hangs one. The spine carries the two agent-session shapes every repo gets; the
+# other three -- home paths, addresses, cross-repo issue references -- are this repo's to refuse.
+
+set -eu
+
+exec "$(git rev-parse --show-toplevel)/test/scan-for-leaks.sh" --message "$1"

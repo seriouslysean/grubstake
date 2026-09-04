@@ -10,8 +10,9 @@ Adopt this repo the way an adopting repo does, once per clone.
 
 `hooks/` is the reviewable source that `install` copies into `.githooks/`, never this repo's own
 hook directory, so nothing under `hooks/` runs here until `install` has been run. The leak scan
-hangs off the same extension point every consumer uses, at `.githooks/pre-commit.d/scan-for-leaks`,
-and `.githooks/commit-msg` gates the message itself, which a scan of tracked files cannot see.
+hangs off the same extension points every consumer uses: `.githooks/pre-commit.d/scan-for-leaks`
+over tracked files, and `.githooks/commit-msg.d/scan-for-leaks` over the message itself, which a
+scan of tracked files cannot see.
 
 ## The rule that matters
 
@@ -67,9 +68,13 @@ from inside one of them, so a comment written in that context can carry a privat
 issue number into a public commit. Prose is the leak, not code.
 
 `test/scan-for-leaks.sh` runs as part of the suite and, once `install` has been run, as a
-repo-local gate in `.githooks/pre-commit.d/` and as `.githooks/commit-msg`. It refuses absolute
+repo-local gate in `.githooks/pre-commit.d/` and in `.githooks/commit-msg.d/`. It refuses absolute
 home paths, email addresses, cross-repo issue references, agent-session trailers, and agent-session
 links. It matches shapes that point outside this repo.
+
+The shipped `commit-msg` spine carries the last two inline, since it is what an adopting repo gets
+and no adopter has this scanner. The other three shapes are this repo's concern, which is why they
+stay in the gate beside the spine rather than in it.
 
 **Issues and pull requests are published too, and no hook can gate them.** Before filing, read the
 body back and remove anything that is not about this repository: which repo hit the bug, what its

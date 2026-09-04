@@ -6,7 +6,7 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="1.0.0"
+GRUBSTAKE_VERSION="1.1.0"
 GRUBSTAKE_MIN_VERSION="0.3.0"   # every earlier release has a known blocking defect
 # Named so cmd_update can tell an override apart from the default it is comparing against.
 GRUBSTAKE_REPO_DEFAULT="https://github.com/seriouslysean/grubstake"
@@ -632,8 +632,8 @@ verify_tool() {
 
 embedded_hook() {
     case "$1" in
-        pre-commit|post-commit) : ;;
-        *)                      die "unknown hook: $1" ;;
+        pre-commit|post-commit|commit-msg) : ;;
+        *)                                 die "unknown hook: $1" ;;
     esac
     case "$1" in
         pre-commit)
@@ -766,6 +766,55 @@ exit 0
 # gst-embedded-hook-end: post-commit
 GST_EMBED_POST_COMMIT
             ;;
+        commit-msg)
+            cat <<'GST_EMBED_COMMIT_MSG' | sed -e '1d' -e '$d'
+# gst-embedded-hook-begin: commit-msg
+#!/bin/sh
+# grubstake commit-msg spine. Refuses a message that names an agent session, then runs repo-local
+# message gates. Repo-specific checks belong in .githooks/commit-msg.d/, not in this file, which
+# is overwritten whenever the hooks are reinstalled.
+#
+# The pre-commit scan reads tracked files, so a reference typed into a message never passes under
+# it. A session trailer or link names a transcript outside the repository, which no reader of the
+# published history can open.
+
+set -eu
+
+ROOT="$(git rev-parse --show-toplevel)"
+
+# A gate handed nothing has not passed, so an unreadable message is refused rather than skipped.
+[ "$#" -eq 1 ] || { echo "[commit-msg] git passed no message file, so nothing was scanned" >&2; exit 1; }
+# git hands this hook a path relative to wherever it ran it, and a gate below may run anywhere.
+case "$1" in /*) MSG="$1" ;; *) MSG="$PWD/$1" ;; esac
+
+# Each literal is broken by a bracket, so a repo that scans its own tracked text for these shapes
+# does not report the hook that refuses them.
+RE_SESSION='Claude-[S]ession:|claude\.ai/code/[s]ession'
+
+# git has stripped neither comments nor a --verbose diff yet, so read only what becomes the message.
+BODY="$(sed -e '/^#.*>8/,$d' -e '/^#/d' "$MSG")" || {
+    echo "[commit-msg] cannot read $MSG, so the message was not scanned" >&2
+    exit 1
+}
+HITS="$(printf '%s\n' "$BODY" | grep -nE "$RE_SESSION")" || HITS=""
+if [ -n "$HITS" ]; then
+    echo "[commit-msg] an agent-session reference would be published with this commit:" >&2
+    printf '%s\n' "$HITS" | sed 's/^/[commit-msg]   /' >&2
+    echo "[commit-msg] remove it and retry." >&2
+    exit 1
+fi
+
+for gate in "$ROOT"/.githooks/commit-msg.d/*; do
+    [ -e "$gate" ] || continue
+    # A gate that lost its exec bit must not look like one that passed.
+    [ -x "$gate" ] || { echo "[commit-msg] gate not executable: $gate" >&2; exit 1; }
+    "$gate" "$MSG" || { echo "[commit-msg] gate failed: $(basename "$gate")" >&2; exit 1; }
+done
+
+exit 0
+# gst-embedded-hook-end: commit-msg
+GST_EMBED_COMMIT_MSG
+            ;;
         # A pattern reaching here means the two case lists in this function have drifted: without
         # this arm the case falls through, the pipeline still exits 0, and install writes an empty hook.
         *)  die "no embedded copy for hook: $1" ;;
@@ -791,6 +840,10 @@ known_hook_hashes() {
             ;;
         post-commit)
             echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb"
+            ;;
+        commit-msg)
+            # One entry: the release that adds this hook is the first to publish any copy of it.
+            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9"
             ;;
         *) die "unknown hook: $1" ;;
     esac
@@ -1015,7 +1068,7 @@ cmd_doctor() {
         # A foreign hooksPath means the repo owns its hooks, the same reason install refuses one.
         printf '  hooks        not graded, hooksPath is not .githooks\n'
     else
-        for _hook in pre-commit post-commit; do
+        for _hook in pre-commit post-commit commit-msg; do
             _installed="$_root/.githooks/$_hook"
             if [ ! -f "$_installed" ]; then
                 printf '  %-12s not installed\n' "$_hook"
@@ -1214,7 +1267,7 @@ cmd_legacy_replace() {
     chmod +x "$_staged"
     mv -f "$_staged" "$_installed"
     log "updated to $_version"
-    log "review the diff, then run: ./grubstake.sh ensure"
+    log "review the diff, then run: ./grubstake.sh install"
 }
 
 cmd_install() {
@@ -1226,7 +1279,7 @@ cmd_install() {
     fi
     mkdir -p "$_root/.githooks"
 
-    for _hook in pre-commit post-commit; do
+    for _hook in pre-commit post-commit commit-msg; do
         _dest="$_root/.githooks/$_hook"
         if [ ! -f "$_dest" ]; then
             # mktemp beside $_dest, not in $TMPDIR: mv across filesystems can silently stop being atomic.
@@ -1381,7 +1434,8 @@ cmd_update() {
     trap - EXIT HUP INT TERM
 
     log "updated to $_target"
-    log "review the diff, then run: ./grubstake.sh ensure"
+    # install, not ensure: a hook a release adds or fixes reaches the repo through install alone, and install ensures on its way out.
+    log "review the diff, then run: ./grubstake.sh install"
 }
 
 # ---------------------------------------------------------------------------- entry

@@ -3429,8 +3429,10 @@ elif [ -f "$_marker" ]; then
     fail "the fetched script executed before any diff existed to review: $_out"
 else
     case "$_out" in
-        *ensure*) pass ;;
-        *) fail "did not tell the user to run ensure: $_out" ;;
+        # install, not ensure: install is what delivers a hook a release added or fixed, and it
+        # ensures on its way out, so naming ensure here would leave the hooks a release behind.
+        *"./grubstake.sh install"*) pass ;;
+        *) fail "did not tell the user to run install: $_out" ;;
     esac
 fi
 
@@ -3472,7 +3474,7 @@ it "the embedded copy of each hook in grubstake.sh cannot drift from hooks/"
 # which would let an embedded copy missing (or carrying an extra) trailing newline compare equal
 # and pass a test named for byte identity.
 _bad=""
-for _hook in pre-commit post-commit; do
+for _hook in pre-commit post-commit commit-msg; do
     _got="$(mktemp "$ROOT/embedded.XXXXXX")" || fixture_die "cannot create a scratch file for $_hook extraction"
     extract_embedded_hook "$_hook" > "$_got"
     cmp -s "$_got" "$HOOKS/$_hook" || _bad="$_bad $_hook"
@@ -3484,7 +3486,7 @@ it "this repo's own installed hooks cannot drift from hooks/"
 # nothing re-runs install on its own, so an edit to hooks/ would leave the copy this repo actually
 # executes a version behind without a sound.
 _bad=""
-for _hook in pre-commit post-commit; do
+for _hook in pre-commit post-commit commit-msg; do
     cmp -s "$HOOKS/$_hook" "$REPO/.githooks/$_hook" || _bad="$_bad $_hook"
 done
 [ -z "$_bad" ] && pass || fail ".githooks/ differs from (or is missing) hooks/:$_bad -- re-run ./grubstake.sh install"
@@ -3502,7 +3504,7 @@ _out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.
 _hp=$( cd "$r" && git config core.hooksPath 2>/dev/null )
 if [ "$_rc" -ne 0 ]; then
     fail "install failed with no network (rc $_rc): $_out"
-elif [ ! -x "$r/.githooks/pre-commit" ] || [ ! -x "$r/.githooks/post-commit" ]; then
+elif [ ! -x "$r/.githooks/pre-commit" ] || [ ! -x "$r/.githooks/post-commit" ] || [ ! -x "$r/.githooks/commit-msg" ]; then
     fail "a hook is missing or not executable after an offline install: $_out"
 elif [ "$_hp" != ".githooks" ]; then
     fail "core.hooksPath was not set to .githooks (got '$_hp'): $_out"
@@ -3660,6 +3662,40 @@ else
     pass
 fi
 
+it "install gives an already-adopted repo the third hook without disturbing its own gates"
+# The upgrade an existing adopter takes: `update` replaces grubstake.sh, `install` delivers the
+# hook. A repo already carrying both older hooks and its own pre-commit.d gate has to gain
+# commit-msg and lose nothing -- not the gate, not its exec bit, and not a rewrite of the two
+# hooks that were already current, which is what a "refresh" line in the output would mean.
+r=$(new_repo)
+mkdir -p "$r/.githooks/pre-commit.d" || fixture_die "cannot create $r/.githooks/pre-commit.d"
+extract_embedded_hook pre-commit > "$r/.githooks/pre-commit"
+extract_embedded_hook post-commit > "$r/.githooks/post-commit"
+chmod +x "$r/.githooks/pre-commit" "$r/.githooks/post-commit"
+printf '#!/bin/sh\nexit 0\n' > "$r/.githooks/pre-commit.d/repo-gate" || fixture_die "cannot write the repo gate in $r"
+chmod +x "$r/.githooks/pre-commit.d/repo-gate"
+_before="$(mktemp "$ROOT/adopted-gate-before.XXXXXX")" || fixture_die "cannot snapshot the repo gate"
+cp "$r/.githooks/pre-commit.d/repo-gate" "$_before"
+_shims="$(mktemp -d "$ROOT/no-net-third-hook.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+_got="$(mktemp "$ROOT/third-hook.XXXXXX")" || fixture_die "cannot create a scratch file for commit-msg extraction"
+extract_embedded_hook commit-msg > "$_got"
+if [ "$_rc" -ne 0 ]; then
+    fail "install failed on an already-adopted repo (rc $_rc): $_out"
+elif [ ! -x "$r/.githooks/commit-msg" ]; then
+    fail "an already-adopted repo did not gain an executable commit-msg: $_out"
+elif ! cmp -s "$_got" "$r/.githooks/commit-msg"; then
+    fail "the commit-msg install wrote is not the current embedded copy: $_out"
+elif ! cmp -s "$_before" "$r/.githooks/pre-commit.d/repo-gate" || [ ! -x "$r/.githooks/pre-commit.d/repo-gate" ]; then
+    fail "install touched the repo's own pre-commit.d gate: $_out"
+elif printf '%s' "$_out" | grep -qi "refresh"; then
+    fail "install rewrote a hook that was already current while adding the third: $_out"
+else
+    pass
+fi
+
 it "the current embedded hooks' hashes are in grubstake.sh's own known-hashes list"
 # Constrains the implementer's data structure for #58's refresh contract: whatever list of hashes
 # licenses overwriting an existing hook must contain every historically released variant (per #58:
@@ -3680,7 +3716,7 @@ it "the current embedded hooks' hashes are in grubstake.sh's own known-hashes li
 # find true. That misfiling is exactly the class of forgot-to-append mistake this ratchet exists to
 # catch, so the lookup has to be hook-scoped the same way the real call sites use it.
 _bad=""
-for _hook in pre-commit post-commit; do
+for _hook in pre-commit post-commit commit-msg; do
     _got="$(mktemp "$ROOT/ratchet.XXXXXX")" || fixture_die "cannot create a scratch file for $_hook extraction"
     extract_embedded_hook "$_hook" > "$_got"
     _sha="$(sha256_of "$_got")"
@@ -3818,8 +3854,8 @@ GST_V0_5_0_POST_COMMIT_RACE
         _bad="iteration $_i: an install exited non-zero (rc1=$_rc1 rc2=$_rc2): $_out1 || $_out2"
     elif ! cmp -s "$_got" "$r/.githooks/post-commit" 2>/dev/null; then
         _bad="iteration $_i: post-commit did not end at the current embedded copy"
-    elif [ "$_files" != "2" ]; then
-        _bad="iteration $_i: .githooks has $_files files instead of exactly 2 (pre-commit, post-commit) -- tmp litter: $(ls -la "$r/.githooks" 2>/dev/null)"
+    elif [ "$_files" != "3" ]; then
+        _bad="iteration $_i: .githooks has $_files files instead of exactly 3 (pre-commit, post-commit, commit-msg) -- tmp litter: $(ls -la "$r/.githooks" 2>/dev/null)"
     fi
 done
 rm -f "$r/out1" "$r/out2" "$r/rc1" "$r/rc2"
@@ -4619,7 +4655,7 @@ if [ -z "$_pat" ]; then
     fail "cmd_doctor no longer greps '^# grubstake \$_hook'; this test's extraction needs updating to match"
 else
     _bad=""
-    for _hook in pre-commit post-commit; do
+    for _hook in pre-commit post-commit commit-msg; do
         _want="${_pat%\$_hook}$_hook"
         grep -q "$_want" "$HOOKS/$_hook" 2>/dev/null || _bad="$_bad $_hook"
     done
@@ -5348,6 +5384,102 @@ else
         fail "the commit-msg hook refused a message carrying none of the refused shapes"
     elif ( cd "$r" && git commit -q --allow-empty -F "$r/leaky-msg" ) >/dev/null 2>&1; then
         fail "the commit-msg hook accepted a message carrying an agent-session trailer"
+    else
+        pass
+    fi
+fi
+
+# A repo adopted the way an adopting repo adopts one, with curl shadowed so the fixture never
+# depends on this sandbox's reachability: install writes the hooks and wires hooksPath itself.
+adopted_repo() {
+    _ar="$(new_repo)"
+    ( cd "$_ar" \
+      && git config user.email test@example.invalid \
+      && git config user.name "grubstake suite" \
+      && git config commit.gpgsign false ) || fixture_die "cannot configure $_ar"
+    mkdir -p "$_ar/no-net" || fixture_die "cannot create the network shim dir in $_ar"
+    printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_ar/no-net/curl" \
+        || fixture_die "cannot write the network shim in $_ar"
+    chmod +x "$_ar/no-net/curl" || fixture_die "cannot make the network shim executable in $_ar"
+    ( cd "$_ar" && PATH="$_ar/no-net:$PATH" GRUBSTAKE_CACHE="$_ar/.cache" ./grubstake.sh install ) >/dev/null 2>&1 \
+        || fixture_die "install failed in $_ar"
+    echo "$_ar"
+}
+
+it "a repo holding only what install wrote refuses an agent-session reference in a message"
+# What an adopter actually gets. The shipped hook cannot exec test/scan-for-leaks.sh, which is this
+# repo's file and nobody else's, so the shapes have to be in the hook. Driven through real commits,
+# per rule 16: a hook git never runs looks exactly like one that passed.
+r=$(adopted_repo)
+[ -e "$r/test/scan-for-leaks.sh" ] && fixture_die "the adopter fixture in $r carries this repo's scanner"
+printf 'chore: fixture\n\nClaude-Session: a-transcript-identifier\n' > "$r/leaky-msg" \
+    || fixture_die "cannot write the trailer fixture in $r"
+printf 'chore: fixture\n\ntranscript: https://claude.ai/code/session_0123456789\n' > "$r/linky-msg" \
+    || fixture_die "cannot write the link fixture in $r"
+if [ ! -x "$r/.githooks/commit-msg" ]; then
+    fail "install wrote no executable commit-msg hook, so an adopter's messages are ungated"
+elif ! ( cd "$r" && git commit -q --allow-empty -m 'chore: a clean fixture message' ) >/dev/null 2>&1; then
+    fail "the installed commit-msg hook refused a message carrying none of the refused shapes"
+elif ( cd "$r" && git commit -q --allow-empty -F "$r/leaky-msg" ) >/dev/null 2>&1; then
+    fail "the installed commit-msg hook accepted an agent-session trailer"
+elif ( cd "$r" && git commit -q --allow-empty -F "$r/linky-msg" ) >/dev/null 2>&1; then
+    fail "the installed commit-msg hook accepted an agent-session link"
+else
+    pass
+fi
+
+it "the commit-msg spine runs a repo-local gate in commit-msg.d/ and hands it the message"
+# An extension point nothing dispatches from looks exactly like one that dispatches and passes.
+# The gate refuses on a shape the spine knows nothing about, so this cannot go green off the
+# spine's own patterns, and it reads the message from its argument, which is all it is given.
+r=$(adopted_repo)
+mkdir -p "$r/.githooks/commit-msg.d" || fixture_die "cannot create $r/.githooks/commit-msg.d"
+printf '#!/bin/sh\ngrep -q "a shape only this repo refuses" "$1" && { echo "[gate] refused" >&2; exit 1; }\nexit 0\n' \
+    > "$r/.githooks/commit-msg.d/repo-rule" || fixture_die "cannot write the message gate in $r"
+chmod +x "$r/.githooks/commit-msg.d/repo-rule" || fixture_die "cannot make the message gate executable in $r"
+printf 'chore: fixture\n\na shape only this repo refuses\n' > "$r/gated-msg" \
+    || fixture_die "cannot write the gated message fixture in $r"
+if [ ! -x "$r/.githooks/commit-msg" ]; then
+    fail "install wrote no executable commit-msg hook, so nothing dispatches commit-msg.d/"
+elif ! ( cd "$r" && git commit -q --allow-empty -m 'chore: a message no gate refuses' ) >/dev/null 2>&1; then
+    fail "the spine refused a message its own patterns and its gate both accept"
+elif ( cd "$r" && git commit -q --allow-empty -F "$r/gated-msg" ) >/dev/null 2>&1; then
+    fail "a commit-msg.d gate refused the message and the commit was made anyway"
+else
+    pass
+fi
+
+it "a commit-msg gate that has lost its exec bit refuses the commit rather than being skipped"
+# Rule 16 at the extension point, and the guard the pre-commit spine already carries: a gate that
+# cannot be executed has not passed, it has not run.
+r=$(adopted_repo)
+mkdir -p "$r/.githooks/commit-msg.d" || fixture_die "cannot create $r/.githooks/commit-msg.d"
+printf '#!/bin/sh\nexit 0\n' > "$r/.githooks/commit-msg.d/repo-rule" \
+    || fixture_die "cannot write the message gate in $r"
+chmod -x "$r/.githooks/commit-msg.d/repo-rule" || fixture_die "cannot clear the gate's exec bit in $r"
+if ( cd "$r" && git commit -q --allow-empty -m 'chore: a clean fixture message' ) >/dev/null 2>&1; then
+    fail "a commit-msg gate without its exec bit was walked past and the commit was made"
+else
+    pass
+fi
+
+it "this repo's own message gate still refuses the shapes the shipped spine does not carry"
+# Adopting the shipped hook here narrows the spine to the two agent-session shapes, so the other
+# three CONTRIBUTING promises -- home paths, email addresses, cross-repo issue references -- live
+# on in commit-msg.d/, the way an adopting repo would hang a rule of its own.
+r=$(leaks_repo)
+mkdir -p "$r/.githooks/commit-msg.d" || fixture_die "cannot create $r/.githooks/commit-msg.d"
+for _f in commit-msg commit-msg.d/scan-for-leaks; do
+    [ -f "$REPO/.githooks/$_f" ] || { fail "this repo has no .githooks/$_f, so its message tier lost three shapes"; _f=""; break; }
+    cp "$REPO/.githooks/$_f" "$r/.githooks/$_f" || fixture_die "cannot copy .githooks/$_f into $r"
+    chmod +x "$r/.githooks/$_f" || fixture_die "cannot make $_f executable in $r"
+done
+if [ -n "$_f" ]; then
+    git -C "$r" config core.hooksPath .githooks || fixture_die "cannot set core.hooksPath in $r"
+    printf 'chore: fixture\n\nreported from /Users/someone/checkout\n' > "$r/homepath-msg" \
+        || fixture_die "cannot write the home-path message fixture in $r"
+    if ( cd "$r" && git commit -q --allow-empty -F "$r/homepath-msg" ) >/dev/null 2>&1; then
+        fail "an absolute home path in a commit message was accepted"
     else
         pass
     fi

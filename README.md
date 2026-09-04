@@ -16,9 +16,9 @@ it, and grubstake does not pretend otherwise.
 Fetch the script and adopt the repo.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.0.0/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.1.0/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
-./grubstake.sh version   # expect 1.0.0
+./grubstake.sh version   # expect 1.1.0
 ./grubstake.sh install
 ```
 
@@ -69,7 +69,7 @@ version                   print the version of this script
 ```
 grubstake.sh      the engine, committed to the repo. Its version is the pin.
 grubstake.tools   the pinned tools, one per line: name version sha256-darwin sha256-linux
-.githooks/        the pre-commit spine and the post-commit version notice
+.githooks/        the pre-commit and commit-msg spines, and the post-commit version notice
 ```
 
 Binaries are cached in `~/Library/Caches/grubstake`, or under `$XDG_CACHE_HOME` on Linux, so nothing
@@ -84,13 +84,20 @@ write permission back first; `grubstake clean` does both steps and removes the w
 ./grubstake.sh clean
 ```
 
-Checks that belong to one repo go in `.githooks/pre-commit.d/`, where the spine will find and run
-them. Do not edit the spine itself.
+Checks that belong to one repo go in `.githooks/pre-commit.d/`, and checks on the commit message
+itself go in `.githooks/commit-msg.d/`, where the spine that owns each directory will find and run
+them. A gate that has lost its executable bit fails the commit rather than being skipped. Do not
+edit either spine.
 
-`update` replaces `grubstake.sh` and nothing else, so run `install` after it: `install` refreshes a
-hook it recognises as one of its own earlier copies, and leaves anything else alone. A hook carrying edits it does not
-recognise is left alone with a warning, and one without its marker is never touched. The test is the
-bytes, not the intent: a hook reverted to an earlier published copy is recognised, and refreshed.
+The commit-msg spine refuses a message carrying an agent-session trailer or a transcript link on
+its own: both name something outside the repository that no reader of the published history can
+open.
+
+`update` replaces `grubstake.sh` and nothing else, so run `install` after it: `install` writes a
+hook a release has added, refreshes one it recognises as its own earlier copy, and leaves anything
+else alone. A hook carrying edits it does not recognise is left alone with a warning, and one
+without its marker is never touched. The test is the bytes, not the intent: a hook reverted to an
+earlier published copy is recognised, and refreshed.
 
 The pre-commit lint reads the working tree rather than the staged blobs, so it checks the current
 contents of files whose paths are staged. Linting a copy would break SwiftLint's config resolution,

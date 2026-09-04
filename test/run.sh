@@ -4427,20 +4427,24 @@ else
     pass
 fi
 
-it "unstaged edits to files this spine does not gate do not refuse a fully staged Swift commit"
-# The known-bad half of the three refusals above: they are about the bytes the linter read, not
-# about a dirty tree. A gate that refuses any unstaged work at all would pass those three and be
-# unusable, and nothing there would say so.
+it "an unstaged Swift edit that is not part of the commit does not refuse it"
+# The known-bad half of the three refusals above: they are about staged bytes the linter did not
+# read, not about a dirty tree. Other.swift is tracked, edited, and never staged -- " M", with a
+# space in the index column -- so a pattern one character wider than "^[ACMR]M " would refuse a
+# commit that has nothing to do with it, and every refusal test above would still pass. NOTES.md
+# covers the same mistake made through the pathspec instead.
 r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 stub_linter_mechanical "$r"
+stage "$r" Other.swift 'let b = 1'
 stage "$r" NOTES.md "notes"
 hook_commit "$r" >/dev/null 2>&1
+printf 'let b = 2\n' > "$r/Other.swift" || fixture_die "cannot edit Other.swift in $r"
 printf 'edited, and left unstaged\n' > "$r/NOTES.md" || fixture_die "cannot edit NOTES.md in $r"
 stage "$r" Clean.swift 'let a = 1'
 _c0=$(commits "$r")
 _out=$(hook_commit "$r"); _rc=$?
 if [ "$_rc" -ne 0 ]; then
-    fail "refused a fully staged Swift file over an unstaged non-Swift edit (rc $_rc): $_out"
+    fail "refused a fully staged Swift file over edits that are not part of the commit (rc $_rc): $_out"
 elif [ "$(commits "$r")" = "$_c0" ]; then
     fail "exited 0 without committing"
 else
@@ -5649,19 +5653,37 @@ fi
 it "the shipped spine still stops at the scissors line rather than reading a --verbose diff"
 # The known-bad half of #129: dropping both sed expressions rather than only the comment one is
 # indistinguishable from the fix by the test above alone. A --verbose diff sits below the scissors
-# line, is never part of the message, and a diff touching the spine itself carries every shape the
-# spine refuses -- so reading past it would refuse the hook's own commit.
+# line and git removes it before the message is published, so reading past it would refuse a commit
+# whose diff merely touches text of this shape -- which is the ordinary case for this repo, not a
+# contrived one, since every hook edit here carries it.
+#
+# Driven through a real editor commit, because that is the only path on which git truncates at all:
+# -F with --cleanup=verbatim publishes everything below the scissors line, so a fixture built that
+# way would have this test asserting that the spine accepts a reference which then reaches the
+# history. The published message is read back and required to be clean, so a fixture that stops
+# being one git truncates fails here rather than certifying the leak.
 r=$(adopted_repo)
-{
-    printf 'chore: fixture\n\na body with nothing to refuse\n'
-    printf '# ------------------------ >8 ------------------------\n'
-    printf 'diff --git a/x b/x\n+Claude-Session: inside the verbose diff\n'
-} > "$r/scissors-msg" || fixture_die "cannot write the scissors fixture in $r"
+cat > "$r/subject-editor" <<'EDITOR'
+#!/bin/sh
+printf 'chore: a change whose diff carries the shape\n\n' > "$1.new"
+cat "$1" >> "$1.new"
+mv "$1.new" "$1"
+EDITOR
+[ -s "$r/subject-editor" ] || fixture_die "cannot write the editor stub in $r"
+chmod +x "$r/subject-editor" || fixture_die "cannot make the editor stub executable in $r"
+printf 'let a = 1\n' > "$r/Seed.txt" || fixture_die "cannot write the seed file in $r"
+( cd "$r" && git add -- Seed.txt && GIT_EDITOR="$r/subject-editor" git commit -q -v ) >/dev/null 2>&1 \
+    || fixture_die "cannot seed a baseline commit in $r"
+printf 'let a = 1\nClaude-Session: a-transcript-identifier\n' > "$r/Seed.txt" \
+    || fixture_die "cannot write the refused shape into the seed file in $r"
+( cd "$r" && git add -- Seed.txt ) || fixture_die "cannot stage Seed.txt in $r"
 _c0=$(commits "$r")
-if ! ( cd "$r" && git commit -q --allow-empty --cleanup=verbatim -F "$r/scissors-msg" ) >/dev/null 2>&1; then
-    fail "read past the scissors line and refused a --verbose diff"
+if ! ( cd "$r" && GIT_EDITOR="$r/subject-editor" git commit -q -v ) >/dev/null 2>&1; then
+    fail "read past the scissors line and refused a commit whose --verbose diff carries the shape"
 elif [ "$(commits "$r")" = "$_c0" ]; then
     fail "exited 0 without committing"
+elif ( cd "$r" && git log -1 --format=%B ) | grep -q "Claude-[S]ession"; then
+    fail "the message git published carries the reference, so accepting it was the wrong verdict"
 else
     pass
 fi

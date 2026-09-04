@@ -14,7 +14,7 @@ point of this migration is to change the mechanism, not the versions.
 ## Phase 1: pin the tools, change nothing else
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.1.1/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.1.2/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
 ./grubstake.sh version   # confirm it matches the tag you asked for
 ```
@@ -143,7 +143,10 @@ already configured, and it leaves existing hook files alone.
 
 The commit-msg spine refuses a commit message carrying an agent-session trailer or a transcript
 link. Both name a transcript outside the repository, which nobody reading the history later can
-open, and no scan of tracked files can see a message that has not been written yet.
+open, and no scan of tracked files can see a message that has not been written yet. Either shape is
+refused in any casing, and every line of the message is read, comment lines included: `-m`, `-F`,
+and `--cleanup=verbatim` all publish a `#` line, so move a reference out of the message rather than
+relying on a cleanup mode to drop it.
 
 A repo with its own pre-commit logic should keep it. Move repo-specific checks into
 `.githooks/pre-commit.d/`, and checks on the commit message into `.githooks/commit-msg.d/`, where
@@ -171,8 +174,9 @@ drop the marker line.
 ## What to know before you hit it
 
 The pre-commit lint reads the working tree, not the staged blobs, so it checks the current contents
-of files whose paths are staged. It warns when the two diverge. This is deliberate and documented;
-do not try to fix it locally.
+of files whose paths are staged. When the two diverge it refuses the commit and names the paths, so
+`git add -p` over a Swift file means stashing the remainder before committing. Stage the rest or
+stash it, then retry. This is deliberate and documented; do not try to fix it locally.
 
 `periphery` publishes no Linux build, so it is skipped there rather than failing.
 

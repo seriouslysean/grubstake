@@ -4358,11 +4358,32 @@ fi
 
 [ -z "$_bad" ] && pass || fail "$_bad"
 
-it "a staged file with a legitimate unstaged edit still commits, with only a warning"
-# AM and MM mean the linter read different content than what is staged, which is normal under
-# `git add -p`; refusing there would break a workflow people rely on. This has to keep working once
-# AD/MD above start refusing, since both are reached through the same lint-the-working-tree
-# limitation and a fix that is not narrow could sweep this case in too.
+it "a staged Swift blob is not committed on the strength of a working-tree fix nobody staged"
+# #131: SwiftLint reads the working tree, so a violation fixed in the working tree and left
+# unstaged linted clean while the blob being committed still carried it. The spine only warned,
+# and a warning on a run that exits 0 reads as "clean". The verdict is about bytes nobody is
+# committing, in both directions, so the spine refuses instead of reporting one.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+stage "$r" Thing.swift 'let x = 1 // VIOLATION_MARKER'
+printf 'let x = 1\n' > "$r/Thing.swift" || fixture_die "cannot write the unstaged working-tree fix in $r"
+_c0=$(commits "$r")
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "committed a staged blob carrying the violation, on a lint of a fix that was never staged: $_out"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+elif ! printf '%s' "$_out" | grep -q "Thing.swift"; then
+    fail "blocked without naming the file: $_out"
+else
+    pass
+fi
+
+it "a partially staged Swift file is refused, with its path named and a way out"
+# A warning until #131. AM and MM mean the linter read different content than what is staged, so
+# its verdict cannot be trusted in either direction. Reading the index instead would mean stashing
+# the remainder, which is what strands work in the tools that do it, so the spine refuses and says
+# what to do about it rather than reporting a verdict about bytes nobody is committing.
 r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 stub_linter_mechanical "$r"
 stage "$r" Tracked.swift 'let a = 1'
@@ -4370,37 +4391,58 @@ hook_commit "$r" >/dev/null 2>&1
 printf 'let a = 2\n' > "$r/Tracked.swift"
 ( cd "$r" && git add Tracked.swift ) || fixture_die "cannot re-stage Tracked.swift in $r"
 printf 'let a = 3\n' > "$r/Tracked.swift"
+_c0=$(commits "$r")
 _out=$(hook_commit "$r"); _rc=$?
-if [ "$_rc" -ne 0 ]; then
-    fail "a legitimate unstaged edit (MM) was refused, not just warned about: $_out"
-elif [ "$(commits "$r")" != 3 ]; then
-    fail "exited 0 without committing"
-elif ! printf '%s' "$_out" | grep -q "unstaged edits"; then
-    fail "committed with no warning about the divergence: $_out"
+if [ "$_rc" -eq 0 ]; then
+    fail "a partially staged Swift file was committed on a lint of the working tree: $_out"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+elif ! printf '%s' "$_out" | grep -q "Tracked.swift"; then
+    fail "blocked without naming the path: $_out"
+elif ! printf '%s' "$_out" | grep -q "stash"; then
+    fail "blocked without saying what to do about it: $_out"
 else
     pass
 fi
 
-it "a staged rename with an unstaged edit still warns"
-# The divergence warning narrowed from "^[ACMR]M" to "^[AM]M " when AD/MD split off into a refusal.
-# A rename reports "R" in the index column, which that narrower pattern does not match, so `git mv`
-# followed by an unstaged edit -- lint-clean content, so this must still commit -- says nothing about
-# reading working-tree bytes that differ from what is staged.
+it "a staged rename with an unstaged edit is refused too"
+# A rename reports "R" in the index column, which a pattern narrower than ^[ACMR]M does not match,
+# so `git mv` followed by an unstaged edit is the same divergence under a different letter and must
+# reach the same refusal. Lint-clean content, so nothing here rides on the linter's verdict.
 r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 stub_linter_mechanical "$r"
 stage "$r" Old.swift 'let a = 1'
 hook_commit "$r" >/dev/null 2>&1
 ( cd "$r" && git mv Old.swift New.swift ) || fixture_die "cannot rename Old.swift to New.swift in $r"
 printf 'let a = 1\nlet b = 2\n' > "$r/New.swift"
+_c0=$(commits "$r")
 _out=$(hook_commit "$r"); _rc=$?
-if [ ! -f "$r/lint.argv.2" ]; then
-    fail "the linter never ran: $_out"
-elif [ "$_rc" -ne 0 ]; then
-    fail "a lint-clean rename with an unstaged edit was refused, not just warned about: $_out"
-elif [ "$(commits "$r")" != 3 ]; then
+if [ "$_rc" -eq 0 ]; then
+    fail "a lint-clean rename with an unstaged edit was committed: $_out"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+elif ! printf '%s' "$_out" | grep -q "New.swift"; then
+    fail "blocked without naming the path: $_out"
+else
+    pass
+fi
+
+it "unstaged edits to files this spine does not gate do not refuse a fully staged Swift commit"
+# The known-bad half of the three refusals above: they are about the bytes the linter read, not
+# about a dirty tree. A gate that refuses any unstaged work at all would pass those three and be
+# unusable, and nothing there would say so.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+stage "$r" NOTES.md "notes"
+hook_commit "$r" >/dev/null 2>&1
+printf 'edited, and left unstaged\n' > "$r/NOTES.md" || fixture_die "cannot edit NOTES.md in $r"
+stage "$r" Clean.swift 'let a = 1'
+_c0=$(commits "$r")
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "refused a fully staged Swift file over an unstaged non-Swift edit (rc $_rc): $_out"
+elif [ "$(commits "$r")" = "$_c0" ]; then
     fail "exited 0 without committing"
-elif ! printf '%s' "$_out" | grep -q "unstaged edits"; then
-    fail "committed with no warning about the divergence: $_out"
 else
     pass
 fi

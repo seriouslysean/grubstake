@@ -47,7 +47,8 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     # Known limitation: SwiftLint reads the working tree, so this checks the current contents of
     # files whose paths are staged, not the staged blobs. Linting a temp copy would break config
     # resolution, and stashing the remainder to lint the index is what strands work in the tools
-    # that do it. AD/MD is refused below and AM/MM is warned about, and CI lints the committed tree.
+    # that do it. Both shapes it can detect are refused below -- AD/MD, where there is nothing to
+    # read, and AM/MM, where what was read is not what is staged -- and CI lints the committed tree.
     STATUS=$(git status --porcelain -- '*.swift')
     # AD/MD: the worktree copy is gone, so the linter would read nothing at all. Decide this
     # ourselves rather than trust the linter's exit status, which a batched run can mask.
@@ -71,11 +72,17 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     fi
     [ -n "$OUT" ] && echo "$OUT"
 
-    # AM/MM/CM/RM: the linter read different content than what is staged. Advisory only, since this
-    # is legitimate under `git add -p`; AD/MD above already refuses when there is nothing to read.
-    if printf '%s\n' "$STATUS" | grep -q '^[ACMR]M '; then
-        echo "[pre-commit] warning: staged Swift files have unstaged edits. Lint read the working" >&2
-        echo "[pre-commit] tree, not what is being committed. Re-stage if the fix belongs here." >&2
+    # AM/MM/CM/RM: the linter read different content than what is staged, so its verdict is about
+    # bytes nobody is committing -- a working-tree fix passes a blob that still carries the
+    # violation, and a working-tree edit fails a blob that is clean. A warning on a run that exits
+    # 0 reads as "clean", so this refuses. sed, not grep: an assignment from a grep that matches
+    # nothing exits 1, and under set -e that ends every clean Swift commit.
+    PARTIAL=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMR]M //p')
+    if [ -n "$PARTIAL" ]; then
+        echo "[pre-commit] staged Swift file(s) have unstaged edits, so the lint read bytes that are not being committed:" >&2
+        printf '%s\n' "$PARTIAL" | sed 's/^/[pre-commit]   /' >&2
+        echo "[pre-commit] stage the rest or stash it, then retry." >&2
+        exit 1
     fi
 fi
 

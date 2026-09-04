@@ -16,9 +16,9 @@ it, and grubstake does not pretend otherwise.
 Fetch the script and adopt the repo.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.1.1/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.1.2/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
-./grubstake.sh version   # expect 1.1.1
+./grubstake.sh version   # expect 1.1.2
 ./grubstake.sh install
 ```
 
@@ -94,7 +94,9 @@ re-stages is linted on what it left behind rather than refused for what it was a
 
 The commit-msg spine refuses a message carrying an agent-session trailer or a transcript link on
 its own: both name something outside the repository that no reader of the published history can
-open.
+open. Either shape is refused in any casing, and every line is read except the `--verbose` diff
+below git's scissors line, which git removes itself. Comment lines are read: `-m`, `-F`, and
+`--cleanup=verbatim` all publish them, so the spine cannot assume a cleanup will strip one.
 
 `update` replaces `grubstake.sh` and nothing else, so run `install` after it: `install` writes a
 hook a release has added, refreshes one it recognises as its own earlier copy, and leaves anything
@@ -104,8 +106,10 @@ earlier published copy is recognised, and refreshed.
 
 The pre-commit lint reads the working tree rather than the staged blobs, so it checks the current
 contents of files whose paths are staged. Linting a copy would break SwiftLint's config resolution,
-and stashing the unstaged remainder is what strands work in the tools that do it, so the hook warns
-when the two diverge instead and leaves the committed tree to CI.
+and stashing the unstaged remainder is what strands work in the tools that do it, so a staged Swift
+file carrying unstaged edits is refused by name instead. Stage the rest, or stash it with
+`git stash push --keep-index` and pop it after the commit; a plain `git stash` would take the
+staged hunk with it. CI lints the committed tree.
 
 ## Tools
 

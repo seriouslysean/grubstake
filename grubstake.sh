@@ -6,7 +6,7 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="1.1.1"
+GRUBSTAKE_VERSION="1.1.2"
 GRUBSTAKE_MIN_VERSION="0.3.0"   # every earlier release has a known blocking defect
 # Named so cmd_update can tell an override apart from the default it is comparing against.
 GRUBSTAKE_REPO_DEFAULT="https://github.com/seriouslysean/grubstake"
@@ -688,7 +688,8 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     # Known limitation: SwiftLint reads the working tree, so this checks the current contents of
     # files whose paths are staged, not the staged blobs. Linting a temp copy would break config
     # resolution, and stashing the remainder to lint the index is what strands work in the tools
-    # that do it. AD/MD is refused below and AM/MM is warned about, and CI lints the committed tree.
+    # that do it. Both shapes it can detect are refused below -- AD/MD, where there is nothing to
+    # read, and AM/MM, where what was read is not what is staged -- and CI lints the committed tree.
     STATUS=$(git status --porcelain -- '*.swift')
     # AD/MD: the worktree copy is gone, so the linter would read nothing at all. Decide this
     # ourselves rather than trust the linter's exit status, which a batched run can mask.
@@ -712,11 +713,19 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     fi
     [ -n "$OUT" ] && echo "$OUT"
 
-    # AM/MM/CM/RM: the linter read different content than what is staged. Advisory only, since this
-    # is legitimate under `git add -p`; AD/MD above already refuses when there is nothing to read.
-    if printf '%s\n' "$STATUS" | grep -q '^[ACMR]M '; then
-        echo "[pre-commit] warning: staged Swift files have unstaged edits. Lint read the working" >&2
-        echo "[pre-commit] tree, not what is being committed. Re-stage if the fix belongs here." >&2
+    # AM/MM/CM/RM: the linter read different content than what is staged, so its verdict is about
+    # bytes nobody is committing -- a working-tree fix passes a blob that still carries the
+    # violation, and a working-tree edit fails a blob that is clean. A warning on a run that exits
+    # 0 reads as "clean", so this refuses. sed, not grep: an assignment from a grep that matches
+    # nothing exits 1, and under set -e that ends every clean Swift commit.
+    PARTIAL=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMR]M //p')
+    if [ -n "$PARTIAL" ]; then
+        echo "[pre-commit] staged Swift file(s) have unstaged edits, so the lint read bytes that are not being committed:" >&2
+        printf '%s\n' "$PARTIAL" | sed 's/^/[pre-commit]   /' >&2
+        # --keep-index by name: a plain `git stash` takes the staged hunk with it and the retry
+        # then commits nothing, so naming the bare command would destroy what this is protecting.
+        echo "[pre-commit] stage the rest, or: git stash push --keep-index; commit; git stash pop" >&2
+        exit 1
     fi
 fi
 
@@ -756,7 +765,14 @@ if [ $((now - stamp)) -gt "$TTL" ]; then
             | awk '{print $2}' | sed 's|refs/tags/v||' \
             | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
             | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
-        [ -n "$latest" ] && printf '%s\n%s\n' "$now" "$latest" > "$CACHE"
+        # A lookup that answered nothing keeps whatever answer is already cached, so an offline
+        # week does not silence an advisory that was correct.
+        [ -n "$latest" ] || latest=$(sed -n 2p "$CACHE" 2>/dev/null)
+        # Stamped whether or not it answered: an unwritten stamp leaves the TTL expired and fires
+        # this lookup again on the very next commit, which is the network back on the commit path.
+        # Renamed into place, because the read below runs while this is still in flight.
+        tmp="$CACHE.$$.tmp"
+        printf '%s\n%s\n' "$now" "$latest" > "$tmp" && mv -f "$tmp" "$CACHE" || rm -f "$tmp"
     ) >/dev/null 2>&1 &
 fi
 
@@ -802,12 +818,16 @@ case "$1" in /*) MSG="$1" ;; *) MSG="$PWD/$1" ;; esac
 # does not report the hook that refuses them.
 RE_SESSION='Claude-[S]ession:|claude\.ai/code/[s]ession'
 
-# git has stripped neither comments nor a --verbose diff yet, so read only what becomes the message.
-BODY="$(sed -e '/^#.*>8/,$d' -e '/^#/d' "$MSG")" || {
+# Only the --verbose diff below the scissors line is dropped, since it never becomes the message.
+# Comment lines are scanned: -m and -F default to the whitespace cleanup and --cleanup=verbatim to
+# none, and both publish them, so the spine cannot know that a "#" line will be stripped.
+BODY="$(sed -e '/^#.*>8/,$d' "$MSG")" || {
     echo "[commit-msg] cannot read $MSG, so the message was not scanned" >&2
     exit 1
 }
-HITS="$(printf '%s\n' "$BODY" | grep -nE "$RE_SESSION")" || HITS=""
+# -i, because the same reference in another casing is the same reference, and matching one
+# spelling made a gate that never fires look exactly like one that passes.
+HITS="$(printf '%s\n' "$BODY" | grep -inE "$RE_SESSION")" || HITS=""
 if [ -n "$HITS" ]; then
     echo "[commit-msg] an agent-session reference would be published with this commit:" >&2
     printf '%s\n' "$HITS" | sed 's/^/[commit-msg]   /' >&2
@@ -847,14 +867,13 @@ hook_has_marker() {
 known_hook_hashes() {
     case "$1" in
         pre-commit)
-            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d"
+            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8"
             ;;
         post-commit)
-            echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb"
+            echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494"
             ;;
         commit-msg)
-            # One entry: the release that adds this hook is the first to publish any copy of it.
-            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9"
+            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421"
             ;;
         *) die "unknown hook: $1" ;;
     esac

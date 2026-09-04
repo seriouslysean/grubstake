@@ -58,12 +58,17 @@ The pre-commit, commit-msg, and post-commit behaviour is a contract, not the hoo
 - pre-commit verifies pinned tools only when relevant files are staged, runs any repo-local gates
   in `.githooks/pre-commit.d/` in glob order, then lints staged Swift as those gates left it, and
   blocks the commit on failure. The order is part of the contract: a gate that formats staged Swift
-  and re-stages it is linted on what it produced.
-- commit-msg refuses a message carrying an agent-session trailer or a transcript link, runs any
-  repo-local gates in `.githooks/commit-msg.d/` with the message file as their argument, and blocks
-  the commit on failure.
+  and re-stages it is linted on what it produced. Staged Swift that diverges from the working tree
+  is refused rather than linted, since the lint reads the working tree and any verdict it returned
+  would be about bytes that are not being committed.
+- commit-msg refuses a message carrying an agent-session trailer or a transcript link, in any
+  casing, on every line of the message except the `--verbose` diff below git's scissors line, and
+  comment lines included. It then runs any repo-local gates in `.githooks/commit-msg.d/` with the
+  message file as their argument, and blocks the commit on failure.
 - post-commit reports when a newer grubstake release exists. It only reports, touches nothing
-  but its own advisory cache inside `.git`, and never blocks a commit.
+  but its own advisory cache inside `.git`, and never blocks a commit. That cache is stamped
+  whenever the lookup returns, answer or not, so a lookup that fails is not repeated on the next
+  commit.
 
 The hook scripts themselves may be rewritten release to release; only this behaviour is promised.
 

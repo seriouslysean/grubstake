@@ -4358,11 +4358,32 @@ fi
 
 [ -z "$_bad" ] && pass || fail "$_bad"
 
-it "a staged file with a legitimate unstaged edit still commits, with only a warning"
-# AM and MM mean the linter read different content than what is staged, which is normal under
-# `git add -p`; refusing there would break a workflow people rely on. This has to keep working once
-# AD/MD above start refusing, since both are reached through the same lint-the-working-tree
-# limitation and a fix that is not narrow could sweep this case in too.
+it "a staged Swift blob is not committed on the strength of a working-tree fix nobody staged"
+# #131: SwiftLint reads the working tree, so a violation fixed in the working tree and left
+# unstaged linted clean while the blob being committed still carried it. The spine only warned,
+# and a warning on a run that exits 0 reads as "clean". The verdict is about bytes nobody is
+# committing, in both directions, so the spine refuses instead of reporting one.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+stage "$r" Thing.swift 'let x = 1 // VIOLATION_MARKER'
+printf 'let x = 1\n' > "$r/Thing.swift" || fixture_die "cannot write the unstaged working-tree fix in $r"
+_c0=$(commits "$r")
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "committed a staged blob carrying the violation, on a lint of a fix that was never staged: $_out"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+elif ! printf '%s' "$_out" | grep -q "Thing.swift"; then
+    fail "blocked without naming the file: $_out"
+else
+    pass
+fi
+
+it "a partially staged Swift file is refused, with its path named and a way out"
+# A warning until #131. AM and MM mean the linter read different content than what is staged, so
+# its verdict cannot be trusted in either direction. Reading the index instead would mean stashing
+# the remainder, which is what strands work in the tools that do it, so the spine refuses and says
+# what to do about it rather than reporting a verdict about bytes nobody is committing.
 r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 stub_linter_mechanical "$r"
 stage "$r" Tracked.swift 'let a = 1'
@@ -4370,37 +4391,62 @@ hook_commit "$r" >/dev/null 2>&1
 printf 'let a = 2\n' > "$r/Tracked.swift"
 ( cd "$r" && git add Tracked.swift ) || fixture_die "cannot re-stage Tracked.swift in $r"
 printf 'let a = 3\n' > "$r/Tracked.swift"
+_c0=$(commits "$r")
 _out=$(hook_commit "$r"); _rc=$?
-if [ "$_rc" -ne 0 ]; then
-    fail "a legitimate unstaged edit (MM) was refused, not just warned about: $_out"
-elif [ "$(commits "$r")" != 3 ]; then
-    fail "exited 0 without committing"
-elif ! printf '%s' "$_out" | grep -q "unstaged edits"; then
-    fail "committed with no warning about the divergence: $_out"
+if [ "$_rc" -eq 0 ]; then
+    fail "a partially staged Swift file was committed on a lint of the working tree: $_out"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+elif ! printf '%s' "$_out" | grep -q "Tracked.swift"; then
+    fail "blocked without naming the path: $_out"
+elif ! printf '%s' "$_out" | grep -q "stash"; then
+    fail "blocked without saying what to do about it: $_out"
 else
     pass
 fi
 
-it "a staged rename with an unstaged edit still warns"
-# The divergence warning narrowed from "^[ACMR]M" to "^[AM]M " when AD/MD split off into a refusal.
-# A rename reports "R" in the index column, which that narrower pattern does not match, so `git mv`
-# followed by an unstaged edit -- lint-clean content, so this must still commit -- says nothing about
-# reading working-tree bytes that differ from what is staged.
+it "a staged rename with an unstaged edit is refused too"
+# A rename reports "R" in the index column, which a pattern narrower than ^[ACMR]M does not match,
+# so `git mv` followed by an unstaged edit is the same divergence under a different letter and must
+# reach the same refusal. Lint-clean content, so nothing here rides on the linter's verdict.
 r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 stub_linter_mechanical "$r"
 stage "$r" Old.swift 'let a = 1'
 hook_commit "$r" >/dev/null 2>&1
 ( cd "$r" && git mv Old.swift New.swift ) || fixture_die "cannot rename Old.swift to New.swift in $r"
 printf 'let a = 1\nlet b = 2\n' > "$r/New.swift"
+_c0=$(commits "$r")
 _out=$(hook_commit "$r"); _rc=$?
-if [ ! -f "$r/lint.argv.2" ]; then
-    fail "the linter never ran: $_out"
-elif [ "$_rc" -ne 0 ]; then
-    fail "a lint-clean rename with an unstaged edit was refused, not just warned about: $_out"
-elif [ "$(commits "$r")" != 3 ]; then
+if [ "$_rc" -eq 0 ]; then
+    fail "a lint-clean rename with an unstaged edit was committed: $_out"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+elif ! printf '%s' "$_out" | grep -q "New.swift"; then
+    fail "blocked without naming the path: $_out"
+else
+    pass
+fi
+
+it "an unstaged Swift edit that is not part of the commit does not refuse it"
+# The known-bad half of the three refusals above: they are about staged bytes the linter did not
+# read, not about a dirty tree. Other.swift is tracked, edited, and never staged -- " M", with a
+# space in the index column -- so a pattern one character wider than "^[ACMR]M " would refuse a
+# commit that has nothing to do with it, and every refusal test above would still pass. NOTES.md
+# covers the same mistake made through the pathspec instead.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+stage "$r" Other.swift 'let b = 1'
+stage "$r" NOTES.md "notes"
+hook_commit "$r" >/dev/null 2>&1
+printf 'let b = 2\n' > "$r/Other.swift" || fixture_die "cannot edit Other.swift in $r"
+printf 'edited, and left unstaged\n' > "$r/NOTES.md" || fixture_die "cannot edit NOTES.md in $r"
+stage "$r" Clean.swift 'let a = 1'
+_c0=$(commits "$r")
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "refused a fully staged Swift file over edits that are not part of the commit (rc $_rc): $_out"
+elif [ "$(commits "$r")" = "$_c0" ]; then
     fail "exited 0 without committing"
-elif ! printf '%s' "$_out" | grep -q "unstaged edits"; then
-    fail "committed with no warning about the divergence: $_out"
 else
     pass
 fi
@@ -4625,6 +4671,61 @@ elif printf '%s' "$_out" | grep -q "available"; then
     fail "advised an update by comparing a well-formed CURRENT against a poisoned, unvalidated LATEST: $_out"
 else
     pass
+fi
+
+# post-commit's refresh is backgrounded and detached, so it outlives the commit that started it.
+# Poll for its write rather than sleeping a fixed interval: the write normally lands before the
+# first check, and only a run that is genuinely not writing pays the wait.
+wait_for_stamp() {
+    _wfs=0
+    while :; do
+        _s=$(sed -n 1p "$1/.git/grubstake-latest" 2>/dev/null || echo 0)
+        case "$_s" in ''|*[!0-9]*) _s=0 ;; esac
+        [ "$_s" -gt "$2" ] && return 0
+        _wfs=$((_wfs + 1))
+        [ "$_wfs" -ge 6 ] && return 1
+        sleep 1
+    done
+}
+
+it "post-commit records a lookup that answered nothing, so an offline machine stops re-fetching"
+# #130: the stamp enforcing the TTL was written only when git ls-remote returned something, so an
+# offline machine wrote nothing, now-stamp stayed over the TTL, and every commit spawned another
+# lookup -- the network back on the commit path the TTL exists to keep clear (rules 17 and 18).
+# GIT_ALLOW_PROTOCOL=file, which hook_commit already exports, makes git refuse the https transport
+# outright, so the lookup fails the way an offline machine's does without waiting on a timeout.
+r=$(new_hook_repo)
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "the commit was blocked (rc $_rc): $_out"
+elif ! wait_for_stamp "$r" 0; then
+    fail "a lookup that answered nothing left no stamp, so the next commit fires it again"
+elif printf '%s' "$_out" | grep -q '\[grubstake\]'; then
+    fail "spoke with no answer cached: $_out"
+else
+    pass
+fi
+
+it "a lookup that answered nothing keeps the answer already cached"
+# The stamp has to move without discarding line 2, or an offline week silences an advisory that
+# was already correct. Two lines either way, so sed -n 1p and sed -n 2p keep their meaning and the
+# poisoned-LATEST and malformed-CURRENT guards above still read the file they were written for.
+r=$(new_hook_repo)
+printf '1\n99.9.9\n' > "$r/.git/grubstake-latest" || fixture_die "cannot seed a stale cache in $r"
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "the commit was blocked (rc $_rc): $_out"
+elif ! wait_for_stamp "$r" 1; then
+    fail "the stale stamp was never refreshed: $(tr '\n' ' ' < "$r/.git/grubstake-latest" 2>/dev/null)"
+elif [ "$(sed -n 2p "$r/.git/grubstake-latest")" != "99.9.9" ]; then
+    fail "the cached answer was discarded: $(tr '\n' ' ' < "$r/.git/grubstake-latest" 2>/dev/null)"
+else
+    case "$_out" in
+        *"99.9.9 available"*) pass ;;
+        *) fail "said nothing about the newer release it had cached: $_out" ;;
+    esac
 fi
 
 it "doctor reports a hook that has drifted from grubstake's copy"
@@ -5506,6 +5607,83 @@ elif ( cd "$r" && git commit -q --allow-empty -F "$r/leaky-msg" ) >/dev/null 2>&
     fail "the installed commit-msg hook accepted an agent-session trailer"
 elif ( cd "$r" && git commit -q --allow-empty -F "$r/linky-msg" ) >/dev/null 2>&1; then
     fail "the installed commit-msg hook accepted an agent-session link"
+else
+    pass
+fi
+
+it "the shipped spine refuses an agent-session reference whatever its casing"
+# #128: the pattern reached grep -E with no -i, so only one spelling was ever refused and every
+# other casing of the same reference was published while the gate reported nothing -- rule 15, a
+# gate that never fires looks exactly like one that passes. Driven through real commits against
+# what install writes, since the shipped hook is what an adopter actually runs.
+r=$(adopted_repo)
+printf 'chore: fixture\n\nclaude-session: a-transcript-identifier\n' > "$r/lower-msg" \
+    || fixture_die "cannot write the lowercase trailer fixture in $r"
+printf 'chore: fixture\n\nCLAUDE-SESSION: a-transcript-identifier\n' > "$r/upper-msg" \
+    || fixture_die "cannot write the uppercase trailer fixture in $r"
+printf 'chore: fixture\n\ntranscript: https://CLAUDE.AI/CODE/SESSION_0123456789\n' > "$r/upper-link-msg" \
+    || fixture_die "cannot write the uppercase link fixture in $r"
+_bad=""
+( cd "$r" && git commit -q --allow-empty -m 'chore: a clean fixture message' ) >/dev/null 2>&1 \
+    || _bad="$_bad clean(a message carrying none of the refused shapes was refused)"
+for _case in lower upper upper-link; do
+    ( cd "$r" && git commit -q --allow-empty -F "$r/$_case-msg" ) >/dev/null 2>&1 \
+        && _bad="$_bad $_case(accepted)"
+done
+[ -z "$_bad" ] && pass || fail "$_bad"
+
+it "the shipped spine scans a comment line, which git publishes unless an editor cleanup drops it"
+# #129: the spine dropped every "#"-prefixed line before scanning, which is right only for the
+# editor path's default cleanup. -m and -F skip the editor and default to "whitespace", which keeps
+# those lines, and --cleanup=verbatim keeps everything, so a reference on a comment line was
+# scanned by nobody and published. Refusing it is the correct answer: the spine cannot know which
+# cleanup the commit will use, and a reword costs less than a published transcript pointer.
+r=$(adopted_repo)
+printf 'chore: fixture\n\n# Claude-Session: a-transcript-identifier\n' > "$r/commented-msg" \
+    || fixture_die "cannot write the commented trailer fixture in $r"
+_c0=$(commits "$r")
+if ( cd "$r" && git commit -q --allow-empty --cleanup=verbatim -F "$r/commented-msg" ) >/dev/null 2>&1; then
+    fail "accepted an agent-session reference on a comment line that --cleanup=verbatim publishes"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+else
+    pass
+fi
+
+it "the shipped spine still stops at the scissors line rather than reading a --verbose diff"
+# The known-bad half of #129: dropping both sed expressions rather than only the comment one is
+# indistinguishable from the fix by the test above alone. A --verbose diff sits below the scissors
+# line and git removes it before the message is published, so reading past it would refuse a commit
+# whose diff merely touches text of this shape -- which is the ordinary case for this repo, not a
+# contrived one, since every hook edit here carries it.
+#
+# Driven through a real editor commit, because that is the only path on which git truncates at all:
+# -F with --cleanup=verbatim publishes everything below the scissors line, so a fixture built that
+# way would have this test asserting that the spine accepts a reference which then reaches the
+# history. The published message is read back and required to be clean, so a fixture that stops
+# being one git truncates fails here rather than certifying the leak.
+r=$(adopted_repo)
+cat > "$r/subject-editor" <<'EDITOR'
+#!/bin/sh
+printf 'chore: a change whose diff carries the shape\n\n' > "$1.new"
+cat "$1" >> "$1.new"
+mv "$1.new" "$1"
+EDITOR
+[ -s "$r/subject-editor" ] || fixture_die "cannot write the editor stub in $r"
+chmod +x "$r/subject-editor" || fixture_die "cannot make the editor stub executable in $r"
+printf 'let a = 1\n' > "$r/Seed.txt" || fixture_die "cannot write the seed file in $r"
+( cd "$r" && git add -- Seed.txt && GIT_EDITOR="$r/subject-editor" git commit -q -v ) >/dev/null 2>&1 \
+    || fixture_die "cannot seed a baseline commit in $r"
+printf 'let a = 1\nClaude-Session: a-transcript-identifier\n' > "$r/Seed.txt" \
+    || fixture_die "cannot write the refused shape into the seed file in $r"
+( cd "$r" && git add -- Seed.txt ) || fixture_die "cannot stage Seed.txt in $r"
+_c0=$(commits "$r")
+if ! ( cd "$r" && GIT_EDITOR="$r/subject-editor" git commit -q -v ) >/dev/null 2>&1; then
+    fail "read past the scissors line and refused a commit whose --verbose diff carries the shape"
+elif [ "$(commits "$r")" = "$_c0" ]; then
+    fail "exited 0 without committing"
+elif ( cd "$r" && git log -1 --format=%B ) | grep -q "Claude-[S]ession"; then
+    fail "the message git published carries the reference, so accepting it was the wrong verdict"
 else
     pass
 fi

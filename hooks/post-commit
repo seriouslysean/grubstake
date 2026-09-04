@@ -27,7 +27,14 @@ if [ $((now - stamp)) -gt "$TTL" ]; then
             | awk '{print $2}' | sed 's|refs/tags/v||' \
             | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
             | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
-        [ -n "$latest" ] && printf '%s\n%s\n' "$now" "$latest" > "$CACHE"
+        # A lookup that answered nothing keeps whatever answer is already cached, so an offline
+        # week does not silence an advisory that was correct.
+        [ -n "$latest" ] || latest=$(sed -n 2p "$CACHE" 2>/dev/null)
+        # Stamped whether or not it answered: an unwritten stamp leaves the TTL expired and fires
+        # this lookup again on the very next commit, which is the network back on the commit path.
+        # Renamed into place, because the read below runs while this is still in flight.
+        tmp="$CACHE.$$.tmp"
+        printf '%s\n%s\n' "$now" "$latest" > "$tmp" && mv -f "$tmp" "$CACHE" || rm -f "$tmp"
     ) >/dev/null 2>&1 &
 fi
 

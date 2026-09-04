@@ -89,6 +89,9 @@ itself go in `.githooks/commit-msg.d/`, where the spine that owns each directory
 them. A gate that has lost its executable bit fails the commit rather than being skipped. Do not
 edit either spine.
 
+A pre-commit gate runs before the spine's own staged-Swift lint, so a gate that formats and
+re-stages is linted on what it left behind rather than refused for what it was about to fix.
+
 The commit-msg spine refuses a message carrying an agent-session trailer or a transcript link on
 its own: both name something outside the repository that no reader of the published history can
 open.

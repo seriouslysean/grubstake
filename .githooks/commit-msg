@@ -20,8 +20,10 @@ case "$1" in /*) MSG="$1" ;; *) MSG="$PWD/$1" ;; esac
 # does not report the hook that refuses them.
 RE_SESSION='Claude-[S]ession:|claude\.ai/code/[s]ession'
 
-# git has stripped neither comments nor a --verbose diff yet, so read only what becomes the message.
-BODY="$(sed -e '/^#.*>8/,$d' -e '/^#/d' "$MSG")" || {
+# Only the --verbose diff below the scissors line is dropped, since it never becomes the message.
+# Comment lines are scanned: -m and -F default to the whitespace cleanup and --cleanup=verbatim to
+# none, and both publish them, so the spine cannot know that a "#" line will be stripped.
+BODY="$(sed -e '/^#.*>8/,$d' "$MSG")" || {
     echo "[commit-msg] cannot read $MSG, so the message was not scanned" >&2
     exit 1
 }

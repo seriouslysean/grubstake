@@ -5531,6 +5531,44 @@ for _case in lower upper upper-link; do
 done
 [ -z "$_bad" ] && pass || fail "$_bad"
 
+it "the shipped spine scans a comment line, which git publishes unless an editor cleanup drops it"
+# #129: the spine dropped every "#"-prefixed line before scanning, which is right only for the
+# editor path's default cleanup. -m and -F skip the editor and default to "whitespace", which keeps
+# those lines, and --cleanup=verbatim keeps everything, so a reference on a comment line was
+# scanned by nobody and published. Refusing it is the correct answer: the spine cannot know which
+# cleanup the commit will use, and a reword costs less than a published transcript pointer.
+r=$(adopted_repo)
+printf 'chore: fixture\n\n# Claude-Session: a-transcript-identifier\n' > "$r/commented-msg" \
+    || fixture_die "cannot write the commented trailer fixture in $r"
+_c0=$(commits "$r")
+if ( cd "$r" && git commit -q --allow-empty --cleanup=verbatim -F "$r/commented-msg" ) >/dev/null 2>&1; then
+    fail "accepted an agent-session reference on a comment line that --cleanup=verbatim publishes"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+else
+    pass
+fi
+
+it "the shipped spine still stops at the scissors line rather than reading a --verbose diff"
+# The known-bad half of #129: dropping both sed expressions rather than only the comment one is
+# indistinguishable from the fix by the test above alone. A --verbose diff sits below the scissors
+# line, is never part of the message, and a diff touching the spine itself carries every shape the
+# spine refuses -- so reading past it would refuse the hook's own commit.
+r=$(adopted_repo)
+{
+    printf 'chore: fixture\n\na body with nothing to refuse\n'
+    printf '# ------------------------ >8 ------------------------\n'
+    printf 'diff --git a/x b/x\n+Claude-Session: inside the verbose diff\n'
+} > "$r/scissors-msg" || fixture_die "cannot write the scissors fixture in $r"
+_c0=$(commits "$r")
+if ! ( cd "$r" && git commit -q --allow-empty --cleanup=verbatim -F "$r/scissors-msg" ) >/dev/null 2>&1; then
+    fail "read past the scissors line and refused a --verbose diff"
+elif [ "$(commits "$r")" = "$_c0" ]; then
+    fail "exited 0 without committing"
+else
+    pass
+fi
+
 it "the commit-msg spine runs a repo-local gate in commit-msg.d/ and hands it the message"
 # An extension point nothing dispatches from looks exactly like one that dispatches and passes.
 # The gate refuses on a shape the spine knows nothing about, so this cannot go green off the

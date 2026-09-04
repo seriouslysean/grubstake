@@ -802,8 +802,10 @@ case "$1" in /*) MSG="$1" ;; *) MSG="$PWD/$1" ;; esac
 # does not report the hook that refuses them.
 RE_SESSION='Claude-[S]ession:|claude\.ai/code/[s]ession'
 
-# git has stripped neither comments nor a --verbose diff yet, so read only what becomes the message.
-BODY="$(sed -e '/^#.*>8/,$d' -e '/^#/d' "$MSG")" || {
+# Only the --verbose diff below the scissors line is dropped, since it never becomes the message.
+# Comment lines are scanned: -m and -F default to the whitespace cleanup and --cleanup=verbatim to
+# none, and both publish them, so the spine cannot know that a "#" line will be stripped.
+BODY="$(sed -e '/^#.*>8/,$d' "$MSG")" || {
     echo "[commit-msg] cannot read $MSG, so the message was not scanned" >&2
     exit 1
 }
@@ -855,7 +857,7 @@ known_hook_hashes() {
             echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb"
             ;;
         commit-msg)
-            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 ca380376b22325541bce5f6bb41ba8101bfaa11c2bb1280ae9763f751b03a288"
+            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421"
             ;;
         *) die "unknown hook: $1" ;;
     esac

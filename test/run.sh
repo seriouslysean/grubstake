@@ -3852,8 +3852,8 @@ GST_V0_5_0_POST_COMMIT_RACE
         _bad="iteration $_i: an install exited non-zero (rc1=$_rc1 rc2=$_rc2): $_out1 || $_out2"
     elif ! cmp -s "$_got" "$r/.githooks/post-commit" 2>/dev/null; then
         _bad="iteration $_i: post-commit did not end at the current embedded copy"
-    elif [ "$_files" != "2" ]; then
-        _bad="iteration $_i: .githooks has $_files files instead of exactly 2 (pre-commit, post-commit) -- tmp litter: $(ls -la "$r/.githooks" 2>/dev/null)"
+    elif [ "$_files" != "3" ]; then
+        _bad="iteration $_i: .githooks has $_files files instead of exactly 3 (pre-commit, post-commit, commit-msg) -- tmp litter: $(ls -la "$r/.githooks" 2>/dev/null)"
     fi
 done
 rm -f "$r/out1" "$r/out2" "$r/rc1" "$r/rc2"

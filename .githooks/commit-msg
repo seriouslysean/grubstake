@@ -25,7 +25,9 @@ BODY="$(sed -e '/^#.*>8/,$d' -e '/^#/d' "$MSG")" || {
     echo "[commit-msg] cannot read $MSG, so the message was not scanned" >&2
     exit 1
 }
-HITS="$(printf '%s\n' "$BODY" | grep -nE "$RE_SESSION")" || HITS=""
+# -i, because the same reference in another casing is the same reference, and matching one
+# spelling made a gate that never fires look exactly like one that passes.
+HITS="$(printf '%s\n' "$BODY" | grep -inE "$RE_SESSION")" || HITS=""
 if [ -n "$HITS" ]; then
     echo "[commit-msg] an agent-session reference would be published with this commit:" >&2
     printf '%s\n' "$HITS" | sed 's/^/[commit-msg]   /' >&2

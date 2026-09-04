@@ -807,7 +807,9 @@ BODY="$(sed -e '/^#.*>8/,$d' -e '/^#/d' "$MSG")" || {
     echo "[commit-msg] cannot read $MSG, so the message was not scanned" >&2
     exit 1
 }
-HITS="$(printf '%s\n' "$BODY" | grep -nE "$RE_SESSION")" || HITS=""
+# -i, because the same reference in another casing is the same reference, and matching one
+# spelling made a gate that never fires look exactly like one that passes.
+HITS="$(printf '%s\n' "$BODY" | grep -inE "$RE_SESSION")" || HITS=""
 if [ -n "$HITS" ]; then
     echo "[commit-msg] an agent-session reference would be published with this commit:" >&2
     printf '%s\n' "$HITS" | sed 's/^/[commit-msg]   /' >&2
@@ -853,8 +855,7 @@ known_hook_hashes() {
             echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb"
             ;;
         commit-msg)
-            # One entry: the release that adds this hook is the first to publish any copy of it.
-            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9"
+            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 ca380376b22325541bce5f6bb41ba8101bfaa11c2bb1280ae9763f751b03a288"
             ;;
         *) die "unknown hook: $1" ;;
     esac

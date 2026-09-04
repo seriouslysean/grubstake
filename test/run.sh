@@ -5510,6 +5510,27 @@ else
     pass
 fi
 
+it "the shipped spine refuses an agent-session reference whatever its casing"
+# #128: the pattern reached grep -E with no -i, so only one spelling was ever refused and every
+# other casing of the same reference was published while the gate reported nothing -- rule 15, a
+# gate that never fires looks exactly like one that passes. Driven through real commits against
+# what install writes, since the shipped hook is what an adopter actually runs.
+r=$(adopted_repo)
+printf 'chore: fixture\n\nclaude-session: a-transcript-identifier\n' > "$r/lower-msg" \
+    || fixture_die "cannot write the lowercase trailer fixture in $r"
+printf 'chore: fixture\n\nCLAUDE-SESSION: a-transcript-identifier\n' > "$r/upper-msg" \
+    || fixture_die "cannot write the uppercase trailer fixture in $r"
+printf 'chore: fixture\n\ntranscript: https://CLAUDE.AI/CODE/SESSION_0123456789\n' > "$r/upper-link-msg" \
+    || fixture_die "cannot write the uppercase link fixture in $r"
+_bad=""
+( cd "$r" && git commit -q --allow-empty -m 'chore: a clean fixture message' ) >/dev/null 2>&1 \
+    || _bad="$_bad clean(a message carrying none of the refused shapes was refused)"
+for _case in lower upper upper-link; do
+    ( cd "$r" && git commit -q --allow-empty -F "$r/$_case-msg" ) >/dev/null 2>&1 \
+        && _bad="$_bad $_case(accepted)"
+done
+[ -z "$_bad" ] && pass || fail "$_bad"
+
 it "the commit-msg spine runs a repo-local gate in commit-msg.d/ and hands it the message"
 # An extension point nothing dispatches from looks exactly like one that dispatches and passes.
 # The gate refuses on a shape the spine knows nothing about, so this cannot go green off the

@@ -1267,7 +1267,7 @@ cmd_legacy_replace() {
     chmod +x "$_staged"
     mv -f "$_staged" "$_installed"
     log "updated to $_version"
-    log "review the diff, then run: ./grubstake.sh ensure"
+    log "review the diff, then run: ./grubstake.sh install"
 }
 
 cmd_install() {
@@ -1434,7 +1434,8 @@ cmd_update() {
     trap - EXIT HUP INT TERM
 
     log "updated to $_target"
-    log "review the diff, then run: ./grubstake.sh ensure"
+    # install, not ensure: a hook a release adds or fixes reaches the repo through install alone, and install ensures on its way out.
+    log "review the diff, then run: ./grubstake.sh install"
 }
 
 # ---------------------------------------------------------------------------- entry

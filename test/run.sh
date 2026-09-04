@@ -3429,8 +3429,10 @@ elif [ -f "$_marker" ]; then
     fail "the fetched script executed before any diff existed to review: $_out"
 else
     case "$_out" in
-        *ensure*) pass ;;
-        *) fail "did not tell the user to run ensure: $_out" ;;
+        # install, not ensure: install is what delivers a hook a release added or fixed, and it
+        # ensures on its way out, so naming ensure here would leave the hooks a release behind.
+        *"./grubstake.sh install"*) pass ;;
+        *) fail "did not tell the user to run install: $_out" ;;
     esac
 fi
 

@@ -137,20 +137,31 @@ rather than as a gap in the proof: it is being downloaded on every cold cache fo
 
 ## Phase 4: hooks, only if the repo wants them
 
-`./grubstake.sh install` wires `core.hooksPath` to `.githooks` and installs a pre-commit spine and a
-post-commit version notice. It refuses to run if another hooks directory is already configured, and
-it leaves existing hook files alone.
+`./grubstake.sh install` wires `core.hooksPath` to `.githooks` and installs a pre-commit spine, a
+commit-msg spine, and a post-commit version notice. It refuses to run if another hooks directory is
+already configured, and it leaves existing hook files alone.
+
+The commit-msg spine refuses a commit message carrying an agent-session trailer or a transcript
+link. Both name a transcript outside the repository, which nobody reading the history later can
+open, and no scan of tracked files can see a message that has not been written yet.
 
 A repo with its own pre-commit logic should keep it. Move repo-specific checks into
-`.githooks/pre-commit.d/`, where the spine runs each one and fails the commit if any fails or has
-lost its executable bit. Never edit the spine itself.
+`.githooks/pre-commit.d/`, and checks on the commit message into `.githooks/commit-msg.d/`, where
+the spine that owns each directory runs every gate in it and fails the commit if any gate fails or
+has lost its executable bit. A message gate is handed the message file as its argument. Never edit
+either spine.
+
+A repo that already has a `commit-msg` hook of its own keeps it: `install` never touches a hook
+without grubstake's marker, so that repo gains no message gate until its own hook moves into
+`.githooks/commit-msg.d/`.
 
 `update` replaces `grubstake.sh` only, so follow it with `install`: that is what delivers a spine
-fix. `install` refreshes a hook whose bytes match one of grubstake's own earlier copies, warns and
-leaves alone one that carries edits it cannot recognise, and never touches a hook without its
-marker. The test is the bytes rather than the intent, so a hook deliberately held at an
-earlier published copy is recognised as one of grubstake's own and refreshed; to keep a hook out of
-that path, change it in a way grubstake has never published, or drop the marker line.
+fix, or a hook a release has added. `install` refreshes a hook whose bytes match one of grubstake's
+own earlier copies, warns and leaves alone one that carries edits it cannot recognise, and never
+touches a hook without its marker. The test is the bytes rather than the intent, so a hook
+deliberately held at an earlier published copy is recognised as one of grubstake's own and
+refreshed; to keep a hook out of that path, change it in a way grubstake has never published, or
+drop the marker line.
 
 ## What to know before you hit it
 

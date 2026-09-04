@@ -53,10 +53,13 @@ every reader described here already accepts both, so that switch would not break
 
 ## Hooks
 
-The pre-commit and post-commit behaviour is a contract, not the hook files' bytes:
+The pre-commit, commit-msg, and post-commit behaviour is a contract, not the hook files' bytes:
 
 - pre-commit verifies pinned tools and lints staged Swift only when relevant files are staged,
   runs any repo-local gates in `.githooks/pre-commit.d/`, and blocks the commit on failure.
+- commit-msg refuses a message carrying an agent-session trailer or a transcript link, runs any
+  repo-local gates in `.githooks/commit-msg.d/` with the message file as their argument, and blocks
+  the commit on failure.
 - post-commit reports when a newer grubstake release exists. It only reports, touches nothing
   but its own advisory cache inside `.git`, and never blocks a commit.
 

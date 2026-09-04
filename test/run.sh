@@ -4627,6 +4627,61 @@ else
     pass
 fi
 
+# post-commit's refresh is backgrounded and detached, so it outlives the commit that started it.
+# Poll for its write rather than sleeping a fixed interval: the write normally lands before the
+# first check, and only a run that is genuinely not writing pays the wait.
+wait_for_stamp() {
+    _wfs=0
+    while :; do
+        _s=$(sed -n 1p "$1/.git/grubstake-latest" 2>/dev/null || echo 0)
+        case "$_s" in ''|*[!0-9]*) _s=0 ;; esac
+        [ "$_s" -gt "$2" ] && return 0
+        _wfs=$((_wfs + 1))
+        [ "$_wfs" -ge 6 ] && return 1
+        sleep 1
+    done
+}
+
+it "post-commit records a lookup that answered nothing, so an offline machine stops re-fetching"
+# #130: the stamp enforcing the TTL was written only when git ls-remote returned something, so an
+# offline machine wrote nothing, now-stamp stayed over the TTL, and every commit spawned another
+# lookup -- the network back on the commit path the TTL exists to keep clear (rules 17 and 18).
+# GIT_ALLOW_PROTOCOL=file, which hook_commit already exports, makes git refuse the https transport
+# outright, so the lookup fails the way an offline machine's does without waiting on a timeout.
+r=$(new_hook_repo)
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "the commit was blocked (rc $_rc): $_out"
+elif ! wait_for_stamp "$r" 0; then
+    fail "a lookup that answered nothing left no stamp, so the next commit fires it again"
+elif printf '%s' "$_out" | grep -q '\[grubstake\]'; then
+    fail "spoke with no answer cached: $_out"
+else
+    pass
+fi
+
+it "a lookup that answered nothing keeps the answer already cached"
+# The stamp has to move without discarding line 2, or an offline week silences an advisory that
+# was already correct. Two lines either way, so sed -n 1p and sed -n 2p keep their meaning and the
+# poisoned-LATEST and malformed-CURRENT guards above still read the file they were written for.
+r=$(new_hook_repo)
+printf '1\n99.9.9\n' > "$r/.git/grubstake-latest" || fixture_die "cannot seed a stale cache in $r"
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "the commit was blocked (rc $_rc): $_out"
+elif ! wait_for_stamp "$r" 1; then
+    fail "the stale stamp was never refreshed: $(tr '\n' ' ' < "$r/.git/grubstake-latest" 2>/dev/null)"
+elif [ "$(sed -n 2p "$r/.git/grubstake-latest")" != "99.9.9" ]; then
+    fail "the cached answer was discarded: $(tr '\n' ' ' < "$r/.git/grubstake-latest" 2>/dev/null)"
+else
+    case "$_out" in
+        *"99.9.9 available"*) pass ;;
+        *) fail "said nothing about the newer release it had cached: $_out" ;;
+    esac
+fi
+
 it "doctor reports a hook that has drifted from grubstake's copy"
 # ADOPTING says install writes hooks once and leaves them alone, so a fix landing in hooks/ (like
 # #29) never reaches an already-adopted repo through update. doctor is the only place left that can

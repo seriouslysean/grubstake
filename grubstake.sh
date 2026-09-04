@@ -6,7 +6,7 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="1.1.0"
+GRUBSTAKE_VERSION="1.1.1"
 GRUBSTAKE_MIN_VERSION="0.3.0"   # every earlier release has a known blocking defect
 # Named so cmd_update can tell an override apart from the default it is comparing against.
 GRUBSTAKE_REPO_DEFAULT="https://github.com/seriouslysean/grubstake"
@@ -640,8 +640,8 @@ embedded_hook() {
             cat <<'GST_EMBED_PRE_COMMIT' | sed -e '1d' -e '$d'
 # gst-embedded-hook-begin: pre-commit
 #!/bin/sh
-# grubstake pre-commit spine. Verifies pinned tools, lints staged Swift, then runs repo-local
-# gates. Repo-specific checks belong in .githooks/pre-commit.d/, not in this file, which is
+# grubstake pre-commit spine. Verifies pinned tools, runs repo-local gates, then lints staged
+# Swift. Repo-specific checks belong in .githooks/pre-commit.d/, not in this file, which is
 # overwritten whenever the hooks are reinstalled.
 
 set -eu
@@ -655,7 +655,25 @@ GRUBSTAKE="$ROOT/grubstake.sh"
 }
 
 # Only verify tools when something this spine gates is staged. A cold cache should not refuse a
-# docs-only commit, and a repo with no pins has nothing to verify.
+# docs-only commit, and a repo with no pins has nothing to verify. Verified before the gates run,
+# so a gate reaching for a pinned tool finds one rather than downloading mid-commit.
+STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
+[ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
+
+# Gates before the lint below, in glob order. A gate that formats staged Swift and re-stages it is
+# the whole reason this extension point exists, and linting first refuses exactly what such a gate
+# was about to fix -- so it never runs, and whether it runs at all comes down to whether the linter
+# happens to have an opinion about the same file. A gate's own refusal is also the whole answer:
+# nothing below should spend a lint pass on an index a gate has already turned down.
+for gate in "$ROOT"/.githooks/pre-commit.d/*; do
+    [ -e "$gate" ] || continue
+    # A gate that lost its exec bit must not look like one that passed.
+    [ -x "$gate" ] || { echo "[pre-commit] gate not executable: $gate" >&2; exit 1; }
+    "$gate" || { echo "[pre-commit] gate failed: $(basename "$gate")" >&2; exit 1; }
+done
+
+# Re-read the index. A gate may have re-staged what it fixed, and may have staged Swift where none
+# was staged at all, which the read above would leave linted by nobody.
 STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
 [ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
 
@@ -701,13 +719,6 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
         echo "[pre-commit] tree, not what is being committed. Re-stage if the fix belongs here." >&2
     fi
 fi
-
-for gate in "$ROOT"/.githooks/pre-commit.d/*; do
-    [ -e "$gate" ] || continue
-    # A gate that lost its exec bit must not look like one that passed.
-    [ -x "$gate" ] || { echo "[pre-commit] gate not executable: $gate" >&2; exit 1; }
-    "$gate" || { echo "[pre-commit] gate failed: $(basename "$gate")" >&2; exit 1; }
-done
 
 exit 0
 # gst-embedded-hook-end: pre-commit
@@ -836,7 +847,7 @@ hook_has_marker() {
 known_hook_hashes() {
     case "$1" in
         pre-commit)
-            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307"
+            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d"
             ;;
         post-commit)
             echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb"

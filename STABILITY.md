@@ -55,8 +55,10 @@ every reader described here already accepts both, so that switch would not break
 
 The pre-commit, commit-msg, and post-commit behaviour is a contract, not the hook files' bytes:
 
-- pre-commit verifies pinned tools and lints staged Swift only when relevant files are staged,
-  runs any repo-local gates in `.githooks/pre-commit.d/`, and blocks the commit on failure.
+- pre-commit verifies pinned tools only when relevant files are staged, runs any repo-local gates
+  in `.githooks/pre-commit.d/` in glob order, then lints staged Swift as those gates left it, and
+  blocks the commit on failure. The order is part of the contract: a gate that formats staged Swift
+  and re-stages it is linted on what it produced.
 - commit-msg refuses a message carrying an agent-session trailer or a transcript link, runs any
   repo-local gates in `.githooks/commit-msg.d/` with the message file as their argument, and blocks
   the commit on failure.

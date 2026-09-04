@@ -16,9 +16,9 @@ it, and grubstake does not pretend otherwise.
 Fetch the script and adopt the repo.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.1.0/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.1.1/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
-./grubstake.sh version   # expect 1.1.0
+./grubstake.sh version   # expect 1.1.1
 ./grubstake.sh install
 ```
 
@@ -88,6 +88,9 @@ Checks that belong to one repo go in `.githooks/pre-commit.d/`, and checks on th
 itself go in `.githooks/commit-msg.d/`, where the spine that owns each directory will find and run
 them. A gate that has lost its executable bit fails the commit rather than being skipped. Do not
 edit either spine.
+
+A pre-commit gate runs before the spine's own staged-Swift lint, so a gate that formats and
+re-stages is linted on what it left behind rather than refused for what it was about to fix.
 
 The commit-msg spine refuses a message carrying an agent-session trailer or a transcript link on
 its own: both name something outside the repository that no reader of the published history can

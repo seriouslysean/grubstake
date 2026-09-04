@@ -4195,6 +4195,16 @@ gate() {
     chmod +x "$1/.githooks/pre-commit.d/$2" || fixture_die "cannot make gate $2 executable"
 }
 
+# A gate with a body of its own, read from stdin, for the cases where an exit status is not the
+# behaviour under test. The gate an adopter actually writes rewrites the index rather than merely
+# reporting on it, and "exit N" cannot express that.
+gate_script() {
+    mkdir -p "$1/.githooks/pre-commit.d" || fixture_die "cannot create $1/.githooks/pre-commit.d"
+    { printf '#!/bin/sh\n'; cat; } > "$1/.githooks/pre-commit.d/$2" \
+        || fixture_die "cannot write gate $2"
+    chmod +x "$1/.githooks/pre-commit.d/$2" || fixture_die "cannot make gate $2 executable"
+}
+
 # The answer post-commit reads, inside .git so it needs no gitignore entry. Stamped now, so the
 # TTL has not expired and nothing tries to refresh it. An empty version is refused rather than
 # written: post-commit says nothing when line 2 is blank, which would make silence prove nothing.
@@ -4453,6 +4463,78 @@ else
     case "$_out" in
         *"gate not executable"*) pass ;;
         *) fail "blocked without saying why: $_out" ;;
+    esac
+fi
+
+it "a gate that fixes staged Swift runs before the lint that would have refused it"
+# #126: the spine linted first and dispatched the repo's gates afterwards, so the gate an adopter
+# writes to format staged Swift and re-stage it never ran on the commits that needed it most. The
+# spine refused what the gate was about to fix, and whether the gate fired at all came down to
+# whether the linter happened to have an opinion about the same file.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+gate_script "$r" 10-format <<'GATE'
+git diff --cached --name-only --diff-filter=ACMR -- '*.swift' | while IFS= read -r f; do
+    sed 's| // VIOLATION_MARKER||' "$f" > "$f.formatted" || exit 1
+    mv "$f.formatted" "$f" || exit 1
+    git add -- "$f" || exit 1
+done
+GATE
+stage "$r" A.swift 'let x = 1 // VIOLATION_MARKER'
+_out=$(hook_commit "$r"); _rc=$?
+if grep -q VIOLATION_MARKER "$r/A.swift" 2>/dev/null; then
+    fail "the gate never rewrote the staged file, so nothing here was ordered: $_out"
+elif [ ! -f "$r/lint.argv.1" ]; then
+    fail "the commit was decided without the linter ever running: $_out"
+elif [ "$_rc" -ne 0 ]; then
+    fail "refused what the gate had already fixed, so the lint ran first (rc $_rc): $_out"
+elif [ "$(commits "$r")" != 2 ]; then
+    fail "exited 0 without committing"
+else
+    pass
+fi
+
+it "Swift a gate stages after the spine's first look is still linted"
+# The staged list guarding the lint was read before the gates ran, so a gate that stages Swift
+# where none was staged left that file linted by nobody: the guard was empty, and the whole lint
+# block was skipped. Reordering alone does not fix this; the list has to be re-read once the gates
+# have had their turn at the index.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+gate_script "$r" 10-generate <<'GATE'
+printf 'let g = 1 // VIOLATION_MARKER\n' > Generated.swift || exit 1
+git add -- Generated.swift || exit 1
+GATE
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r"); _rc=$?
+if [ ! -f "$r/lint.argv.1" ]; then
+    fail "the gate staged Swift and nothing linted it: $_out"
+elif [ "$_rc" -eq 0 ]; then
+    fail "committed the violation the gate staged, unlinted: $_out"
+elif [ "$(commits "$r")" != 1 ]; then
+    fail "refused, and committed anyway"
+elif ! printf '%s' "$_out" | grep -q "Generated.swift"; then
+    fail "blocked without naming the file the gate staged: $_out"
+else
+    pass
+fi
+
+it "a failing gate refuses before the linter runs at all"
+# Gates first means a gate's refusal is the whole answer. A lint pass spent on an index a gate has
+# already refused reports a verdict about content nobody is committing, and on a cold cache it is
+# also the first thing to reach for a tool the commit never needed.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"; gate "$r" 10-gate 1
+stage "$r" A.swift 'let x = 1'
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -eq 0 ]; then fail "the commit went through: $_out"
+elif [ "$(commits "$r")" != 1 ]; then fail "refused, and committed anyway"
+elif [ -f "$r/lint.runs" ]; then
+    fail "the linter ran anyway, $(cat "$r/lint.runs") time(s), before the gate refused: $_out"
+else
+    case "$_out" in
+        *"gate failed: 10-gate"*) pass ;;
+        *) fail "blocked without naming the gate: $_out" ;;
     esac
 fi
 

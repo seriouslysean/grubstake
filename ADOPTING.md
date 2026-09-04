@@ -14,7 +14,7 @@ point of this migration is to change the mechanism, not the versions.
 ## Phase 1: pin the tools, change nothing else
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.1.0/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.1.1/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
 ./grubstake.sh version   # confirm it matches the tag you asked for
 ```
@@ -150,6 +150,11 @@ A repo with its own pre-commit logic should keep it. Move repo-specific checks i
 the spine that owns each directory runs every gate in it and fails the commit if any gate fails or
 has lost its executable bit. A message gate is handed the message file as its argument. Never edit
 either spine.
+
+A pre-commit gate runs before the spine's own staged-Swift lint, in glob order, so a gate that
+formats staged files and re-stages them is linted on what it produced rather than refused for what
+it was about to fix. The spine re-reads the staged paths once the gates are done, so Swift a gate
+staged is linted too. A gate that fails refuses the commit there and then, before any lint runs.
 
 A repo that already has a `commit-msg` hook of its own keeps it: `install` never touches a hook
 without grubstake's marker, so that repo gains no message gate until its own hook moves into

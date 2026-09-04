@@ -1,6 +1,6 @@
 #!/bin/sh
-# grubstake pre-commit spine. Verifies pinned tools, lints staged Swift, then runs repo-local
-# gates. Repo-specific checks belong in .githooks/pre-commit.d/, not in this file, which is
+# grubstake pre-commit spine. Verifies pinned tools, runs repo-local gates, then lints staged
+# Swift. Repo-specific checks belong in .githooks/pre-commit.d/, not in this file, which is
 # overwritten whenever the hooks are reinstalled.
 
 set -eu
@@ -14,7 +14,25 @@ GRUBSTAKE="$ROOT/grubstake.sh"
 }
 
 # Only verify tools when something this spine gates is staged. A cold cache should not refuse a
-# docs-only commit, and a repo with no pins has nothing to verify.
+# docs-only commit, and a repo with no pins has nothing to verify. Verified before the gates run,
+# so a gate reaching for a pinned tool finds one rather than downloading mid-commit.
+STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
+[ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
+
+# Gates before the lint below, in glob order. A gate that formats staged Swift and re-stages it is
+# the whole reason this extension point exists, and linting first refuses exactly what such a gate
+# was about to fix -- so it never runs, and whether it runs at all comes down to whether the linter
+# happens to have an opinion about the same file. A gate's own refusal is also the whole answer:
+# nothing below should spend a lint pass on an index a gate has already turned down.
+for gate in "$ROOT"/.githooks/pre-commit.d/*; do
+    [ -e "$gate" ] || continue
+    # A gate that lost its exec bit must not look like one that passed.
+    [ -x "$gate" ] || { echo "[pre-commit] gate not executable: $gate" >&2; exit 1; }
+    "$gate" || { echo "[pre-commit] gate failed: $(basename "$gate")" >&2; exit 1; }
+done
+
+# Re-read the index. A gate may have re-staged what it fixed, and may have staged Swift where none
+# was staged at all, which the read above would leave linted by nobody.
 STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
 [ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
 
@@ -60,12 +78,5 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
         echo "[pre-commit] tree, not what is being committed. Re-stage if the fix belongs here." >&2
     fi
 fi
-
-for gate in "$ROOT"/.githooks/pre-commit.d/*; do
-    [ -e "$gate" ] || continue
-    # A gate that lost its exec bit must not look like one that passed.
-    [ -x "$gate" ] || { echo "[pre-commit] gate not executable: $gate" >&2; exit 1; }
-    "$gate" || { echo "[pre-commit] gate failed: $(basename "$gate")" >&2; exit 1; }
-done
 
 exit 0

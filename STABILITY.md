@@ -62,12 +62,12 @@ The pre-commit, commit-msg, and post-commit behaviour is a contract, not the hoo
   is refused rather than linted, since the lint reads the working tree and any verdict it returned
   would be about bytes that are not being committed.
 - commit-msg refuses a message carrying an agent-session trailer or a transcript link, in any
-  casing and on any line of the message, comment lines included. It then runs any repo-local gates
-  in `.githooks/commit-msg.d/` with the message file as their argument, and blocks the commit on
-  failure.
+  casing, on every line of the message except the `--verbose` diff below git's scissors line, and
+  comment lines included. It then runs any repo-local gates in `.githooks/commit-msg.d/` with the
+  message file as their argument, and blocks the commit on failure.
 - post-commit reports when a newer grubstake release exists. It only reports, touches nothing
-  but its own advisory cache inside `.git`, and never blocks a commit. That cache is stamped once
-  per TTL whether or not the lookup answered, so an unreachable network is not retried on every
+  but its own advisory cache inside `.git`, and never blocks a commit. That cache is stamped
+  whenever the lookup returns, answer or not, so a lookup that fails is not repeated on the next
   commit.
 
 The hook scripts themselves may be rewritten release to release; only this behaviour is promised.

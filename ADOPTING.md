@@ -144,8 +144,9 @@ already configured, and it leaves existing hook files alone.
 The commit-msg spine refuses a commit message carrying an agent-session trailer or a transcript
 link. Both name a transcript outside the repository, which nobody reading the history later can
 open, and no scan of tracked files can see a message that has not been written yet. Either shape is
-refused in any casing, and every line of the message is read, comment lines included: `-m`, `-F`,
-and `--cleanup=verbatim` all publish a `#` line, so move a reference out of the message rather than
+refused in any casing, and every line is read except the `--verbose` diff below git's scissors line,
+which git removes before the message is published. Comment lines are read: `-m`, `-F`, and
+`--cleanup=verbatim` all publish a `#` line, so move a reference out of the message rather than
 relying on a cleanup mode to drop it.
 
 A repo with its own pre-commit logic should keep it. Move repo-specific checks into

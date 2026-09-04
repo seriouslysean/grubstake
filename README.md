@@ -94,9 +94,9 @@ re-stages is linted on what it left behind rather than refused for what it was a
 
 The commit-msg spine refuses a message carrying an agent-session trailer or a transcript link on
 its own: both name something outside the repository that no reader of the published history can
-open. Either shape is refused in any casing, and every line is read, comment lines included: `-m`,
-`-F`, and `--cleanup=verbatim` all publish them, so the spine cannot assume a cleanup will strip
-one.
+open. Either shape is refused in any casing, and every line is read except the `--verbose` diff
+below git's scissors line, which git removes itself. Comment lines are read: `-m`, `-F`, and
+`--cleanup=verbatim` all publish them, so the spine cannot assume a cleanup will strip one.
 
 `update` replaces `grubstake.sh` and nothing else, so run `install` after it: `install` writes a
 hook a release has added, refreshes one it recognises as its own earlier copy, and leaves anything

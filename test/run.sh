@@ -685,6 +685,20 @@ r=$(new_repo); pins "$r" "swiftlint 0.63.2 nothex $SHA_B"; expect_fail "$r" chec
 it "an unknown tool name fails"
 r=$(new_repo); pins "$r" "notatool 1.0.0 $SHA_A $SHA_B"; expect_fail "$r" check
 
+it "an option-shaped tool name in the pins file does not pass validation via grep's own flag parsing"
+# Without -e, grep reads "--version" as its own flag and reports a false match, so validate_pins never named the line.
+r=$(new_repo)
+pins "$r" "--version 1.0.0 $SHA_A $SHA_B"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh check 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "check exited 0 for an option-shaped tool name: $_out"
+else
+    case "$_out" in
+        *"grubstake.tools:2 unknown tool: --version"*) pass ;;
+        *) fail "validate_pins did not refuse the option-shaped name with its own file:line message: $_out" ;;
+    esac
+fi
+
 it "an unresolved conflict marker fails"
 r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B
 <<<<<<< HEAD"; expect_fail "$r" check

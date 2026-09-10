@@ -135,7 +135,8 @@ tool_version_args() {
 known_tools() { echo "swiftlint swiftformat xcbeautify periphery"; }
 
 # grep -qw matches "$1" as a basic regex, so "swift.int" matches "swiftlint"; -xF keeps it literal.
-is_known_tool() { known_tools | tr ' ' '\n' | grep -qxF "$1"; }
+# -e marks "$1" as the pattern explicitly, so an option-shaped value like "--version" is not read as grep's own flag instead.
+is_known_tool() { known_tools | tr ' ' '\n' | grep -qxF -e "$1"; }
 
 # ---------------------------------------------------------------------------- pins
 # Not JSON: greppable, diffable, no parser needed.
@@ -464,7 +465,8 @@ install_tool() {
     # so a bare assignment would swallow platform()'s own die and fall through to a misleading empty-platform skip.
     _plat="$(platform)" || return 1
     _want="$(pin_sha "$_tool" "$_plat" 2>/dev/null || echo '-')"
-    _url="$(tool_url "$_tool" "$_ver" "$_plat")"
+    # Same shape as $_plat above: an unknown tool name reaching here must fail, not read as an empty, not-published URL and be skipped as if nothing were wrong.
+    _url="$(tool_url "$_tool" "$_ver" "$_plat")" || return 1
 
     if [ -z "$_url" ]; then
         log "$_tool: not published for $_plat, skipping"
@@ -634,7 +636,8 @@ verify_tool() {
         return 1
     fi
     _sha="$(pin_sha "$_tool" "$_plat" 2>/dev/null || echo '-')"
-    _url="$(tool_url "$_tool" "$2" "$_plat")"
+    # An unknown tool name must fail here too, not read as an empty, not-published URL and pass.
+    _url="$(tool_url "$_tool" "$2" "$_plat")" || return 1
     [ -n "$_url" ] || return 0
     [ -x "$(tool_bin "$_tool" "$_sha")" ] && return 0
     # Warned, not died: cmd_check's own loop is where every missing tool gets named, not just the first.
@@ -899,7 +902,7 @@ is_known_hook_hash() {
     # Assigned, not piped: known_hook_hashes' own die exits only the pipe's first stage, and grep on
     # the empty remainder it leaves behind returns 1 same as a genuine non-match, hiding the die.
     _khh="$(known_hook_hashes "$1")" || return 1
-    printf '%s\n' "$_khh" | tr ' ' '\n' | grep -qxF "$2"
+    printf '%s\n' "$_khh" | tr ' ' '\n' | grep -qxF -e "$2"
 }
 
 # ---------------------------------------------------------------------------- commands

@@ -38,6 +38,8 @@ if [ -n "$HITS" ]; then
 fi
 
 for gate in "$ROOT"/.githooks/commit-msg.d/*; do
+    # A dangling symlink is neither -e nor an unmatched glob, and treating it as either is the silent skip rule 16 forbids.
+    [ -L "$gate" ] && [ ! -e "$gate" ] && { echo "[commit-msg] gate is a dangling symlink: $gate" >&2; exit 1; }
     [ -e "$gate" ] || continue
     # A gate that lost its exec bit must not look like one that passed.
     [ -x "$gate" ] || { echo "[commit-msg] gate not executable: $gate" >&2; exit 1; }

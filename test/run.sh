@@ -4027,6 +4027,24 @@ else
     pass
 fi
 
+it "install restores a hook's exec bit when its bytes already match"
+# Bytes matching what cmp compares is not enough: git silently skips a hook with no exec bit.
+r=$(new_repo)
+mkdir -p "$r/.githooks"
+extract_embedded_hook pre-commit > "$r/.githooks/pre-commit"
+# Left non-executable on purpose.
+_shims="$(mktemp -d "$ROOT/no-net-exec-bit.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "install failed restoring a byte-identical hook's exec bit (rc $_rc): $_out"
+elif [ ! -x "$r/.githooks/pre-commit" ]; then
+    fail "pre-commit is still not executable after install: $_out"
+else
+    pass
+fi
+
 it "install gives an already-adopted repo the third hook without disturbing its own gates"
 # The upgrade an existing adopter takes: `update` replaces grubstake.sh, `install` delivers the
 # hook. A repo already carrying both older hooks and its own pre-commit.d gate has to gain
@@ -4920,6 +4938,30 @@ else
     esac
 fi
 
+# Shared by the pre-commit.d and commit-msg.d tests below: a dangling symlink is neither -e nor an unmatched glob, so rule 16 forbids the same silent skip either gets.
+assert_dangling_gate_refuses() {
+    _dgr="$1"; _dgd="$2"; _dgn="$3"; shift 3
+    mkdir -p "$_dgr/.githooks/$_dgd" || fixture_die "cannot create $_dgr/.githooks/$_dgd"
+    ln -s "$_dgr/.githooks/$_dgd/does-not-exist" "$_dgr/.githooks/$_dgd/$_dgn" \
+        || fixture_die "cannot create a dangling gate symlink in $_dgr"
+    _dgc0=$(commits "$_dgr")
+    _dgout=$("$@" 2>&1); _dgrc=$?
+    if [ "$_dgrc" -eq 0 ]; then
+        fail "a dangling gate symlink was skipped and the commit went through: $_dgout"
+    elif [ "$(commits "$_dgr")" != "$_dgc0" ]; then
+        fail "refused, and committed anyway"
+    elif ! printf '%s' "$_dgout" | grep -q "$_dgn"; then
+        fail "refused without naming the dangling gate: $_dgout"
+    else
+        pass
+    fi
+}
+
+it "a dangling gate symlink in pre-commit.d refuses the commit instead of being skipped"
+r=$(new_hook_repo)
+stage "$r" NOTES.md "notes"
+assert_dangling_gate_refuses "$r" pre-commit.d 10-gate hook_commit "$r"
+
 it "a gate that fixes staged Swift runs before the lint that would have refused it"
 # #126: the spine linted first and dispatched the repo's gates afterwards, so the gate an adopter
 # writes to format staged Swift and re-stage it never ran on the commits that needed it most. The
@@ -5161,6 +5203,18 @@ elif [ "$(printf '%s\n' "$_clean" | grep post-commit)" != "$(printf '%s\n' "$_dr
 else
     pass
 fi
+
+it "doctor reports a hook whose exec bit was stripped, not ok"
+# git silently skips a non-executable hook, so byte-identical is not the same as installed.
+r=$(new_hook_repo)
+chmod -x "$r/.githooks/pre-commit"
+_out=$(gs "$r" doctor)
+_line=$(printf '%s\n' "$_out" | grep 'pre-commit')
+case "$_line" in
+    *"not executable"*) pass ;;
+    *"ok"*) fail "doctor reported ok for a hook with no exec bit: $_out" ;;
+    *) fail "doctor said nothing about the missing exec bit: $_out" ;;
+esac
 
 it "doctor never advises deleting a hook grubstake did not write"
 # #59: the drift check above compares .githooks/pre-commit to embedded_hook unconditionally, with
@@ -6270,6 +6324,10 @@ if ( cd "$r" && git commit -q --allow-empty -m 'chore: a clean fixture message' 
 else
     pass
 fi
+
+it "a dangling gate symlink in commit-msg.d refuses the commit instead of being skipped"
+r=$(adopted_repo)
+assert_dangling_gate_refuses "$r" commit-msg.d 10-gate git -C "$r" commit -q --allow-empty -m "chore: fixture"
 
 it "this repo's own message gate still refuses the shapes the shipped spine does not carry"
 # Adopting the shipped hook here narrows the spine to the two agent-session shapes, so the other

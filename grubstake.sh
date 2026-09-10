@@ -699,6 +699,8 @@ STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
 # happens to have an opinion about the same file. A gate's own refusal is also the whole answer:
 # nothing below should spend a lint pass on an index a gate has already turned down.
 for gate in "$ROOT"/.githooks/pre-commit.d/*; do
+    # A dangling symlink is neither -e nor an unmatched glob, and treating it as either is the silent skip rule 16 forbids.
+    [ -L "$gate" ] && [ ! -e "$gate" ] && { echo "[pre-commit] gate is a dangling symlink: $gate" >&2; exit 1; }
     [ -e "$gate" ] || continue
     # A gate that lost its exec bit must not look like one that passed.
     [ -x "$gate" ] || { echo "[pre-commit] gate not executable: $gate" >&2; exit 1; }
@@ -865,6 +867,8 @@ if [ -n "$HITS" ]; then
 fi
 
 for gate in "$ROOT"/.githooks/commit-msg.d/*; do
+    # A dangling symlink is neither -e nor an unmatched glob, and treating it as either is the silent skip rule 16 forbids.
+    [ -L "$gate" ] && [ ! -e "$gate" ] && { echo "[commit-msg] gate is a dangling symlink: $gate" >&2; exit 1; }
     [ -e "$gate" ] || continue
     # A gate that lost its exec bit must not look like one that passed.
     [ -x "$gate" ] || { echo "[commit-msg] gate not executable: $gate" >&2; exit 1; }
@@ -896,13 +900,13 @@ hook_has_marker() {
 known_hook_hashes() {
     case "$1" in
         pre-commit)
-            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 949a813e7733ebfb1ad65fcb7cb0209c37f21ee0cdf794fd4afd9226a8db9958"
+            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 949a813e7733ebfb1ad65fcb7cb0209c37f21ee0cdf794fd4afd9226a8db9958 580ffee69d2cecc701b1e06dec66f71e445aa7a59b7389d8b5503ab522021b64"
             ;;
         post-commit)
             echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494"
             ;;
         commit-msg)
-            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421"
+            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421 46871ae058b3d817d5203212a3146523ac102e507d8bcfa8622fd0325222187c"
             ;;
         *) die "unknown hook: $1" ;;
     esac
@@ -1140,7 +1144,12 @@ cmd_doctor() {
                 elif [ "$_marker_rc" -ge 2 ]; then
                     printf '  %-12s cannot be read\n' "$_hook"
                 elif embedded_hook "$_hook" | cmp -s - "$_installed"; then
-                    printf '  %-12s ok\n' "$_hook"
+                    # Bytes matching is not enough: git silently skips a hook with no exec bit.
+                    if [ -x "$_installed" ]; then
+                        printf '  %-12s ok\n' "$_hook"
+                    else
+                        printf '  %-12s not executable (run: grubstake install)\n' "$_hook"
+                    fi
                 elif is_known_hook_hash "$_hook" "$(sha256_file "$_installed")"; then
                     # A known previous copy is refreshed, not deleted: install's own refresh handles this now.
                     printf '  %-12s DRIFTED from the embedded copy (run: grubstake install to refresh)\n' "$_hook"
@@ -1388,7 +1397,14 @@ cmd_install() {
             continue
         fi
         if embedded_hook "$_hook" | cmp -s - "$_dest"; then
-            log "$_hook: already present, leaving it alone"
+            # Bytes matching is not enough: git silently skips a hook with no exec bit.
+            if [ -x "$_dest" ]; then
+                log "$_hook: already present, leaving it alone"
+            else
+                # u+x, not a bare +x: git needs the owner bit, and a bare +x is subject to umask.
+                chmod u+x "$_dest"
+                log "$_hook: restored the executable bit"
+            fi
             continue
         fi
         # hashed_or_empty, not sha256_file directly: a hook that vanishes or turns unreadable between

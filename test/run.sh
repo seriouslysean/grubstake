@@ -4662,6 +4662,49 @@ else
     esac
 fi
 
+it "a staged type change (symlink replaced by a regular file) is linted, not skipped"
+# git reports a symlink-swap as "T", which --diff-filter=ACMR used to omit, so the spine skipped the lint entirely.
+r=$(new_hook_repo)
+( cd "$r" && ln -s README.md A.swift && git add A.swift && git commit -q -m "seed a symlink" ) \
+    || fixture_die "cannot seed a symlink commit in $r"
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter "$r"; lint_run "$r" 1 0 ""
+( cd "$r" && rm -f A.swift && printf 'struct A {}\n' > A.swift && git add A.swift ) \
+    || fixture_die "cannot stage the type change in $r"
+hook_commit "$r" >/dev/null 2>&1
+if [ ! -f "$r/lint.argv.1" ]; then
+    fail "the linter never ran on the staged type change"
+elif ! grep -qx A.swift "$r/lint.argv.1"; then
+    fail "the type change never reached the linter: $(tr '\n' ' ' < "$r/lint.argv.1")"
+else
+    pass
+fi
+
+it "a regular file staged over a symlink, then turned back into a symlink, is refused (TT)"
+# git reports this as TT: type-changed in the index, then type-changed again in the worktree. A
+# pattern of [ACMRT]M alone missed the worktree T, so the linter read the symlink's target while a
+# regular blob was about to commit.
+r=$(new_hook_repo)
+( cd "$r" && ln -s README.md A.swift && git add A.swift && git commit -q -m "seed a symlink" ) \
+    || fixture_die "cannot seed a symlink commit in $r"
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+( cd "$r" && rm -f A.swift && printf 'struct A {}\n' > A.swift && git add A.swift ) \
+    || fixture_die "cannot stage the type change in $r"
+( cd "$r" && rm -f A.swift && ln -s README.md A.swift ) \
+    || fixture_die "cannot turn the worktree copy back into a symlink in $r"
+_c0=$(commits "$r")
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "a regular blob committed on the strength of a lint of the worktree symlink's target: $_out"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+elif ! printf '%s' "$_out" | grep -q "A.swift"; then
+    fail "refused without naming the path: $_out"
+else
+    pass
+fi
+
 it "a staged file missing from the working tree does not commit unlinted (AD, MD)"
 # SwiftLint cannot read a path that is staged but gone from the working tree: it exits 1 and says
 # "No lintable files found", a message the hook also (wrongly) treats as "every staged path is

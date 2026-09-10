@@ -690,7 +690,7 @@ GRUBSTAKE="$ROOT/grubstake.sh"
 # Only verify tools when something this spine gates is staged. A cold cache should not refuse a
 # docs-only commit, and a repo with no pins has nothing to verify. Verified before the gates run,
 # so a gate reaching for a pinned tool finds one rather than downloading mid-commit.
-STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
+STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
 [ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
 
 # Gates before the lint below, in glob order. A gate that formats staged Swift and re-stages it is
@@ -707,7 +707,7 @@ done
 
 # Re-read the index. A gate may have re-staged what it fixed, and may have staged Swift where none
 # was staged at all, which the read above would leave linted by nobody.
-STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
+STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
 [ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
 
 # Only lint if the repo pinned swiftlint. A repo that does not use it should not be blocked by
@@ -721,14 +721,14 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     # Known limitation: SwiftLint reads the working tree, so this checks the current contents of
     # files whose paths are staged, not the staged blobs. Linting a temp copy would break config
     # resolution, and stashing the remainder to lint the index is what strands work in the tools
-    # that do it. Both shapes it can detect are refused below -- AD/MD, where there is nothing to
-    # read, and AM/MM, where what was read is not what is staged -- and CI lints the committed tree.
+    # that do it. Both shapes it can detect are refused below -- a second status column of D, where
+    # there is nothing to read, and M or T, where what was read is not what is staged -- and CI
+    # lints the committed tree.
     STATUS=$(git status --porcelain -- '*.swift')
-    # AD/MD: the worktree copy is gone, so the linter would read nothing at all. Decide this
-    # ourselves rather than trust the linter's exit status, which a batched run can mask.
-    GONE=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMR]D //p')
+    # Second column D means the worktree copy is gone, decided here rather than trusted to the linter's exit status, which a batched run can mask.
+    GONE=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMRT]D //p')
     # "--" ends option parsing, so a staged path starting with "-" is a path, never a linter flag.
-    OUT=$(git diff --cached --name-only -z --diff-filter=ACMR -- '*.swift' \
+    OUT=$(git diff --cached --name-only -z --diff-filter=ACMRT -- '*.swift' \
         | xargs -0 "$SWIFTLINT" lint --strict --quiet -- 2>&1) && RC=0 || RC=$?
     if [ -n "$GONE" ]; then
         # Print first: a real violation in a co-staged file the linter did read must not be
@@ -746,12 +746,8 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     fi
     [ -n "$OUT" ] && echo "$OUT"
 
-    # AM/MM/CM/RM: the linter read different content than what is staged, so its verdict is about
-    # bytes nobody is committing -- a working-tree fix passes a blob that still carries the
-    # violation, and a working-tree edit fails a blob that is clean. A warning on a run that exits
-    # 0 reads as "clean", so this refuses. sed, not grep: an assignment from a grep that matches
-    # nothing exits 1, and under set -e that ends every clean Swift commit.
-    PARTIAL=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMR]M //p')
+    # Second column M or T means the worktree differs from what's staged; sed, not grep, since a match-nothing grep would exit 1 and end a clean commit under set -e.
+    PARTIAL=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMRT][MT] //p')
     if [ -n "$PARTIAL" ]; then
         echo "[pre-commit] staged Swift file(s) have unstaged edits, so the lint read bytes that are not being committed:" >&2
         printf '%s\n' "$PARTIAL" | sed 's/^/[pre-commit]   /' >&2
@@ -900,7 +896,7 @@ hook_has_marker() {
 known_hook_hashes() {
     case "$1" in
         pre-commit)
-            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8"
+            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 949a813e7733ebfb1ad65fcb7cb0209c37f21ee0cdf794fd4afd9226a8db9958"
             ;;
         post-commit)
             echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494"

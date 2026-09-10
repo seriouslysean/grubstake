@@ -1078,6 +1078,36 @@ else
     esac
 fi
 
+it "an archive whose bytes differ from the pin is refused before anything runs or publishes"
+# Pinned at the fixture's own version so the sha256 comparison is the only gate that can refuse, and
+# judged by the absence of install_tool's own "installed" line, which nothing short of publish_dir prints.
+r=$(new_repo)
+_realsha=$(fake_release "$r" 0.63.2)
+_badsha=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+pins "$r" "swiftlint 0.63.2 $_badsha $_badsha"
+_dest="$r/.cache/swiftlint/$_badsha"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+n=$(find "$r/.cache" -name '*.staging.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite bytes that do not match the pinned sha256: $_out"
+elif [ "$n" != "0" ]; then
+    fail "$n staging directories left behind after the sha256-mismatch die: $_out"
+elif [ -x "$_dest/swiftlint" ]; then
+    fail "the mismatched archive was published at the pinned hash path: $_out"
+else
+    case "$_out" in
+        *": installed"*)
+            fail "install_tool reported the mismatched archive installed, so it ran past the gate: $_out" ;;
+        *"sha256 mismatch"*)
+            case "$_out" in
+                *"$_badsha"*"$_realsha"*)
+                    pass ;;
+                *) fail "died on a mismatch but did not name both the pinned and the actual hash: $_out" ;;
+            esac ;;
+        *) fail "died for an unexpected reason, not the sha256 mismatch: $_out" ;;
+    esac
+fi
+
 it "a space in the cache path does not break the cleanup trap"
 # Contrast case for the single-quote test below: a trap string is shell source, re-parsed when it
 # fires, so any value embedded in it has to survive that second parse regardless of what characters

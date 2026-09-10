@@ -30,13 +30,21 @@ jobs:
           - platform: macos
             runner: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # The suite asserts the script parses under dash; macOS ships none, and without one that
       # assertion fails for a missing interpreter rather than for the thing it guards.
       - name: install dash
         if: runner.os == 'macOS'
         run: brew install dash
+
+      # dash is the test interpreter installed unpinned from Homebrew, an accepted exception because
+      # it is not an artifact this repo ships and Homebrew offers no version pin.
+      - name: report dash identity
+        if: runner.os == 'macOS'
+        run: |
+          command -v dash || exit 1
+          brew list --versions dash
 
       - name: offline suite
         run: test/run.sh

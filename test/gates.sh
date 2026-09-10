@@ -124,5 +124,31 @@ case "$out" in
     *) fail "got: $out" ;;
 esac
 
+it "a shell-critic receipt does not satisfy a leak-auditor requirement"
+# F13/#137: the marker carried no reviewer kind, so any receipt on a matching digest and session cleared the gate whatever it had actually reviewed.
+rm -f "$MARKER" "$BLOCKS"
+receipt 'Antagonist: gst-shell-critic.\n\nNo findings.' >/dev/null
+out=$(gate "$T")
+case "$out" in
+    *'"decision":"block"'*gst-leak-auditor*) pass ;;
+    *) fail "a shell-critic receipt satisfied a requirement only gst-leak-auditor can cover: $out" ;;
+esac
+
+it "shell-critic and leak-auditor receipts on the same state together satisfy both requirements"
+rm -f "$MARKER" "$BLOCKS"
+echo "# poke3" >> "$R/grubstake.sh"
+out1=$(gate "$T")
+receipt 'Antagonist: gst-shell-critic.\n\nNo findings.' >/dev/null
+out2=$(gate "$T")
+receipt 'Antagonist: gst-leak-auditor.\n\nNo findings.' >/dev/null
+out3=$(gate "$T"); rc3=$?
+if printf '%s' "$out1" | grep -q '"decision":"block"' \
+    && printf '%s' "$out2" | grep -q '"decision":"block"' \
+    && [ "$rc3" -eq 0 ] && [ -z "$out3" ]; then
+    pass
+else
+    fail "out1=$out1 out2=$out2 rc3=$rc3 out3=$out3"
+fi
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

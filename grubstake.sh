@@ -6,7 +6,7 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="1.1.2"
+GRUBSTAKE_VERSION="1.2.0"
 GRUBSTAKE_MIN_VERSION="0.3.0"   # every earlier release has a known blocking defect
 # Named so cmd_update can tell an override apart from the default it is comparing against.
 GRUBSTAKE_REPO_DEFAULT="https://github.com/seriouslysean/grubstake"
@@ -27,6 +27,18 @@ die()  { printf '[grubstake] %s\n' "$1" >&2; exit 1; }
 # A trap string is shell source expanded once when the trap is set and re-parsed when it fires,
 # so a value embedded in it has to survive that second parse regardless of what characters it holds.
 sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# ---------------------------------------------------------------------------- signal cleanup
+
+# A trap with no exit resumes the interrupted script once cleanup runs; the signal case disarms EXIT before exiting, so a caught signal never runs the same cleanup twice.
+arm_cleanup() {
+    # shellcheck disable=SC2064
+    trap "$1" EXIT
+    # shellcheck disable=SC2064
+    trap "trap - EXIT; $1; exit 1" HUP INT TERM
+}
+
+disarm_cleanup() { trap - EXIT HUP INT TERM; }
 
 usage() {
     cat <<'USAGE'
@@ -59,17 +71,31 @@ platform() {
 
 cache_root() {
     if [ -n "${GRUBSTAKE_CACHE:-}" ]; then
-        echo "$GRUBSTAKE_CACHE"
-        return 0
-    fi
-    # Checked, not tested directly: a die inside $( ) only kills that subshell, so comparing its
-    # empty result against "darwin" would read as false and fall through to a Linux-shaped path.
-    _cr_plat="$(platform)" || return 1
-    if [ "$_cr_plat" = darwin ]; then
-        echo "$HOME/Library/Caches/grubstake"
+        _cr_var=GRUBSTAKE_CACHE; _cr_val="$GRUBSTAKE_CACHE"
+        _cr_root="$_cr_val"
     else
-        echo "${XDG_CACHE_HOME:-$HOME/.cache}/grubstake"
+        # Checked, not tested directly: a die inside $( ) only kills that subshell, so comparing its
+        # empty result against "darwin" would read as false and fall through to a Linux-shaped path.
+        _cr_plat="$(platform)" || return 1
+        if [ "$_cr_plat" = darwin ]; then
+            _cr_var=HOME; _cr_val="${HOME:-}"
+            _cr_root="$_cr_val/Library/Caches/grubstake"
+        elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+            _cr_var=XDG_CACHE_HOME; _cr_val="$XDG_CACHE_HOME"
+            _cr_root="$_cr_val/grubstake"
+        else
+            _cr_var=HOME; _cr_val="${HOME:-}"
+            _cr_root="$_cr_val/.cache/grubstake"
+        fi
     fi
+    # An empty HOME still shapes an absolute path, so the producing value is checked before its shape.
+    [ -n "$_cr_val" ] || { warn "$_cr_var is empty, so the cache root cannot be resolved"; return 1; }
+    # STABILITY.md promises an absolute path, so a relative one is refused here for every command, not per caller.
+    case "$_cr_root" in
+        /*) : ;;
+        *)  warn "$_cr_var must be an absolute path, got: $_cr_root"; return 1 ;;
+    esac
+    echo "$_cr_root"
 }
 
 sha256_file() {
@@ -123,7 +149,8 @@ tool_version_args() {
 known_tools() { echo "swiftlint swiftformat xcbeautify periphery"; }
 
 # grep -qw matches "$1" as a basic regex, so "swift.int" matches "swiftlint"; -xF keeps it literal.
-is_known_tool() { known_tools | tr ' ' '\n' | grep -qxF "$1"; }
+# -e marks "$1" as the pattern explicitly, so an option-shaped value like "--version" is not read as grep's own flag instead.
+is_known_tool() { known_tools | tr ' ' '\n' | grep -qxF -e "$1"; }
 
 # ---------------------------------------------------------------------------- pins
 # Not JSON: greppable, diffable, no parser needed.
@@ -429,9 +456,18 @@ publish_dir() {
             chmod -R a-w "$2" 2>/dev/null || true
         fi
     else
-        mv "$1" "$2"
+        mv "$1" "$2" || { warn "$3: cannot publish into $2"; return 1; }
         chmod -R a-w "$2" 2>/dev/null || true
     fi
+}
+
+# Rule 3: no receipt carries a version the binary on disk was not first shown to report.
+assert_reported_version() {
+    _arv="$(reported_version "$1" "$2" || echo '')"
+    [ "$_arv" = "$3" ] && return 0
+    warn "$2: $4 reports ${_arv:-nothing}, not the pinned $3.
+  The pin may have been edited without re-hashing; run: grubstake add $2@$3, or remove $4 by hand."
+    return 1
 }
 
 # The pinned hash, checked here against the bytes that arrived, is the trust root. Everything
@@ -443,7 +479,8 @@ install_tool() {
     # so a bare assignment would swallow platform()'s own die and fall through to a misleading empty-platform skip.
     _plat="$(platform)" || return 1
     _want="$(pin_sha "$_tool" "$_plat" 2>/dev/null || echo '-')"
-    _url="$(tool_url "$_tool" "$_ver" "$_plat")"
+    # Same shape as $_plat above: an unknown tool name reaching here must fail, not read as an empty, not-published URL and be skipped as if nothing were wrong.
+    _url="$(tool_url "$_tool" "$_ver" "$_plat")" || return 1
 
     if [ -z "$_url" ]; then
         log "$_tool: not published for $_plat, skipping"
@@ -451,8 +488,8 @@ install_tool() {
     fi
     [ "$_want" != "-" ] && [ -n "$_want" ] || die "$_tool has no $_plat hash in grubstake.tools (run: grubstake add $_tool@$_ver)"
 
-    _dest="$(tool_dir "$_tool" "$_want")"
-    _bin="$(tool_bin "$_tool" "$_want")"
+    _dest="$(tool_dir "$_tool" "$_want")" || return 1
+    _bin="$(tool_bin "$_tool" "$_want")" || return 1
     # Ahead of every branch below, not only the fresh-install one: an already-existing entry still
     # means install_tool is actively managing this root right now (#95).
     _croot="$(cache_root)" || return 1
@@ -466,16 +503,8 @@ install_tool() {
             if [ "$_rver" = "$_ver" ]; then
                 return 0
             fi
-            # A stale receipt line is not license to trust the pin's claim unchecked: rule 3 requires
-            # the binary itself to report the pinned version before that label is ever recorded, so
-            # this asserts it here, offline, against the binary already on disk -- the one path that
-            # could otherwise relabel a receipt to a version the binary was never shown to be.
-            _reported="$(reported_version "$_bin" "$_tool" || echo '')"
-            if [ "$_reported" != "$_ver" ]; then
-                warn "$_tool: $_dest reports ${_reported:-nothing}, not the pinned $_ver.
-  The pin may have been edited without re-hashing; run: grubstake add $_tool@$_ver, or remove $_dest by hand."
-                return 1
-            fi
+            # A stale receipt line is not license to trust the pin's claim unchecked -- the one path that could otherwise relabel a receipt to a version the binary was never shown to be.
+            assert_reported_version "$_bin" "$_tool" "$_ver" "$_dest" || return 1
             # The binary genuinely reports the pinned version -- only the receipt's version line was
             # stale -- so this rewrites it in place rather than downloading: publish_dir would discard
             # a fresh download here anyway, since this entry's own executable already makes it the
@@ -506,6 +535,7 @@ install_tool() {
             # No receipt, or a header this script does not recognize: predates receipts, or was
             # written by a version that will. Record one against what is already there, offline and
             # in place -- it is the same trust the entry already had, now with a baseline to drift from.
+            assert_reported_version "$_bin" "$_tool" "$_ver" "$_dest" || return 1
             _bsha="$(hashed_or_empty "$_bin")"
             if [ -z "$_bsha" ]; then
                 # A hash that failed or came back empty must never be recorded: a legacy entry with no
@@ -525,8 +555,7 @@ install_tool() {
     fi
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
-    # shellcheck disable=SC2064
-    trap "rm -rf $(sq "$_tmp")" EXIT HUP INT TERM
+    arm_cleanup "rm -rf $(sq "$_tmp")"
 
     log "$_tool $_ver: downloading"
     _archive="$_tmp/archive"
@@ -539,10 +568,10 @@ install_tool() {
   got      $_got"
 
     _extract="$_tmp/x"
-    mkdir -p "$_extract"
+    mkdir -p "$_extract" || die "$_tool $_ver: could not create extraction directory"
     case "$_url" in
-        *.tar.xz) tar -xJf "$_archive" -C "$_extract" ;;
-        *)        unzip -oq "$_archive" -d "$_extract" ;;
+        *.tar.xz) tar -xJf "$_archive" -C "$_extract" || die "$_tool $_ver: extraction failed" ;;
+        *)        unzip -oq "$_archive" -d "$_extract" || die "$_tool $_ver: extraction failed" ;;
     esac
 
     _member="$(tool_member "$_tool" "$_plat")"
@@ -553,13 +582,14 @@ install_tool() {
     # Keep the binary's siblings: periphery loads libIndexStore.dylib via @rpath from its own dir.
     _staging="$_dest.staging.$$"
     # Staging lives outside $_tmp, so a die between here and publish leaked it; rm -rf tolerates publish having moved it.
-    # shellcheck disable=SC2064
-    trap "rm -rf $(sq "$_tmp") $(sq "$_staging")" EXIT HUP INT TERM
+    arm_cleanup "rm -rf $(sq "$_tmp") $(sq "$_staging")"
     rm -rf "$_staging"
+    # A stale staging surviving rm -rf (e.g. mode 000) would have cp -R merge into it rather than start clean.
+    [ ! -e "$_staging" ] || die "$_tool $_ver: cannot clear stale $_staging"
     mkdir -p "$_staging"
-    cp -R "$(dirname "$_found")"/. "$_staging"/
-    [ "$_member" = "$_tool" ] || mv "$_staging/$_member" "$_staging/$_tool"
-    chmod +x "$_staging/$_tool"
+    cp -R "$(dirname "$_found")"/. "$_staging"/ || die "$_tool $_ver: could not stage extracted files"
+    [ "$_member" = "$_tool" ] || mv "$_staging/$_member" "$_staging/$_tool" || die "$_tool $_ver: could not stage $_member as $_tool"
+    chmod +x "$_staging/$_tool" || die "$_tool $_ver: could not mark staged binary executable"
 
     # Asserted once, here, on bytes that have already matched the pin. No later run re-checks it.
     _reported="$(reported_version "$_staging/$_tool" "$_tool" || echo '')"
@@ -570,7 +600,8 @@ install_tool() {
     # tmp+mv needed here: staging rides one atomic rename into place, so this is never seen half-written.
     _bsha="$(hashed_or_empty "$_staging/$_tool")"
     if [ -n "$_bsha" ]; then
-        printf 'receipt 1\nbinary-sha256 %s\nversion %s\n' "$_bsha" "$_ver" > "$(receipt_file "$_staging")"
+        printf 'receipt 1\nbinary-sha256 %s\nversion %s\n' "$_bsha" "$_ver" > "$(receipt_file "$_staging")" \
+            || die "$_tool $_ver: cannot write the receipt"
     else
         # A hash that failed or came back empty must never be written: publishing receiptless is a
         # fully supported state -- the same one every legacy entry is in -- and self-heals next ensure.
@@ -581,9 +612,9 @@ install_tool() {
     # errexit is suspended for this function's whole body under cmd_ensure's "install_tool ... || _bad=1".
     with_lock "$_dest.lock" publish_dir "$_staging" "$_dest" "$_tool" || {
         rm -rf "$_tmp"
-        trap - EXIT HUP INT TERM
         chmod -R u+w "$_staging" 2>/dev/null || true
         rm -rf "$_staging"
+        disarm_cleanup
         # Named only if it survives the attempt above: a plain lock failure never touched staging at all.
         if [ -e "$_staging" ]; then
             warn "$_tool $_ver: could not finish publishing (remove $_staging and retry)"
@@ -594,7 +625,7 @@ install_tool() {
     }
 
     rm -rf "$_tmp"
-    trap - EXIT HUP INT TERM
+    disarm_cleanup
     # Should be unreachable: a with_lock failure above already warns and returns before this executes.
     [ -x "$_bin" ] || die "$_tool $_ver: install incomplete (remove $_dest and retry)"
     log "$_tool $_ver: installed"
@@ -618,9 +649,12 @@ verify_tool() {
         return 1
     fi
     _sha="$(pin_sha "$_tool" "$_plat" 2>/dev/null || echo '-')"
-    _url="$(tool_url "$_tool" "$2" "$_plat")"
+    # An unknown tool name must fail here too, not read as an empty, not-published URL and pass.
+    _url="$(tool_url "$_tool" "$2" "$_plat")" || return 1
     [ -n "$_url" ] || return 0
-    [ -x "$(tool_bin "$_tool" "$_sha")" ] && return 0
+    # Assigned first, not nested: a failed tool_bin (cache_root's own refusal) must stand alone, not read as -x "" and be relabeled "not installed" below.
+    _bin="$(tool_bin "$_tool" "$_sha")" || return 1
+    [ -x "$_bin" ] && return 0
     # Warned, not died: cmd_check's own loop is where every missing tool gets named, not just the first.
     warn "$_tool $2: not installed (run: grubstake ensure)"
     return 1
@@ -657,7 +691,7 @@ GRUBSTAKE="$ROOT/grubstake.sh"
 # Only verify tools when something this spine gates is staged. A cold cache should not refuse a
 # docs-only commit, and a repo with no pins has nothing to verify. Verified before the gates run,
 # so a gate reaching for a pinned tool finds one rather than downloading mid-commit.
-STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
+STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
 [ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
 
 # Gates before the lint below, in glob order. A gate that formats staged Swift and re-stages it is
@@ -666,6 +700,8 @@ STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
 # happens to have an opinion about the same file. A gate's own refusal is also the whole answer:
 # nothing below should spend a lint pass on an index a gate has already turned down.
 for gate in "$ROOT"/.githooks/pre-commit.d/*; do
+    # A dangling symlink is neither -e nor an unmatched glob, and treating it as either is the silent skip rule 16 forbids.
+    [ -L "$gate" ] && [ ! -e "$gate" ] && { echo "[pre-commit] gate is a dangling symlink: $gate" >&2; exit 1; }
     [ -e "$gate" ] || continue
     # A gate that lost its exec bit must not look like one that passed.
     [ -x "$gate" ] || { echo "[pre-commit] gate not executable: $gate" >&2; exit 1; }
@@ -674,13 +710,14 @@ done
 
 # Re-read the index. A gate may have re-staged what it fixed, and may have staged Swift where none
 # was staged at all, which the read above would leave linted by nobody.
-STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
+STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
 [ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
 
 # Only lint if the repo pinned swiftlint. A repo that does not use it should not be blocked by
 # the shared spine; its own gates in pre-commit.d decide. One line per tool, so grep is enough.
 if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.tools" 2>/dev/null; then
-    SWIFTLINT="$("$GRUBSTAKE" path swiftlint)" || exit 1
+    # GRUBSTAKE_OFFLINE keeps curl off the commit path: a clean racing this check must refuse, not download.
+    SWIFTLINT="$(GRUBSTAKE_OFFLINE=1 "$GRUBSTAKE" path swiftlint)" || exit 1
     # Verify and refuse rather than format-and-restage: re-adding after a fix folds unrelated
     # hunks into a partial `git add -p` and re-stages a working-tree deletion of a file staged
     # as new. The developer fixes and re-stages; the hook never touches the index.
@@ -688,14 +725,12 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     # Known limitation: SwiftLint reads the working tree, so this checks the current contents of
     # files whose paths are staged, not the staged blobs. Linting a temp copy would break config
     # resolution, and stashing the remainder to lint the index is what strands work in the tools
-    # that do it. Both shapes it can detect are refused below -- AD/MD, where there is nothing to
-    # read, and AM/MM, where what was read is not what is staged -- and CI lints the committed tree.
+    # that do it. Both shapes it can detect are refused below -- a second status column of D, where there is nothing to read, and M or T, where what was read is not what is staged -- and CI lints the committed tree.
     STATUS=$(git status --porcelain -- '*.swift')
-    # AD/MD: the worktree copy is gone, so the linter would read nothing at all. Decide this
-    # ourselves rather than trust the linter's exit status, which a batched run can mask.
-    GONE=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMR]D //p')
+    # Second column D means the worktree copy is gone, decided here rather than trusted to the linter's exit status, which a batched run can mask.
+    GONE=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMRT]D //p')
     # "--" ends option parsing, so a staged path starting with "-" is a path, never a linter flag.
-    OUT=$(git diff --cached --name-only -z --diff-filter=ACMR -- '*.swift' \
+    OUT=$(git diff --cached --name-only -z --diff-filter=ACMRT -- '*.swift' \
         | xargs -0 "$SWIFTLINT" lint --strict --quiet -- 2>&1) && RC=0 || RC=$?
     if [ -n "$GONE" ]; then
         # Print first: a real violation in a co-staged file the linter did read must not be
@@ -713,12 +748,8 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     fi
     [ -n "$OUT" ] && echo "$OUT"
 
-    # AM/MM/CM/RM: the linter read different content than what is staged, so its verdict is about
-    # bytes nobody is committing -- a working-tree fix passes a blob that still carries the
-    # violation, and a working-tree edit fails a blob that is clean. A warning on a run that exits
-    # 0 reads as "clean", so this refuses. sed, not grep: an assignment from a grep that matches
-    # nothing exits 1, and under set -e that ends every clean Swift commit.
-    PARTIAL=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMR]M //p')
+    # Second column M or T means the worktree differs from what's staged; sed, not grep, since a match-nothing grep would exit 1 and end a clean commit under set -e.
+    PARTIAL=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMRT][MT] //p')
     if [ -n "$PARTIAL" ]; then
         echo "[pre-commit] staged Swift file(s) have unstaged edits, so the lint read bytes that are not being committed:" >&2
         printf '%s\n' "$PARTIAL" | sed 's/^/[pre-commit]   /' >&2
@@ -836,6 +867,8 @@ if [ -n "$HITS" ]; then
 fi
 
 for gate in "$ROOT"/.githooks/commit-msg.d/*; do
+    # A dangling symlink is neither -e nor an unmatched glob, and treating it as either is the silent skip rule 16 forbids.
+    [ -L "$gate" ] && [ ! -e "$gate" ] && { echo "[commit-msg] gate is a dangling symlink: $gate" >&2; exit 1; }
     [ -e "$gate" ] || continue
     # A gate that lost its exec bit must not look like one that passed.
     [ -x "$gate" ] || { echo "[commit-msg] gate not executable: $gate" >&2; exit 1; }
@@ -867,13 +900,13 @@ hook_has_marker() {
 known_hook_hashes() {
     case "$1" in
         pre-commit)
-            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8"
+            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 1f1a0953e8ebe4bba4331251ca7d6a3da9f0c3ead68ff9285056fb94505a773f"
             ;;
         post-commit)
             echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494"
             ;;
         commit-msg)
-            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421"
+            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421 e2b2336f9737cc37cbd9930ac623cea7e997a58551450d684a181b5bc7861e93"
             ;;
         *) die "unknown hook: $1" ;;
     esac
@@ -883,7 +916,7 @@ is_known_hook_hash() {
     # Assigned, not piped: known_hook_hashes' own die exits only the pipe's first stage, and grep on
     # the empty remainder it leaves behind returns 1 same as a genuine non-match, hiding the die.
     _khh="$(known_hook_hashes "$1")" || return 1
-    printf '%s\n' "$_khh" | tr ' ' '\n' | grep -qxF "$2"
+    printf '%s\n' "$_khh" | tr ' ' '\n' | grep -qxF -e "$2"
 }
 
 # ---------------------------------------------------------------------------- commands
@@ -895,8 +928,7 @@ add_one() {
     is_known_tool "$_tool" || die "unknown tool: $_tool"
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
-    # shellcheck disable=SC2064
-    trap "rm -rf $(sq "$_tmp")" EXIT HUP INT TERM
+    arm_cleanup "rm -rf $(sq "$_tmp")"
 
     # Hash every platform, so a macOS run still pins what Linux CI fetches.
     _shas=""
@@ -939,8 +971,7 @@ add_one() {
         [ "$_waited" -gt 50 ] && die "grubstake.tools is locked by another run ($_lock)"
         sleep 0.1 2>/dev/null || sleep 1
     done
-    # shellcheck disable=SC2064
-    trap "rm -rf $(sq "$_tmp") $(sq "$_pt") $(sq "$_lock")" EXIT HUP INT TERM
+    arm_cleanup "rm -rf $(sq "$_tmp") $(sq "$_pt") $(sq "$_lock")"
     # The fetch above can run for minutes with nothing holding the pins file, so its contents are
     # only known-good once the lock that guards the rewrite below is held.
     validate_pins
@@ -980,10 +1011,11 @@ add_one() {
     [ "$_before" -eq 0 ] || [ "$_after" -ge "$_before" ] \
         || die "$_pins: rewrite would drop pins ($_before -> $_after), $_tool@$_ver was not recorded"
     mv "$_pt" "$_pins"
+    rm -rf "$_tmp"
+    # Disarmed before rmdir: armed past it, a signal here would rm -rf a successor's lock at this same path.
+    disarm_cleanup
     rmdir "$_lock" 2>/dev/null || true
 
-    rm -rf "$_tmp"
-    trap - EXIT HUP INT TERM
     log "pinned $_tool $_ver"
     install_tool "$_tool" "$_ver"
 }
@@ -1043,7 +1075,11 @@ cmd_path() {
     # Existence only, deliberately: the commit path stays hash-free and offline, and a receipt
     # mismatch surfacing here would put a network-shaped check back in front of every commit. Catching
     # drift is ensure's job.
-    [ -x "$_bin" ] || install_tool "$1" "$_ver" >&2
+    if [ ! -x "$_bin" ]; then
+        # A clean racing this check can leave the binary missing right when a commit reaches for it; GRUBSTAKE_OFFLINE refuses instead of installing mid-commit.
+        [ -z "${GRUBSTAKE_OFFLINE:-}" ] || die "$1 $_ver: not installed (run: grubstake ensure)"
+        install_tool "$1" "$_ver" >&2
+    fi
     verify_tool "$1" "$_ver"
     echo "$_bin"
 }
@@ -1063,10 +1099,9 @@ cmd_doctor() {
     fi
     printf 'platform   %s\n' "$_plat"
     # Same shape as the platform field above: cache_root can fail on its own (GRUBSTAKE_CACHE unset,
-    # platform unsupported) even when $_plat_ok already covered the platform line's own failure.
-    # 2>/dev/null: cache_root's own nested platform() call still writes its die to stderr directly,
-    # unredirected by cache_root's own capture, so it must be silenced here or it leaks past this report.
-    if _cache="$(cache_root 2>/dev/null)"; then
+    # platform unsupported, or a relative override) even when $_plat_ok already covered the platform line's own failure. 2>&1, not 2>/dev/null: the refusal reason is the only way this line can say more than "unresolved" without a stale label naming just one of several now-possible causes.
+    if _cache="$(cache_root 2>&1)"; then
+        _cache_ok=1
         printf 'cache      %s\n' "$_cache"
         # Skipped when the cache dir does not exist yet: nothing has run against this root, so there is
         # nothing to report -- install_tool's own backfill is what first writes the sentinel (#95).
@@ -1089,7 +1124,9 @@ cmd_doctor() {
             fi
         fi
     else
-        printf 'cache      unresolved (platform unsupported)\n'
+        _cache_ok=0
+        _cache="${_cache#\[grubstake\] }"
+        printf 'cache      unresolved (%s)\n' "$_cache"
     fi
     _hookspath="$(git -C "$_root" config core.hooksPath || true)"
     printf 'hooksPath  %s\n' "${_hookspath:-(unset)}"
@@ -1109,7 +1146,12 @@ cmd_doctor() {
                 elif [ "$_marker_rc" -ge 2 ]; then
                     printf '  %-12s cannot be read\n' "$_hook"
                 elif embedded_hook "$_hook" | cmp -s - "$_installed"; then
-                    printf '  %-12s ok\n' "$_hook"
+                    # Bytes matching is not enough: git silently skips a hook with no exec bit.
+                    if [ -x "$_installed" ]; then
+                        printf '  %-12s ok\n' "$_hook"
+                    else
+                        printf '  %-12s not executable (run: grubstake install)\n' "$_hook"
+                    fi
                 elif is_known_hook_hash "$_hook" "$(sha256_file "$_installed")"; then
                     # A known previous copy is refreshed, not deleted: install's own refresh handles this now.
                     printf '  %-12s DRIFTED from the embedded copy (run: grubstake install to refresh)\n' "$_hook"
@@ -1136,6 +1178,9 @@ cmd_doctor() {
         fi
         if [ -z "$_url" ]; then
             printf '  %-12s %-10s n/a on %s\n' "$_tool" "$_ver" "$_plat"
+        elif [ "$_cache_ok" = 0 ]; then
+            # Reuses $_cache_ok from the header instead of tool_bin's own cache_root call, which would otherwise repeat cache_root's refusal warning once per pinned tool.
+            printf '  %-12s %-10s could not resolve\n' "$_tool" "$_ver"
         elif [ -x "$(tool_bin "$_tool" "$(pin_sha "$_tool" "$_plat")")" ]; then
             printf '  %-12s %-10s installed\n' "$_tool" "$_ver"
         else
@@ -1201,14 +1246,11 @@ clean_trash_teardown() {
 }
 
 # No validate_pins: a malformed grubstake.tools must not block the one command that recovers from
-# a wedged cache. cache_root can now fail outright (unsupported platform, no GRUBSTAKE_CACHE override);
-# a degenerate or relative path is the only case left for the checks below to refuse.
+# a wedged cache. cache_root can now fail outright (unsupported platform, no GRUBSTAKE_CACHE override, or a relative one); a degenerate path is the only case left for the check below to refuse.
 cmd_clean() {
-    _root="$(cache_root)" || die "cannot determine the cache root: platform unsupported"
+    _root="$(cache_root)" || die "cannot determine the cache root"
     case "$_root" in
         /|//|/.|/..) die "refusing to remove cache root: '$_root'" ;;
-        /*)          : ;;
-        *)           die "refusing to remove cache root, not an absolute path: '$_root'" ;;
     esac
     # rm -rf on a symlink unlinks the link and leaves its target untouched while still reporting success.
     [ -L "$_root" ] && die "refusing to remove cache root, it is a symlink: '$_root' -> '$(readlink "$_root")'"
@@ -1307,6 +1349,27 @@ cmd_install() {
     if [ -n "$_existing" ] && [ "$_existing" != ".githooks" ]; then
         die "core.hooksPath is already '$_existing'; move those hooks into .githooks first"
     fi
+    # Unset hooksPath means git already runs whatever sits executable in .git/hooks; wiring .githooks over it would silence that hook, the failure rule 16 exists to close.
+    if [ -z "$_existing" ]; then
+        _gh="$(git -C "$_root" rev-parse --git-path hooks)"
+        case "$_gh" in
+            /*) : ;;
+            *)  _gh="$_root/$_gh" ;;
+        esac
+        # An unreadable directory leaves the glob below literal and the whole gate silently skipped.
+        if [ -d "$_gh" ] && [ ! -r "$_gh" ]; then
+            die "cannot read $_gh to check for live hooks"
+        fi
+        _active=""
+        for _f in "$_gh"/*; do
+            [ -e "$_f" ] || continue
+            [ -f "$_f" ] || continue
+            case "$(basename "$_f")" in *.sample) continue ;; esac
+            [ -x "$_f" ] || continue
+            _active="$_active $(basename "$_f")"
+        done
+        [ -z "$_active" ] || die "$_gh has executable file(s) that would stop running once hooks move:$_active -- move real hooks under .githooks/ and delete the rest first"
+    fi
     mkdir -p "$_root/.githooks"
 
     for _hook in pre-commit post-commit commit-msg; do
@@ -1314,12 +1377,11 @@ cmd_install() {
         if [ ! -f "$_dest" ]; then
             # mktemp beside $_dest, not in $TMPDIR: mv across filesystems can silently stop being atomic.
             _hooktmp="$(mktemp "$_root/.githooks/.$_hook.XXXXXX")" || die "cannot create a temp file to install $_hook"
-            # shellcheck disable=SC2064
-            trap "rm -f $(sq "$_hooktmp")" EXIT HUP INT TERM
+            arm_cleanup "rm -f $(sq "$_hooktmp")"
             embedded_hook "$_hook" > "$_hooktmp"
             chmod +x "$_hooktmp"
             mv "$_hooktmp" "$_dest"
-            trap - EXIT HUP INT TERM
+            disarm_cleanup
             log "$_hook: installed"
             continue
         fi
@@ -1335,7 +1397,14 @@ cmd_install() {
             continue
         fi
         if embedded_hook "$_hook" | cmp -s - "$_dest"; then
-            log "$_hook: already present, leaving it alone"
+            # Bytes matching is not enough: git silently skips a hook with no exec bit.
+            if [ -x "$_dest" ]; then
+                log "$_hook: already present, leaving it alone"
+            else
+                # u+x, not a bare +x: git needs the owner bit, and a bare +x is subject to umask.
+                chmod u+x "$_dest"
+                log "$_hook: restored the executable bit"
+            fi
             continue
         fi
         # hashed_or_empty, not sha256_file directly: a hook that vanishes or turns unreadable between
@@ -1345,12 +1414,11 @@ cmd_install() {
             # The recorded constraint licenses re-upgrading any hook byte-identical to a known
             # previous copy, even a deliberate revert; removing the marker line is how to opt out.
             _hooktmp="$(mktemp "$_root/.githooks/.$_hook.XXXXXX")" || die "cannot create a temp file to refresh $_hook"
-            # shellcheck disable=SC2064
-            trap "rm -f $(sq "$_hooktmp")" EXIT HUP INT TERM
+            arm_cleanup "rm -f $(sq "$_hooktmp")"
             embedded_hook "$_hook" > "$_hooktmp"
             chmod +x "$_hooktmp"
             mv "$_hooktmp" "$_dest"
-            trap - EXIT HUP INT TERM
+            disarm_cleanup
             log "$_hook: refreshed to the current embedded copy"
         else
             warn "$_hook: differs from every known copy, left alone (repo-local edits are never overwritten)"
@@ -1391,11 +1459,16 @@ cmd_install() {
     log "installed. Review and commit: grubstake.sh grubstake.tools .githooks/"
 }
 
+# $1 < $2, dotted x.y.z only -- the shape both call sites already validate before this runs.
+version_lt() {
+    [ "$1" = "$2" ] && return 1
+    [ "$(printf '%s\n%s\n' "$1" "$2" \
+        | LC_ALL=C sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$1" ]
+}
+
 # Every release below the floor has a known blocking defect, so it is not offered or installable.
 below_floor() {
-    [ "$(printf '%s\n%s\n' "$1" "$GRUBSTAKE_MIN_VERSION" \
-        | LC_ALL=C sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$1" ] \
-        && [ "$1" != "$GRUBSTAKE_MIN_VERSION" ]
+    version_lt "$1" "$GRUBSTAKE_MIN_VERSION"
 }
 
 # Release tags, newest first. No mutable "latest" pointer.
@@ -1412,15 +1485,16 @@ release_tags() {
 fetch_release() {
     curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$GRUBSTAKE_RAW/v$1/grubstake.sh" -o "$2" 2>/dev/null || return 1
     sh -n "$2" 2>/dev/null || return 1
-    # A tag is a mutable ref, so assert the bytes identify as what the tag claims.
-    grep -q "^GRUBSTAKE_VERSION=\"$1\"" "$2" || return 1
+    # A tag is a mutable ref, and an unescaped "." in $1 is a grep wildcard, so match the whole line literally.
+    grep -qxF "GRUBSTAKE_VERSION=\"$1\"" "$2" || return 1
+    # sh -n proves syntax, not completeness: a file truncated at a definition boundary parses clean, so require the call main() needs to not be inert.
+    [ "$(grep -v '^[[:space:]]*$' "$2" | tail -1)" = 'main "$@"' ] || return 1
 }
 
 cmd_update() {
     _pinned="${1:-}"
     _tmp="$(mktemp "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
-    # shellcheck disable=SC2064
-    trap "rm -f $(sq "$_tmp")" EXIT HUP INT TERM
+    arm_cleanup "rm -f $(sq "$_tmp")"
 
     # Silent on the common path; an overridden source is the one case a reader cannot infer from
     # the rest of the output, since fetch_release never repeats the host it pulled from.
@@ -1442,6 +1516,8 @@ cmd_update() {
         _target=""
         for _c in $_candidates; do
             [ "$_c" = "$GRUBSTAKE_VERSION" ] && { log "already on $GRUBSTAKE_VERSION"; return 0; }
+            # release_tags sorts newest first, so the first candidate that is not newer means none after it are either.
+            version_lt "$GRUBSTAKE_VERSION" "$_c" || { log "no usable release newer than $GRUBSTAKE_VERSION"; return 0; }
             log "fetching $_c"
             if fetch_release "$_c" "$_tmp"; then _target="$_c"; break; fi
             warn "v$_c is not a usable release, skipping"
@@ -1457,11 +1533,12 @@ cmd_update() {
     _self="$(script_path)"
     _self="$(cd "$(dirname "$_self")" && pwd)/$(basename "$_self")"
     _staged="$(mktemp "$(dirname "$_self")/.grubstake.XXXXXX")" || die "cannot stage beside $_self"
+    arm_cleanup "rm -f $(sq "$_tmp") $(sq "$_staged")"
     cp "$_tmp" "$_staged"
     chmod +x "$_staged"
     mv -f "$_staged" "$_self"
     rm -f "$_tmp"
-    trap - EXIT HUP INT TERM
+    disarm_cleanup
 
     log "updated to $_target"
     # install, not ensure: a hook a release adds or fixes reaches the repo through install alone, and install ensures on its way out.

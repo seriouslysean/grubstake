@@ -605,6 +605,37 @@ else
     pass
 fi
 
+it "path refuses a relative GRUBSTAKE_CACHE instead of printing a relative path"
+# F17: only cmd_clean checked for a relative override, so every other command built and printed a relative path underneath it, breaking the absolute-path contract STABILITY.md documents for `path`.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+mkdir -p "$r/cache/swiftlint/$SHA_A" || fixture_die "cannot create the relative-cache fixture dir"
+printf '#!/bin/sh\necho 0.63.2\n' > "$r/cache/swiftlint/$SHA_A/swiftlint"
+chmod +x "$r/cache/swiftlint/$SHA_A/swiftlint" || fixture_die "cannot make the fixture binary executable"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="cache" ./grubstake.sh path swiftlint 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "path exited 0 for a relative GRUBSTAKE_CACHE, printing: $_out"
+elif ! printf '%s' "$_out" | grep -q "GRUBSTAKE_CACHE"; then
+    fail "refused, but without naming GRUBSTAKE_CACHE: $_out"
+else
+    pass
+fi
+
+it "check reports cache_root's own refusal once, not a second, misleading not-installed line"
+# F17: verify_tool's "[ -x \"\$(tool_bin ...)\" ]" read a failed tool_bin as -x "", so cache_root's own refusal was followed by a second, misleading "not installed (run: grubstake ensure)" as if the tool had simply never been fetched.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="cache" ./grubstake.sh check 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "check exited 0 for a relative GRUBSTAKE_CACHE: $_out"
+elif ! printf '%s' "$_out" | grep -q "GRUBSTAKE_CACHE"; then
+    fail "refused, but without naming GRUBSTAKE_CACHE: $_out"
+elif printf '%s' "$_out" | grep -q "not installed"; then
+    fail "cache_root's own refusal was followed by a misleading not-installed line: $_out"
+else
+    pass
+fi
+
 it "doctor on an unsupported arch stays advisory, without a stray guard message leaking past its report"
 # #70's remaining survey item at cmd_doctor covers two nestings. The header's own capture
 # ("_plat=\"\$(platform 2>&1)\"") redirects platform()'s stderr into the captured value, so a failure
@@ -668,6 +699,29 @@ else
     pass
 fi
 
+it "path and clean refuse a relative or empty HOME the same way they refuse a relative GRUBSTAKE_CACHE"
+# An empty HOME shapes an absolute path, so the shape check alone would accept /Library/Caches/grubstake.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_pout=$( cd "$r" && env -u GRUBSTAKE_CACHE -u XDG_CACHE_HOME HOME="fake-home" ./grubstake.sh path swiftlint 2>&1 ); _prc=$?
+_cout=$( cd "$r" && env -u GRUBSTAKE_CACHE -u XDG_CACHE_HOME HOME="fake-home" ./grubstake.sh clean 2>&1 ); _crc=$?
+_eout=$( cd "$r" && env -u GRUBSTAKE_CACHE -u XDG_CACHE_HOME HOME="" ./grubstake.sh path swiftlint 2>&1 ); _erc=$?
+if [ "$_prc" -eq 0 ]; then
+    fail "path exited 0 for a relative HOME, printing: $_pout"
+elif [ "$_crc" -eq 0 ]; then
+    fail "clean exited 0 for a relative HOME: $_cout"
+elif [ "$_erc" -eq 0 ]; then
+    fail "path exited 0 for an empty HOME, printing: $_eout"
+elif ! printf '%s' "$_eout" | grep -q "HOME"; then
+    fail "path refused an empty HOME, but without naming it: $_eout"
+elif ! printf '%s' "$_pout" | grep -q "HOME"; then
+    fail "path refused, but without naming HOME: $_pout"
+elif ! printf '%s' "$_cout" | grep -q "HOME"; then
+    fail "clean refused, but without naming HOME: $_cout"
+else
+    pass
+fi
+
 # ---------------------------------------------------------------------------- pins validation
 
 printf '\npins file validation\n'
@@ -684,6 +738,20 @@ r=$(new_repo); pins "$r" "swiftlint 0.63.2 nothex $SHA_B"; expect_fail "$r" chec
 
 it "an unknown tool name fails"
 r=$(new_repo); pins "$r" "notatool 1.0.0 $SHA_A $SHA_B"; expect_fail "$r" check
+
+it "an option-shaped tool name in the pins file does not pass validation via grep's own flag parsing"
+# Without -e, grep reads "--version" as its own flag and reports a false match, so validate_pins never named the line.
+r=$(new_repo)
+pins "$r" "--version 1.0.0 $SHA_A $SHA_B"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh check 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "check exited 0 for an option-shaped tool name: $_out"
+else
+    case "$_out" in
+        *"grubstake.tools:2 unknown tool: --version"*) pass ;;
+        *) fail "validate_pins did not refuse the option-shaped name with its own file:line message: $_out" ;;
+    esac
+fi
 
 it "an unresolved conflict marker fails"
 r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B
@@ -1078,6 +1146,35 @@ else
     esac
 fi
 
+it "an archive whose bytes differ from the pin is refused before anything runs or publishes"
+# Pinned at the fixture's own version so the sha256 comparison is the only gate that can refuse, and judged by the absence of install_tool's own "installed" line, which nothing short of publish_dir prints.
+r=$(new_repo)
+_realsha=$(fake_release "$r" 0.63.2)
+_badsha=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+pins "$r" "swiftlint 0.63.2 $_badsha $_badsha"
+_dest="$r/.cache/swiftlint/$_badsha"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+n=$(find "$r/.cache" -name '*.staging.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite bytes that do not match the pinned sha256: $_out"
+elif [ "$n" != "0" ]; then
+    fail "$n staging directories left behind after the sha256-mismatch die: $_out"
+elif [ -x "$_dest/swiftlint" ]; then
+    fail "the mismatched archive was published at the pinned hash path: $_out"
+else
+    case "$_out" in
+        *": installed"*)
+            fail "install_tool reported the mismatched archive installed, so it ran past the gate: $_out" ;;
+        *"sha256 mismatch"*)
+            case "$_out" in
+                *"$_badsha"*"$_realsha"*)
+                    pass ;;
+                *) fail "died on a mismatch but did not name both the pinned and the actual hash: $_out" ;;
+            esac ;;
+        *) fail "died for an unexpected reason, not the sha256 mismatch: $_out" ;;
+    esac
+fi
+
 it "a space in the cache path does not break the cleanup trap"
 # Contrast case for the single-quote test below: a trap string is shell source, re-parsed when it
 # fires, so any value embedded in it has to survive that second parse regardless of what characters
@@ -1169,6 +1266,96 @@ else
         *"pinned 0.65.0"*) pass ;;
         *) fail "died for an unexpected reason, not the version mismatch: $_out" ;;
     esac
+fi
+
+# Shared by the three staging-failure tests below: a fresh repo pinned to a fake swiftlint release, with $r, $_sha and $_dest (its would-be cache destination) set for the caller.
+staging_failure_fixture() {
+    r=$(new_repo)
+    _sha=$(fake_release "$r" 0.63.2)
+    pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+    _dest="$r/.cache/swiftlint/$_sha"
+}
+
+it "an mv failure while publishing into an absent destination does not leave staging behind"
+# Gated on the destination argument so only the publish rename fails, not any other mv install_tool might run first.
+staging_failure_fixture
+_mvshim="$r/mv-shim"; mkdir -p "$_mvshim" || fixture_die "cannot create $_mvshim"
+_realmv="$(command -v mv)" || fixture_die "no real mv on PATH to wrap"
+cat > "$_mvshim/mv" <<SHIM
+#!/bin/sh
+if [ "\$#" -eq 2 ] && [ "\$2" = "$_dest" ]; then
+    exit 1
+fi
+exec "$_realmv" "\$@"
+SHIM
+chmod +x "$_mvshim/mv" || fixture_die "cannot make the mv shim executable"
+_out=$( cd "$r" && PATH="$_mvshim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+n=$(find "$r/.cache" -name '*.staging.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite the publish rename failing: $_out"
+elif [ -x "$_dest/swiftlint" ]; then
+    fail "a partial entry was published even though the publish rename failed: $_out"
+elif [ "$n" != "0" ]; then
+    fail "$n staging directories left behind after the publish rename failed: $_out"
+elif printf '%s' "$_out" | grep -q ": installed"; then
+    fail "an installed line was printed despite the publish rename failing: $_out"
+elif ! printf '%s' "$_out" | grep -q "cannot publish into"; then
+    fail "refused, but not with publish_dir's own message: $_out"
+else
+    pass
+fi
+
+it "a cp failure while staging the extracted files does not publish a partial entry"
+# Gated on the literal -R flag so the fixture curl shim's own flagless cp still works.
+staging_failure_fixture
+_cpshim="$r/cp-shim"; mkdir -p "$_cpshim" || fixture_die "cannot create $_cpshim"
+_realcp="$(command -v cp)" || fixture_die "no real cp on PATH to wrap"
+cat > "$_cpshim/cp" <<SHIM
+#!/bin/sh
+if [ "\$1" = -R ]; then
+    "$_realcp" "\$@"
+    exit 1
+fi
+exec "$_realcp" "\$@"
+SHIM
+chmod +x "$_cpshim/cp" || fixture_die "cannot make the cp shim executable"
+_out=$( cd "$r" && PATH="$_cpshim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+n=$(find "$r/.cache" -name '*.staging.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite the copy into staging failing: $_out"
+elif [ -x "$_dest/swiftlint" ]; then
+    fail "a partial entry was published even though the copy into staging failed: $_out"
+elif [ "$n" != "0" ]; then
+    fail "$n staging directories left behind after the copy failure: $_out"
+elif ! printf '%s' "$_out" | grep -q "could not stage extracted files"; then
+    fail "refused, but not with install_tool's own staging-copy message: $_out"
+else
+    pass
+fi
+
+it "an unzip failure after partial extraction does not publish a partial entry"
+# The shim fails only after the real unzip has written its members, so a nonzero extractor exit that follows partial output is what this proves refused, not an extractor that fails outright.
+staging_failure_fixture
+_unzipshim="$r/unzip-shim"; mkdir -p "$_unzipshim" || fixture_die "cannot create $_unzipshim"
+_realunzip="$(command -v unzip)" || fixture_die "no real unzip on PATH to wrap"
+cat > "$_unzipshim/unzip" <<SHIM
+#!/bin/sh
+"$_realunzip" "\$@"
+exit 1
+SHIM
+chmod +x "$_unzipshim/unzip" || fixture_die "cannot make the unzip shim executable"
+_out=$( cd "$r" && PATH="$_unzipshim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+n=$(find "$r/.cache" -name '*.staging.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite extraction failing: $_out"
+elif [ -x "$_dest/swiftlint" ]; then
+    fail "a partial entry was published even though extraction failed: $_out"
+elif [ "$n" != "0" ]; then
+    fail "$n staging directories left behind after the extraction failure: $_out"
+elif ! printf '%s' "$_out" | grep -q "extraction failed"; then
+    fail "refused, but not with install_tool's own extraction message: $_out"
+else
+    pass
 fi
 
 it "clean refuses a symlinked cache root rather than lying about removal"
@@ -1590,6 +1777,22 @@ fi
 rm -f "$r/.cache" 2>/dev/null
 rm -rf "$_real" 2>/dev/null
 mkdir -p "$r/.cache" 2>/dev/null
+
+it "doctor names GRUBSTAKE_CACHE exactly once for a relative override, not once per pinned tool"
+# cache_root's relative-path refusal is shared by every caller, including tool_bin inside doctor's own per-tool loop, so doctor resolves it once, up front, instead of repeating the warning once per pinned tool.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A
+swiftformat 0.55.0 $SHA_B $SHA_B"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="cache" ./grubstake.sh doctor 2>&1 )
+_named=$(printf '%s\n' "$_out" | grep -c "GRUBSTAKE_CACHE")
+_unresolved=$(printf '%s\n' "$_out" | grep -c "could not resolve")
+if [ "$_named" -ne 1 ]; then
+    fail "expected GRUBSTAKE_CACHE named exactly once, got $_named: $_out"
+elif [ "$_unresolved" -ne 2 ]; then
+    fail "expected both pinned tools to report could not resolve, got $_unresolved: $_out"
+else
+    pass
+fi
 
 it "an interrupted clean does not strand a full copy of the cache beside the root"
 # mv detaches the root, chmod clears read-only, then rm -rf removes the trash. A signal landing
@@ -2200,6 +2403,25 @@ else
     pass
 fi
 
+it "a legacy entry's receipt is never backfilled with a version the binary was never shown to report"
+# Pinning 0.65.0 over the hash of a binary reporting 0.63.2 is what a pin edited without re-hashing looks like.
+r=$(new_repo)
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"   # receiptless; binary reports 0.63.2
+pins "$r" "swiftlint 0.65.0 $SHA_A $SHA_A"   # pinned to a version the binary was never shown to report
+_receipt="$r/.cache/swiftlint/$SHA_A/.grubstake-receipt"
+_out=$(gs "$r" ensure); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 while backfilling a receipt against a version the binary never reported: $_out"
+elif [ -f "$_receipt" ]; then
+    fail "a receipt was written recording an unverified version: $(cat "$_receipt" 2>/dev/null)"
+elif ! printf '%s' "$_out" | grep -F -q "0.63.2"; then
+    fail "refused, but did not name the version the binary actually reports: $_out"
+elif ! printf '%s' "$_out" | grep -F -q "0.65.0"; then
+    fail "refused, but did not name the newly pinned version: $_out"
+else
+    pass
+fi
+
 it "check is not blocked by an entry that predates receipts"
 # The incident guard from CONTRIBUTING.md's "When a fix changes behaviour on upgrade": cache
 # verification once landed without accounting for existing caches carrying no digest, and the first
@@ -2764,6 +2986,37 @@ esac
 it "path fails for a tool that is not pinned"
 r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"; expect_fail "$r" path periphery
 
+it "GRUBSTAKE_OFFLINE refuses to install a missing pinned tool instead of reaching for curl"
+# A clean racing the spine's own check can leave the binary missing right when a commit reaches for it, so the commit path must refuse rather than put curl on it.
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_shim="$(mktemp -d "$ROOT/offline-curl.XXXXXX")" || fixture_die "cannot create the offline curl shim dir"
+printf '#!/bin/sh\necho "curl must not run on the commit path" >&2\nexit 1\n' > "$_shim/curl" \
+    || fixture_die "cannot write the offline curl shim"
+chmod +x "$_shim/curl" || fixture_die "cannot make the offline curl shim executable"
+_out=$( cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_OFFLINE=1 ./grubstake.sh path swiftlint 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "GRUBSTAKE_OFFLINE=1 exited 0 without the tool ever being installed: $_out"
+else
+    case "$_out" in
+        *"must not run"*) fail "curl ran despite GRUBSTAKE_OFFLINE=1: $_out" ;;
+        *"not installed"*"grubstake ensure"*) pass ;;
+        *) fail "refused without the documented message: $_out" ;;
+    esac
+fi
+
+it "path installs a missing pinned tool by default, GRUBSTAKE_OFFLINE unset"
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftlint 2>&1 ); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "path did not install a missing pinned tool by default (rc $_rc): $_out"
+elif [ ! -x "$r/.cache/swiftlint/$_sha/swiftlint" ]; then
+    fail "path exited 0 but nothing was installed: $_out"
+else
+    pass
+fi
+
 it "path fails for a tool with no artifact on this platform"
 # It used to print a cache path that did not exist and exit 0, which after a cutover hands CI
 # a path to nothing instead of an error.
@@ -2845,6 +3098,61 @@ else
     esac
 fi
 
+it "update refuses a fetched release that never calls main"
+# sh -n proves syntax, not completeness, so a truncated file that never reaches main "$@" parses clean.
+r=$(new_repo)
+_before="$(cat "$r/grubstake.sh")"
+_raw="$(mktemp -d "$ROOT/inert-release.XXXXXX")" || fixture_die "cannot create the inert release fixture dir"
+mkdir -p "$_raw/v9.9.9" || fixture_die "cannot create the inert release version dir"
+# main "$@" appears mid-file here, then another definition follows, so only a check anchored on the LAST line refuses it -- one that greps for the line anywhere would wrongly accept it.
+printf '#!/bin/sh\nGRUBSTAKE_VERSION="9.9.9"\nmain() { :; }\nmain "$@"\nextra() { :; }\n' > "$_raw/v9.9.9/grubstake.sh"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$_raw" ./grubstake.sh update 9.9.9 2>&1 ); _rc=$?
+_after="$(cat "$r/grubstake.sh")"
+if [ "$_rc" -eq 0 ]; then
+    fail "update exited 0 for a release that never calls main: $_out"
+elif [ "$_after" != "$_before" ]; then
+    fail "the running script was replaced despite the fetched release being refused"
+else
+    case "$_out" in
+        *"is not a usable release"*) pass ;;
+        *) fail "refused, but without saying why: $_out" ;;
+    esac
+fi
+
+it "update does not accept a version line an unescaped dot wildcard happens to match"
+# An unescaped "." in a BRE is a wildcard, so a fetched line naming a different version could still satisfy an unanchored, non-literal match as long as every dot in the real one lined up with any character.
+r=$(new_repo)
+_before="$(cat "$r/grubstake.sh")"
+_raw="$(mktemp -d "$ROOT/wildcard-release.XXXXXX")" || fixture_die "cannot create the wildcard release fixture dir"
+mkdir -p "$_raw/v9.9.9" || fixture_die "cannot create the wildcard release version dir"
+printf '#!/bin/sh\nGRUBSTAKE_VERSION="9x9x9"\nmain() { :; }\nmain "$@"\n' > "$_raw/v9.9.9/grubstake.sh"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$_raw" ./grubstake.sh update 9.9.9 2>&1 ); _rc=$?
+_after="$(cat "$r/grubstake.sh")"
+if [ "$_rc" -eq 0 ]; then
+    fail "update exited 0 for a release whose version line only matched via an unescaped dot wildcard: $_out"
+elif [ "$_after" != "$_before" ]; then
+    fail "the running script was replaced despite the version line being a wildcard match, not a real one"
+else
+    pass
+fi
+
+it "update does not accept a version line with a trailing suffix grep -qxF's own anchoring refuses"
+# -F alone stops "." acting as a wildcard, but only -x stops a fixed string matching as a prefix of a longer line.
+r=$(new_repo)
+_before="$(cat "$r/grubstake.sh")"
+_raw="$(mktemp -d "$ROOT/suffixed-release.XXXXXX")" || fixture_die "cannot create the suffixed release fixture dir"
+mkdir -p "$_raw/v9.9.9" || fixture_die "cannot create the suffixed release version dir"
+printf '#!/bin/sh\nGRUBSTAKE_VERSION="9.9.9" # trailing\nmain() { :; }\nmain "$@"\n' > "$_raw/v9.9.9/grubstake.sh"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$_raw" ./grubstake.sh update 9.9.9 2>&1 ); _rc=$?
+_after="$(cat "$r/grubstake.sh")"
+if [ "$_rc" -eq 0 ]; then
+    fail "update exited 0 for a version line carrying a trailing suffix past the pinned version: $_out"
+elif [ "$_after" != "$_before" ]; then
+    fail "the running script was replaced despite the version line carrying a trailing suffix"
+else
+    pass
+fi
+
 it "the legacy handoff verb still answers, for clients that only speak it"
 # Removing it stranded every existing adopter: it is a protocol only OLD versions speak, so it is
 # the one thing that cannot be fixed forward. It stays as compatibility, not as a live path.
@@ -2917,6 +3225,7 @@ it "the previous release can update to this one"
 # Resolved from the remote, not from local tags: a shallow clone by tag has one tag, which made
 # this report a failure when the real cause was "nothing to compare against". A test that cannot
 # tell "I could not run" from "the thing is broken" gets ignored the first time it goes red.
+# GRUBSTAKE_REPO/GRUBSTAKE_RAW aim the fetched old client at a local fixture serving $GS, so the assertion is a byte comparison against $GS itself.
 if [ "$NETWORK" = 1 ]; then
     # The named default is the source of truth; a plain literal assignment is the fallback shape.
     _repo="$(sed -n 's/^GRUBSTAKE_REPO_DEFAULT="\(.*\)"$/\1/p' "$GS")"
@@ -2924,18 +3233,79 @@ if [ "$NETWORK" = 1 ]; then
     _prev=$(git ls-remote --tags --refs "$_repo" 'v*' 2>/dev/null \
         | awk '{print $2}' | sed 's|refs/tags/v||' \
         | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-        | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | sed -n 2p)
+        | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | sed -n 1p)
+    _cand="$(sed -n 's/^GRUBSTAKE_VERSION="\(.*\)"$/\1/p' "$GS")"
     if [ -z "$_prev" ]; then
-        printf '  skip  %s\n' "$CURRENT (fewer than two releases published)"
+        printf '  skip  %s\n' "$CURRENT (no release published yet)"
+    elif [ "$_prev" = "$_cand" ]; then
+        # On the tag-push trigger the candidate's own tag is already the newest published one, so an update to it is correctly a no-op, not a byte-for-byte replace; nothing to compare here.
+        printf '  skip  %s\n' "$CURRENT (candidate's tag is already the newest published release)"
     else
         r=$(new_repo)
         if curl -fsSL "https://raw.githubusercontent.com/seriouslysean/grubstake/v$_prev/grubstake.sh" \
              -o "$r/grubstake.sh" 2>/dev/null; then
             chmod +x "$r/grubstake.sh"
-            _now="$(gs "$r" version)"
-            gs_rc "$r" update
-            _after="$(gs "$r" version)"
-            if [ "$_after" != "$_now" ]; then pass; else fail "update from $_now did not move it (still $_after)"; fi
+            # A future previous release that drops these overrides would leave this test with no honest way to aim it at the candidate at all.
+            if ! grep -q 'GRUBSTAKE_REPO="${GRUBSTAKE_REPO:-' "$r/grubstake.sh" \
+                || ! grep -q 'GRUBSTAKE_RAW="${GRUBSTAKE_RAW:-' "$r/grubstake.sh"; then
+                fail "v$_prev does not honour GRUBSTAKE_REPO/GRUBSTAKE_RAW, so this test cannot aim it at the candidate"
+            else
+                _uf="$(mktemp -d "$ROOT/candidate-update.XXXXXX")" || fixture_die "cannot create a candidate update fixture dir"
+                git init -q --bare "$_uf/repo.git" || fixture_die "cannot init the candidate fixture release repo"
+                _uw="$(mktemp -d "$ROOT/candidate-update-work.XXXXXX")" || fixture_die "cannot create a work dir for the candidate fixture release"
+                ( cd "$_uw" \
+                  && git init -q . \
+                  && git config user.email test@example.invalid \
+                  && git config user.name "grubstake suite" \
+                  && git config commit.gpgsign false \
+                  && git config tag.gpgSign false \
+                  && printf 'candidate release\n' > README.md \
+                  && git add README.md \
+                  && git commit -q -m release \
+                  && git tag -a "v$_cand" -m "candidate release $_cand" \
+                  && git push -q "$_uf/repo.git" HEAD:refs/heads/main --tags ) \
+                    || fixture_die "cannot seed the candidate update fixture in $_uf"
+                mkdir -p "$_uf/raw/v$_cand" || fixture_die "cannot create the candidate raw tree in $_uf"
+                cp "$GS" "$_uf/raw/v$_cand/grubstake.sh" || fixture_die "cannot serve the candidate as the update target"
+                # curl/git shimmed to file:// only, so an override-reading regression fails loudly here instead of silently falling back to https:// and coincidentally passing against the real release.
+                _realcurl="$(command -v curl)" || fixture_die "no curl on PATH"
+                _realgit="$(command -v git)" || fixture_die "no git on PATH"
+                _shims="$(mktemp -d "$ROOT/candidate-update-shims.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shims"
+                cat > "$_shims/curl" <<SHIM
+#!/bin/sh
+for a in "\$@"; do
+    case "\$a" in
+        file://*) exec "$_realcurl" "\$@" ;;
+    esac
+done
+echo "curl: network blocked in test" >&2
+exit 6
+SHIM
+                cat > "$_shims/git" <<SHIM
+#!/bin/sh
+if [ "\${1:-}" = "ls-remote" ]; then
+    _ok=1
+    for a in "\$@"; do
+        case "\$a" in file://*) _ok=0 ;; esac
+    done
+    if [ "\$_ok" = 1 ]; then
+        echo "git: network blocked in test" >&2
+        exit 128
+    fi
+fi
+exec "$_realgit" "\$@"
+SHIM
+                chmod +x "$_shims/curl" "$_shims/git"
+                _now="$(gs "$r" version)"
+                ( cd "$r" && PATH="$_shims:$PATH" \
+                    GRUBSTAKE_REPO="file://$_uf/repo.git" GRUBSTAKE_RAW="file://$_uf/raw" \
+                    ./grubstake.sh update ) >/dev/null 2>&1
+                if ! cmp -s "$r/grubstake.sh" "$GS"; then
+                    fail "the previous release ($_now) did not end up byte-identical to the candidate after update"
+                else
+                    pass
+                fi
+            fi
         else
             fail "v$_prev is published but could not be fetched"
         fi
@@ -3267,17 +3637,12 @@ top=$(printf '0.2.0\n0.10.0\n0.9.9\n' | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3n
 # before either site's sort ever sees these values.
 git_tags_shim() {
     mkdir -p "$1" || fixture_die "cannot create the git shim dir"
-    cat > "$1/git" <<'SHIM'
+    # $2 advertises that one release instead of the fixed set below, for a fixture needing a single tag.
+    _refs="${2:+aaa $2}"; _refs="${_refs:-aaa 0.2.0 bbb 0.10.0 ccc 0.9.9 ddd 1.2.3-beta eee 1.2 fff v1.2.3 ggg abc}"
+    cat > "$1/git" <<SHIM
 #!/bin/sh
-if [ "$1" = "ls-remote" ]; then
-    printf '%s\trefs/tags/v%s\n' \
-        aaa 0.2.0 \
-        bbb 0.10.0 \
-        ccc 0.9.9 \
-        ddd 1.2.3-beta \
-        eee 1.2 \
-        fff v1.2.3 \
-        ggg abc
+if [ "\$1" = "ls-remote" ]; then
+    printf '%s\trefs/tags/v%s\n' $_refs
     exit 0
 fi
 exit 1
@@ -3353,6 +3718,7 @@ fi
 # for commits: a globally configured signing key would block the tag too, and a fixture that cannot
 # be built is not a test result.
 new_update_fixture() {
+    _ver="${1:-9.9.9}"
     _uf="$(mktemp -d "$ROOT/update-fixture.XXXXXX")" || fixture_die "cannot create an update fixture dir"
     git init -q --bare "$_uf/repo.git" || fixture_die "cannot init the fixture release repo"
     _uw="$(mktemp -d "$ROOT/update-fixture-work.XXXXXX")" || fixture_die "cannot create a work dir for the fixture release"
@@ -3365,17 +3731,36 @@ new_update_fixture() {
       && printf 'fixture release\n' > README.md \
       && git add README.md \
       && git commit -q -m release \
-      && git tag -a v9.9.9 -m "fixture release 9.9.9" \
+      && git tag -a "v$_ver" -m "fixture release $_ver" \
       && git push -q "$_uf/repo.git" HEAD:refs/heads/main --tags ) \
         || fixture_die "cannot seed the fixture release repo in $_uf"
-    mkdir -p "$_uf/raw/v9.9.9" || fixture_die "cannot create the fixture raw tree in $_uf"
-    # Declares the version fetch_release's grep demands, and marks its own execution unconditionally
-    # -- on any argument, including "ensure", the argument an auto-run handoff would supply -- so
-    # the test can tell replaced-but-not-run apart from replaced-and-run.
-    printf '#!/bin/sh\nGRUBSTAKE_VERSION="9.9.9"\n[ -n "${GST_TEST_MARKER:-}" ] && touch "$GST_TEST_MARKER"\nexit 0\n' \
-        > "$_uf/raw/v9.9.9/grubstake.sh" || fixture_die "cannot write the fixture release script"
+    mkdir -p "$_uf/raw/v$_ver" || fixture_die "cannot create the fixture raw tree in $_uf"
+    # Marks its own execution on any argument, so the test can tell replaced-but-not-run apart from replaced-and-run.
+    printf '#!/bin/sh\nGRUBSTAKE_VERSION="%s"\nmain() {\n[ -n "${GST_TEST_MARKER:-}" ] && touch "$GST_TEST_MARKER"\n}\nmain "$@"\n' "$_ver" \
+        > "$_uf/raw/v$_ver/grubstake.sh" || fixture_die "cannot write the fixture release script"
     echo "$_uf"
 }
+
+it "bare update refuses a release older than the one already installed"
+# cmd_update's loop fetched the first candidate without checking it was newer, so a downgrade was adopted by plain update.
+r=$(new_repo)
+sed -i.bak 's/^GRUBSTAKE_VERSION=.*/GRUBSTAKE_VERSION="1.0.0"/' "$r/grubstake.sh" && rm -f "$r/grubstake.sh.bak"
+_before="$(cat "$r/grubstake.sh")"
+_shim="$(mktemp -d "$ROOT/downgrade-shim.XXXXXX")" || fixture_die "cannot create the downgrade-only git shim dir"
+git_tags_shim "$_shim" 0.5.0
+f=$(new_update_fixture 0.5.0)
+_out=$( cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$f/raw" ./grubstake.sh update 2>&1 ); _rc=$?
+_after="$(cat "$r/grubstake.sh")"
+if [ "$_rc" -ne 0 ]; then
+    fail "bare update exited non-zero refusing a downgrade, expected a quiet no-op: $_out"
+elif [ "$_after" != "$_before" ]; then
+    fail "the running script was replaced with an older release: $_out"
+else
+    case "$_out" in
+        *"no usable release newer than"*) pass ;;
+        *) fail "did not say why it stopped: $_out" ;;
+    esac
+fi
 
 it "update replaces the script and stops, without running the fetched code"
 # GRUBSTAKE_REPO and GRUBSTAKE_RAW are env-overridable so update can be pointed at a local
@@ -3444,6 +3829,53 @@ it "install refuses a foreign hooksPath without writing anything first"
 r=$(new_repo); ( cd "$r" && git config core.hooksPath .other-hooks )
 gs_rc "$r" install
 if [ -d "$r/.githooks" ]; then fail "left .githooks behind after refusing"; else pass; fi
+
+it "install refuses when an executable .git/hooks/pre-commit would go silent"
+# hooksPath unset means git already runs whatever sits executable in .git/hooks; wiring .githooks over it would silence it.
+r=$(new_repo)
+printf '#!/bin/sh\nexit 0\n' > "$r/.git/hooks/pre-commit" || fixture_die "cannot write $r/.git/hooks/pre-commit"
+chmod +x "$r/.git/hooks/pre-commit" || fixture_die "cannot make $r/.git/hooks/pre-commit executable"
+# GIT_CONFIG_GLOBAL=/dev/null: a global core.hooksPath on the machine running this suite must not decide it.
+_out=$( cd "$r" && GIT_CONFIG_GLOBAL=/dev/null GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+_hp=$(cd "$r" && GIT_CONFIG_GLOBAL=/dev/null git config core.hooksPath 2>/dev/null || true)
+if [ "$_rc" -eq 0 ]; then
+    fail "install succeeded while silencing a live .git/hooks/pre-commit: $_out"
+elif [ -d "$r/.githooks" ]; then
+    fail "install wrote .githooks before refusing: $_out"
+elif [ -n "$_hp" ]; then
+    fail "install set core.hooksPath despite refusing (got '$_hp'): $_out"
+elif ! printf '%s' "$_out" | grep -q "pre-commit"; then
+    fail "refused without naming the live hook: $_out"
+else
+    pass
+fi
+
+it "install does not report an executable subdirectory under .git/hooks as a live hook"
+# -e and -x alone are true for a directory too; only -f narrows the loop to actual hook files.
+r=$(new_repo)
+mkdir -p "$r/.git/hooks/not-a-hook" || fixture_die "cannot create a hooks subdirectory in $r"
+_out=$( cd "$r" && GIT_CONFIG_GLOBAL=/dev/null GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "install refused over a directory under .git/hooks, which is not a hook: $_out"
+else
+    pass
+fi
+
+it "install dies naming .git/hooks when it exists but cannot be read"
+# An unreadable directory leaves the glob below literal, which took the silent skip rule 16 forbids.
+r=$(new_repo)
+chmod 000 "$r/.git/hooks" || fixture_die "cannot make $r/.git/hooks unreadable"
+_out=$( cd "$r" && GIT_CONFIG_GLOBAL=/dev/null GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+chmod 755 "$r/.git/hooks" || fixture_die "cannot restore $r/.git/hooks for cleanup"
+if [ "$_rc" -eq 0 ]; then
+    fail "install silently skipped the live-hook check on an unreadable .git/hooks: $_out"
+elif [ -d "$r/.githooks" ]; then
+    fail "install wrote .githooks before refusing: $_out"
+elif ! printf '%s' "$_out" | grep -q "$r/.git/hooks"; then
+    fail "refused without naming the unreadable directory: $_out"
+else
+    pass
+fi
 
 # The gst-embedded-hook-begin/end: <name> marker lines are the extraction interface this test and
 # grubstake.sh's own install share, so renaming or reformatting either side breaks both silently.
@@ -3658,6 +4090,24 @@ elif ! cmp -s "$_before" "$r/.githooks/pre-commit"; then
     fail "an already-current hook's bytes changed: $_out"
 elif printf '%s' "$_out" | grep -qi "pre-commit" && printf '%s' "$_out" | grep -qi "refresh"; then
     fail "install logged a refresh for a hook that was already current: $_out"
+else
+    pass
+fi
+
+it "install restores a hook's exec bit when its bytes already match"
+# Bytes matching what cmp compares is not enough: git silently skips a hook with no exec bit.
+r=$(new_repo)
+mkdir -p "$r/.githooks"
+extract_embedded_hook pre-commit > "$r/.githooks/pre-commit"
+# Left non-executable on purpose.
+_shims="$(mktemp -d "$ROOT/no-net-exec-bit.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_shims/curl"
+chmod +x "$_shims/curl"
+_out=$( cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "install failed restoring a byte-identical hook's exec bit (rc $_rc): $_out"
+elif [ ! -x "$r/.githooks/pre-commit" ]; then
+    fail "pre-commit is still not executable after install: $_out"
 else
     pass
 fi
@@ -4058,6 +4508,12 @@ fi
 # calls it, never what happens inside a commit. These fixtures install the hooks the way
 # `grubstake install` does and drive them through a real `git commit`.
 
+# protocol.allow, not GIT_ALLOW_PROTOCOL: a plain `git commit` fires the post-commit hook's backgrounded lookup, and no caller below can be trusted to remember an env var only one of them sets.
+deny_transports() {
+    ( cd "$1" && git config protocol.allow never && git config protocol.file.allow always ) \
+        || fixture_die "cannot deny network transports in $1"
+}
+
 # A repo with the shipped hooks installed and one commit of history. The baseline commit is made
 # before core.hooksPath is set, so building the fixture never runs the hooks under test.
 new_hook_repo() {
@@ -4070,6 +4526,7 @@ new_hook_repo() {
       && git config commit.gpgsign false \
       && git add README.md \
       && git commit -q -m baseline ) || fixture_die "cannot seed a commit in $_hr"
+    deny_transports "$_hr"
     mkdir -p "$_hr/.githooks" || fixture_die "cannot create $_hr/.githooks"
     cp "$HOOKS/pre-commit" "$HOOKS/post-commit" "$_hr/.githooks/" \
         || fixture_die "cannot copy hooks into $_hr"
@@ -4086,11 +4543,12 @@ new_hook_repo() {
 # not of this function, so a cache set only in this shell would leave the hook resolving against
 # the developer's real cache: the tests would still go green, for a reason the fixture never
 # controlled. GIT_ALLOW_PROTOCOL keeps post-commit's backgrounded refresh off the network, since
-# git then refuses the transport outright instead of dialling out.
+# git then refuses the transport outright instead of dialling out. $2, optional: a directory to put ahead of PATH, for a fixture that needs the hook to see a shim rather than the real tool.
 hook_commit() {
     _hcr="$1"
+    _hcp="${2:-}"
     ( cd "$_hcr" \
-      && GRUBSTAKE_CACHE="$_hcr/.cache" GIT_ALLOW_PROTOCOL=file \
+      && PATH="${_hcp:+$_hcp:}$PATH" GRUBSTAKE_CACHE="$_hcr/.cache" GIT_ALLOW_PROTOCOL=file \
          git commit -q -m change 2>&1 )
 }
 
@@ -4297,6 +4755,47 @@ else
     esac
 fi
 
+it "a staged type change (symlink replaced by a regular file) is linted, not skipped"
+# git reports a symlink-swap as "T", which --diff-filter=ACMR used to omit, so the spine skipped the lint entirely.
+r=$(new_hook_repo)
+( cd "$r" && ln -s README.md A.swift && git add A.swift && git commit -q -m "seed a symlink" ) \
+    || fixture_die "cannot seed a symlink commit in $r"
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter "$r"; lint_run "$r" 1 0 ""
+( cd "$r" && rm -f A.swift && printf 'struct A {}\n' > A.swift && git add A.swift ) \
+    || fixture_die "cannot stage the type change in $r"
+hook_commit "$r" >/dev/null 2>&1
+if [ ! -f "$r/lint.argv.1" ]; then
+    fail "the linter never ran on the staged type change"
+elif ! grep -qx A.swift "$r/lint.argv.1"; then
+    fail "the type change never reached the linter: $(tr '\n' ' ' < "$r/lint.argv.1")"
+else
+    pass
+fi
+
+it "a regular file staged over a symlink, then turned back into a symlink, is refused (TT)"
+# git reports this as TT: type-changed in the index, then type-changed again in the worktree; a pattern of [ACMRT]M alone misses the worktree T.
+r=$(new_hook_repo)
+( cd "$r" && ln -s README.md A.swift && git add A.swift && git commit -q -m "seed a symlink" ) \
+    || fixture_die "cannot seed a symlink commit in $r"
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+( cd "$r" && rm -f A.swift && printf 'struct A {}\n' > A.swift && git add A.swift ) \
+    || fixture_die "cannot stage the type change in $r"
+( cd "$r" && rm -f A.swift && ln -s README.md A.swift ) \
+    || fixture_die "cannot turn the worktree copy back into a symlink in $r"
+_c0=$(commits "$r")
+_out=$(hook_commit "$r"); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "a regular blob committed on the strength of a lint of the worktree symlink's target: $_out"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+elif ! printf '%s' "$_out" | grep -q "A.swift"; then
+    fail "refused without naming the path: $_out"
+else
+    pass
+fi
+
 it "a staged file missing from the working tree does not commit unlinted (AD, MD)"
 # SwiftLint cannot read a path that is staged but gone from the working tree: it exits 1 and says
 # "No lintable files found", a message the hook also (wrongly) treats as "every staged path is
@@ -4484,6 +4983,36 @@ if [ "$_rc" -ne 0 ]; then fail "a cold cache blocked a non-Swift commit (rc $_rc
 elif [ "$(commits "$r")" != 2 ]; then fail "exited 0 without committing"
 else pass; fi
 
+it "a cache entry that vanishes between the hook's check and its path call still refuses offline"
+# Landing the clean inside this window is not reproducible on demand, so the fixture makes check answer "passed" unconditionally and never installs the binary, then drives a real commit through the real hook to prove the guard.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+mv "$r/grubstake.sh" "$r/grubstake-real.sh" || fixture_die "cannot move grubstake.sh aside in $r"
+cat > "$r/grubstake.sh" <<WRAP || fixture_die "cannot write the check-always-passes wrapper in $r"
+#!/bin/sh
+case "\$1" in
+    check) exit 0 ;;
+    *) exec "$r/grubstake-real.sh" "\$@" ;;
+esac
+WRAP
+chmod +x "$r/grubstake.sh" || fixture_die "cannot make the wrapper executable in $r"
+_marker="$r/CURL-RAN"
+_shim="$r/curl-shim"
+mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+printf '#!/bin/sh\n: > "%s"\nexit 1\n' "$_marker" > "$_shim/curl" || fixture_die "cannot write the curl marker shim"
+chmod +x "$_shim/curl" || fixture_die "cannot make the curl marker shim executable"
+stage "$r" A.swift "struct A {}"
+_out=$(hook_commit "$r" "$_shim"); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "the commit went through though the pinned binary was never installed: $_out"
+elif [ -f "$_marker" ]; then
+    fail "curl ran on the commit path racing a stale check: $_out"
+else
+    case "$_out" in
+        *"not installed"*"grubstake ensure"*) pass ;;
+        *) fail "refused without the documented offline message: $_out" ;;
+    esac
+fi
+
 it "a failing pre-commit.d gate blocks the commit"
 r=$(new_hook_repo); gate "$r" 10-gate 1
 stage "$r" NOTES.md "notes"
@@ -4511,6 +5040,30 @@ else
         *) fail "blocked without saying why: $_out" ;;
     esac
 fi
+
+# Shared by the pre-commit.d and commit-msg.d tests below: a dangling symlink is neither -e nor an unmatched glob, so rule 16 forbids the same silent skip either gets.
+assert_dangling_gate_refuses() {
+    _dgr="$1"; _dgd="$2"; _dgn="$3"; shift 3
+    mkdir -p "$_dgr/.githooks/$_dgd" || fixture_die "cannot create $_dgr/.githooks/$_dgd"
+    ln -s "$_dgr/.githooks/$_dgd/does-not-exist" "$_dgr/.githooks/$_dgd/$_dgn" \
+        || fixture_die "cannot create a dangling gate symlink in $_dgr"
+    _dgc0=$(commits "$_dgr")
+    _dgout=$("$@" 2>&1); _dgrc=$?
+    if [ "$_dgrc" -eq 0 ]; then
+        fail "a dangling gate symlink was skipped and the commit went through: $_dgout"
+    elif [ "$(commits "$_dgr")" != "$_dgc0" ]; then
+        fail "refused, and committed anyway"
+    elif ! printf '%s' "$_dgout" | grep -q "$_dgn"; then
+        fail "refused without naming the dangling gate: $_dgout"
+    else
+        pass
+    fi
+}
+
+it "a dangling gate symlink in pre-commit.d refuses the commit instead of being skipped"
+r=$(new_hook_repo)
+stage "$r" NOTES.md "notes"
+assert_dangling_gate_refuses "$r" pre-commit.d 10-gate hook_commit "$r"
 
 it "a gate that fixes staged Swift runs before the lint that would have refused it"
 # #126: the spine linted first and dispatched the repo's gates afterwards, so the gate an adopter
@@ -4753,6 +5306,18 @@ elif [ "$(printf '%s\n' "$_clean" | grep post-commit)" != "$(printf '%s\n' "$_dr
 else
     pass
 fi
+
+it "doctor reports a hook whose exec bit was stripped, not ok"
+# git silently skips a non-executable hook, so byte-identical is not the same as installed.
+r=$(new_hook_repo)
+chmod -x "$r/.githooks/pre-commit"
+_out=$(gs "$r" doctor)
+_line=$(printf '%s\n' "$_out" | grep 'pre-commit')
+case "$_line" in
+    *"not executable"*) pass ;;
+    *"ok"*) fail "doctor reported ok for a hook with no exec bit: $_out" ;;
+    *) fail "doctor said nothing about the missing exec bit: $_out" ;;
+esac
 
 it "doctor never advises deleting a hook grubstake did not write"
 # #59: the drift check above compares .githooks/pre-commit to embedded_hook unconditionally, with
@@ -5336,6 +5901,71 @@ else
     pass
 fi
 
+it "a signal after add_one releases its pins lock but before disarming its trap does not delete a successor's lock"
+# F02: simulates a second add's mkdir reclaiming $_lockdir between this run's own rmdir and disarm; guarded to fire once so a repeat rmdir on this same path does not re-signal the parent.
+r=$(new_repo)
+fake_release "$r" 1.0.0 >/dev/null
+_lockdir="$r/grubstake.tools.lock"
+_marker="$r/grubstake.tools.lock.fired"
+_shim="$r/rmdir-shim"
+mkdir -p "$_shim" || fixture_die "cannot create the rmdir shim dir"
+_realrmdir="$(command -v rmdir)" || fixture_die "no real rmdir on PATH to wrap"
+cat > "$_shim/rmdir" <<SHIM
+#!/bin/sh
+if [ "\$1" = "$_lockdir" ] && [ ! -e "$_marker" ]; then
+    : > "$_marker"
+    "$_realrmdir" "\$1"
+    mkdir "$_lockdir"
+    kill -TERM "\$PPID" 2>/dev/null
+    exit 0
+fi
+exec "$_realrmdir" "\$@"
+SHIM
+chmod +x "$_shim/rmdir" || fixture_die "cannot make the rmdir shim executable"
+( cd "$r" && PATH="$r/curl-shim:$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 >"$r/out" 2>&1 )
+if [ ! -f "$_marker" ]; then
+    fail "the rmdir shim never fired, so this proves nothing: $(cat "$r/out" 2>/dev/null)"
+elif [ -d "$_lockdir" ]; then
+    pass
+else
+    fail "a successor's lock (simulated) was deleted by add_one's own trap after the real lock was already released: $(cat "$r/out" 2>/dev/null)"
+fi
+rm -f "$_marker" 2>/dev/null
+rm -rf "$_lockdir" 2>/dev/null
+
+it "a signal after add_one renames grubstake.tools into place does not let a killed run report success"
+# F02: deferred until the rename returns, a signal here must not let the run finish silently -- exit 0, "installed" printed -- as if the kill never landed.
+r=$(new_repo)
+fake_release "$r" 1.0.0 >/dev/null
+_pins="$r/grubstake.tools"
+_marker="$r/mv.fired"
+_shim="$r/mv-shim"
+mkdir -p "$_shim" || fixture_die "cannot create the mv shim dir"
+_realmv="$(command -v mv)" || fixture_die "no real mv on PATH to wrap"
+cat > "$_shim/mv" <<SHIM
+#!/bin/sh
+if [ "\$#" -eq 2 ] && [ "\$2" = "$_pins" ] && [ ! -e "$_marker" ]; then
+    : > "$_marker"
+    "$_realmv" "\$1" "\$2"
+    _rc=\$?
+    kill -TERM "\$PPID" 2>/dev/null
+    exit \$_rc
+fi
+exec "$_realmv" "\$@"
+SHIM
+chmod +x "$_shim/mv" || fixture_die "cannot make the mv shim executable"
+_out=$( cd "$r" && PATH="$r/curl-shim:$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1 ); _rc=$?
+if [ ! -f "$_marker" ]; then
+    fail "the mv shim never fired, so this proves nothing: $_out"
+elif [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 after being killed mid-rename, as if the signal never landed: $_out"
+elif printf '%s' "$_out" | grep -q ': installed'; then
+    fail "add finished installing after being killed mid-rename: $_out"
+else
+    pass
+fi
+rm -f "$_marker" 2>/dev/null
+
 if [ "$NETWORK" = 1 ]; then
     printf '\nadd, network\n'
 
@@ -5504,6 +6134,79 @@ case "$_out" in
     *)                 fail "a scanner off its exclusion pathspec did not report the leak planted in it: $_out" ;;
 esac
 
+it "scan-for-leaks scans the index, not the working tree, so a staged leak survives a clean-looking worktree"
+# git grep with no --cached reads the working tree; a commit publishes the index, not the worktree, so a leak staged and then scrubbed on disk without re-adding must still be caught.
+r=$(leaks_repo)
+printf 'contact admin@example.com\n' > "$r/notes.md" || fixture_die "cannot write the staged-leak fixture in $r"
+( cd "$r" && git add notes.md ) || fixture_die "cannot stage the leak fixture in $r"
+printf 'nothing to see here\n' > "$r/notes.md" || fixture_die "cannot scrub the working copy in $r"
+_out=$( cd "$r" && ./test/scan-for-leaks.sh 2>&1 )
+case "$_out" in
+    *"email address"*"notes.md"*) pass ;;
+    *) fail "a leak staged for commit but scrubbed from the working tree was not named: $_out" ;;
+esac
+
+it "scan-for-leaks does not read git's stderr as a hit when git succeeds"
+# git can warn on stderr and still exit 0, and a warning carrying a path matches the home-path pattern, so merging stderr into the variable the verdict is read from would invent a leak.
+_gs="$ROOT/git-warns.$$.$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
+mkdir -p "$_gs/bin" "$_gs/repo/test" || fixture_die "cannot create $_gs"
+cat > "$_gs/bin/git" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    grep)     exit 1 ;;
+    ls-files) printf 'warning: broken ref under /home/nobody/x\n' >&2; exit 0 ;;
+esac
+exit 1
+SHIM
+chmod +x "$_gs/bin/git" || fixture_die "cannot make the git shim executable in $_gs"
+cp "$REPO/test/scan-for-leaks.sh" "$_gs/repo/test/scan-for-leaks.sh" || fixture_die "cannot copy scan-for-leaks.sh into $_gs"
+chmod +x "$_gs/repo/test/scan-for-leaks.sh" || fixture_die "cannot make scan-for-leaks.sh executable in $_gs"
+_out=$( cd "$_gs/repo" && PATH="$_gs/bin:$PATH" ./test/scan-for-leaks.sh 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then pass; else fail "git's stderr on a successful call was read as a leak (rc $_rc): $_out"; fi
+
+it "scan-for-leaks exits 2, never clean, when git ls-files fails after grep finds nothing"
+# grep finding nothing must not mask a later operational failure from git ls-files.
+_lf="$ROOT/git-lsfiles-fails.$$.$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
+mkdir -p "$_lf/bin" "$_lf/repo/test" || fixture_die "cannot create $_lf"
+cat > "$_lf/bin/git" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    grep)     exit 1 ;;
+    ls-files) exit 2 ;;
+esac
+exit 1
+SHIM
+chmod +x "$_lf/bin/git" || fixture_die "cannot make the git shim executable in $_lf"
+cp "$REPO/test/scan-for-leaks.sh" "$_lf/repo/test/scan-for-leaks.sh" || fixture_die "cannot copy scan-for-leaks.sh into $_lf"
+chmod +x "$_lf/repo/test/scan-for-leaks.sh" || fixture_die "cannot make scan-for-leaks.sh executable in $_lf"
+_out=$( cd "$_lf/repo" && PATH="$_lf/bin:$PATH" ./test/scan-for-leaks.sh 2>&1 ); _rc=$?
+case "$_out" in
+    *clean*) fail "an operational git ls-files failure was reported as clean" ;;
+    *) [ "$_rc" -eq 2 ] && pass || fail "git ls-files failed operationally but the scanner did not exit 2 (rc $_rc): $_out" ;;
+esac
+
+it "scan-for-leaks --all exits 2, never clean, when git log fails"
+# git log piped straight into grep let a failing log read as grep finding no hits.
+_lg="$ROOT/git-log-fails.$$.$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
+mkdir -p "$_lg/bin" "$_lg/repo/test" || fixture_die "cannot create $_lg"
+cat > "$_lg/bin/git" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    grep)     exit 1 ;;
+    ls-files) exit 0 ;;
+    log)      exit 2 ;;
+esac
+exit 1
+SHIM
+chmod +x "$_lg/bin/git" || fixture_die "cannot make the git shim executable in $_lg"
+cp "$REPO/test/scan-for-leaks.sh" "$_lg/repo/test/scan-for-leaks.sh" || fixture_die "cannot copy scan-for-leaks.sh into $_lg"
+chmod +x "$_lg/repo/test/scan-for-leaks.sh" || fixture_die "cannot make scan-for-leaks.sh executable in $_lg"
+_out=$( cd "$_lg/repo" && PATH="$_lg/bin:$PATH" ./test/scan-for-leaks.sh --all 2>&1 ); _rc=$?
+case "$_out" in
+    *clean*) fail "a git log failure under --all was reported as clean" ;;
+    *) [ "$_rc" -eq 2 ] && pass || fail "git log failed but --all did not exit 2 (rc $_rc): $_out" ;;
+esac
+
 it "scan-for-leaks refuses an agent-session trailer typed into a commit message"
 # The tracked-file tier reads committed content, so a leak typed into a message is invisible to it.
 _m="$ROOT/msg-trailer"
@@ -5580,6 +6283,7 @@ adopted_repo() {
       && git config user.email test@example.invalid \
       && git config user.name "grubstake suite" \
       && git config commit.gpgsign false ) || fixture_die "cannot configure $_ar"
+    deny_transports "$_ar"
     mkdir -p "$_ar/no-net" || fixture_die "cannot create the network shim dir in $_ar"
     printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_ar/no-net/curl" \
         || fixture_die "cannot write the network shim in $_ar"
@@ -5588,6 +6292,44 @@ adopted_repo() {
         || fixture_die "install failed in $_ar"
     echo "$_ar"
 }
+
+# git resolves a remote helper through GIT_EXEC_PATH, checked only after protocol.allow, so a fake git-remote-https placed there only ever runs on a genuine dial-out attempt.
+remote_helper_shim() {
+    _rhs="$(mktemp -d "$ROOT/remote-helper-shim.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+    printf '#!/bin/sh\n: > "%s/dialed"\nexit 1\n' "$_rhs" > "$_rhs/git-remote-https" \
+        || fixture_die "cannot write the network shim in $_rhs"
+    chmod +x "$_rhs/git-remote-https" || fixture_die "cannot make the network shim executable in $_rhs"
+    echo "$_rhs"
+}
+
+it "a plain commit in an adopted repo never reaches the network for the post-commit refresh"
+# F16/#137: asserting only that the stamp's second line came back empty proved nothing answered, which an offline machine also produces unfixed; the shim below proves no dial-out was even attempted.
+r=$(adopted_repo)
+_shim=$(remote_helper_shim)
+( cd "$r" && GIT_EXEC_PATH="$_shim" git commit -q --allow-empty -m 'chore: fixture' ) >/dev/null 2>&1 \
+    || fixture_die "cannot commit in $r"
+if ! wait_for_stamp "$r" 0; then
+    fail "a lookup that answered nothing left no stamp, so the next commit fires it again"
+elif [ -f "$_shim/dialed" ]; then
+    fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
+else
+    pass
+fi
+
+it "a plain commit in a hook-installed repo never reaches the network for the post-commit refresh"
+# new_hook_repo installs the same post-commit hook adopted_repo does; every other test here commits through hook_commit, so only deny_transports (not this test) closes this fixture's own gap.
+r=$(new_hook_repo)
+_shim=$(remote_helper_shim)
+stage "$r" NOTES.md "notes"
+( cd "$r" && GIT_EXEC_PATH="$_shim" git commit -q -m fixture ) >/dev/null 2>&1 \
+    || fixture_die "cannot commit in $r"
+if ! wait_for_stamp "$r" 0; then
+    fail "a lookup that answered nothing left no stamp, so the next commit fires it again"
+elif [ -f "$_shim/dialed" ]; then
+    fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
+else
+    pass
+fi
 
 it "a repo holding only what install wrote refuses an agent-session reference in a message"
 # What an adopter actually gets. The shipped hook cannot exec test/scan-for-leaks.sh, which is this
@@ -5722,6 +6464,10 @@ if ( cd "$r" && git commit -q --allow-empty -m 'chore: a clean fixture message' 
 else
     pass
 fi
+
+it "a dangling gate symlink in commit-msg.d refuses the commit instead of being skipped"
+r=$(adopted_repo)
+assert_dangling_gate_refuses "$r" commit-msg.d 10-gate git -C "$r" commit -q --allow-empty -m "chore: fixture"
 
 it "this repo's own message gate still refuses the shapes the shipped spine does not carry"
 # Adopting the shipped hook here narrows the spine to the two agent-session shapes, so the other

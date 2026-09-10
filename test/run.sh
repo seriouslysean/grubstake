@@ -2325,6 +2325,25 @@ else
     pass
 fi
 
+it "a legacy entry's receipt is never backfilled with a version the binary was never shown to report"
+# Pinning 0.65.0 over the hash of a binary reporting 0.63.2 is what a pin edited without re-hashing looks like.
+r=$(new_repo)
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"   # receiptless; binary reports 0.63.2
+pins "$r" "swiftlint 0.65.0 $SHA_A $SHA_A"   # pinned to a version the binary was never shown to report
+_receipt="$r/.cache/swiftlint/$SHA_A/.grubstake-receipt"
+_out=$(gs "$r" ensure); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 while backfilling a receipt against a version the binary never reported: $_out"
+elif [ -f "$_receipt" ]; then
+    fail "a receipt was written recording an unverified version: $(cat "$_receipt" 2>/dev/null)"
+elif ! printf '%s' "$_out" | grep -F -q "0.63.2"; then
+    fail "refused, but did not name the version the binary actually reports: $_out"
+elif ! printf '%s' "$_out" | grep -F -q "0.65.0"; then
+    fail "refused, but did not name the newly pinned version: $_out"
+else
+    pass
+fi
+
 it "check is not blocked by an entry that predates receipts"
 # The incident guard from CONTRIBUTING.md's "When a fix changes behaviour on upgrade": cache
 # verification once landed without accounting for existing caches carrying no digest, and the first

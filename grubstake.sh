@@ -434,6 +434,15 @@ publish_dir() {
     fi
 }
 
+# Rule 3: no receipt carries a version the binary on disk was not first shown to report.
+assert_reported_version() {
+    _arv="$(reported_version "$1" "$2" || echo '')"
+    [ "$_arv" = "$3" ] && return 0
+    warn "$2: $4 reports ${_arv:-nothing}, not the pinned $3.
+  The pin may have been edited without re-hashing; run: grubstake add $2@$3, or remove $4 by hand."
+    return 1
+}
+
 # The pinned hash, checked here against the bytes that arrived, is the trust root. Everything
 # after publish is a cache: fast, disposable, and not a security boundary.
 install_tool() {
@@ -466,16 +475,9 @@ install_tool() {
             if [ "$_rver" = "$_ver" ]; then
                 return 0
             fi
-            # A stale receipt line is not license to trust the pin's claim unchecked: rule 3 requires
-            # the binary itself to report the pinned version before that label is ever recorded, so
-            # this asserts it here, offline, against the binary already on disk -- the one path that
-            # could otherwise relabel a receipt to a version the binary was never shown to be.
-            _reported="$(reported_version "$_bin" "$_tool" || echo '')"
-            if [ "$_reported" != "$_ver" ]; then
-                warn "$_tool: $_dest reports ${_reported:-nothing}, not the pinned $_ver.
-  The pin may have been edited without re-hashing; run: grubstake add $_tool@$_ver, or remove $_dest by hand."
-                return 1
-            fi
+            # A stale receipt line is not license to trust the pin's claim unchecked -- the one path
+            # that could otherwise relabel a receipt to a version the binary was never shown to be.
+            assert_reported_version "$_bin" "$_tool" "$_ver" "$_dest" || return 1
             # The binary genuinely reports the pinned version -- only the receipt's version line was
             # stale -- so this rewrites it in place rather than downloading: publish_dir would discard
             # a fresh download here anyway, since this entry's own executable already makes it the
@@ -506,6 +508,7 @@ install_tool() {
             # No receipt, or a header this script does not recognize: predates receipts, or was
             # written by a version that will. Record one against what is already there, offline and
             # in place -- it is the same trust the entry already had, now with a baseline to drift from.
+            assert_reported_version "$_bin" "$_tool" "$_ver" "$_dest" || return 1
             _bsha="$(hashed_or_empty "$_bin")"
             if [ -z "$_bsha" ]; then
                 # A hash that failed or came back empty must never be recorded: a legacy entry with no

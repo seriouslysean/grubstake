@@ -36,8 +36,7 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install dash
 
-      # dash is the test interpreter installed unpinned from Homebrew, an accepted exception because
-      # it is not an artifact this repo ships and Homebrew offers no version pin.
+      # dash is the test interpreter installed unpinned from Homebrew, an accepted exception because it is not an artifact this repo ships and Homebrew offers no version pin.
       - name: report dash identity
         if: runner.os == 'macOS'
         run: |

@@ -501,8 +501,7 @@ install_tool() {
             if [ "$_rver" = "$_ver" ]; then
                 return 0
             fi
-            # A stale receipt line is not license to trust the pin's claim unchecked -- the one path
-            # that could otherwise relabel a receipt to a version the binary was never shown to be.
+            # A stale receipt line is not license to trust the pin's claim unchecked -- the one path that could otherwise relabel a receipt to a version the binary was never shown to be.
             assert_reported_version "$_bin" "$_tool" "$_ver" "$_dest" || return 1
             # The binary genuinely reports the pinned version -- only the receipt's version line was
             # stale -- so this rewrites it in place rather than downloading: publish_dir would discard
@@ -724,9 +723,7 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     # Known limitation: SwiftLint reads the working tree, so this checks the current contents of
     # files whose paths are staged, not the staged blobs. Linting a temp copy would break config
     # resolution, and stashing the remainder to lint the index is what strands work in the tools
-    # that do it. Both shapes it can detect are refused below -- a second status column of D, where
-    # there is nothing to read, and M or T, where what was read is not what is staged -- and CI
-    # lints the committed tree.
+    # that do it. Both shapes it can detect are refused below -- a second status column of D, where there is nothing to read, and M or T, where what was read is not what is staged -- and CI lints the committed tree.
     STATUS=$(git status --porcelain -- '*.swift')
     # Second column D means the worktree copy is gone, decided here rather than trusted to the linter's exit status, which a batched run can mask.
     GONE=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMRT]D //p')
@@ -901,7 +898,7 @@ hook_has_marker() {
 known_hook_hashes() {
     case "$1" in
         pre-commit)
-            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 3069a9180fed304b859b16d3e4e2fd1674c4b447caae2fff32fc4b56b142d5fc"
+            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 1f1a0953e8ebe4bba4331251ca7d6a3da9f0c3ead68ff9285056fb94505a773f"
             ;;
         post-commit)
             echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494"
@@ -1100,9 +1097,7 @@ cmd_doctor() {
     fi
     printf 'platform   %s\n' "$_plat"
     # Same shape as the platform field above: cache_root can fail on its own (GRUBSTAKE_CACHE unset,
-    # platform unsupported, or a relative override) even when $_plat_ok already covered the platform
-    # line's own failure. 2>&1, not 2>/dev/null: the refusal reason is the only way this line can say
-    # more than "unresolved" without a stale label naming just one of several now-possible causes.
+    # platform unsupported, or a relative override) even when $_plat_ok already covered the platform line's own failure. 2>&1, not 2>/dev/null: the refusal reason is the only way this line can say more than "unresolved" without a stale label naming just one of several now-possible causes.
     if _cache="$(cache_root 2>&1)"; then
         _cache_ok=1
         printf 'cache      %s\n' "$_cache"
@@ -1182,8 +1177,7 @@ cmd_doctor() {
         if [ -z "$_url" ]; then
             printf '  %-12s %-10s n/a on %s\n' "$_tool" "$_ver" "$_plat"
         elif [ "$_cache_ok" = 0 ]; then
-            # Reuses $_cache_ok from the header instead of tool_bin's own cache_root call, which
-            # would otherwise repeat cache_root's refusal warning once per pinned tool.
+            # Reuses $_cache_ok from the header instead of tool_bin's own cache_root call, which would otherwise repeat cache_root's refusal warning once per pinned tool.
             printf '  %-12s %-10s could not resolve\n' "$_tool" "$_ver"
         elif [ -x "$(tool_bin "$_tool" "$(pin_sha "$_tool" "$_plat")")" ]; then
             printf '  %-12s %-10s installed\n' "$_tool" "$_ver"
@@ -1250,8 +1244,7 @@ clean_trash_teardown() {
 }
 
 # No validate_pins: a malformed grubstake.tools must not block the one command that recovers from
-# a wedged cache. cache_root can now fail outright (unsupported platform, no GRUBSTAKE_CACHE override,
-# or a relative one); a degenerate path is the only case left for the check below to refuse.
+# a wedged cache. cache_root can now fail outright (unsupported platform, no GRUBSTAKE_CACHE override, or a relative one); a degenerate path is the only case left for the check below to refuse.
 cmd_clean() {
     _root="$(cache_root)" || die "cannot determine the cache root"
     case "$_root" in

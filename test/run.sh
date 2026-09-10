@@ -1142,8 +1142,7 @@ else
 fi
 
 it "an archive whose bytes differ from the pin is refused before anything runs or publishes"
-# Pinned at the fixture's own version so the sha256 comparison is the only gate that can refuse, and
-# judged by the absence of install_tool's own "installed" line, which nothing short of publish_dir prints.
+# Pinned at the fixture's own version so the sha256 comparison is the only gate that can refuse, and judged by the absence of install_tool's own "installed" line, which nothing short of publish_dir prints.
 r=$(new_repo)
 _realsha=$(fake_release "$r" 0.63.2)
 _badsha=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
@@ -1264,8 +1263,7 @@ else
     esac
 fi
 
-# Shared by the three staging-failure tests below: a fresh repo pinned to a fake swiftlint release,
-# with $r, $_sha and $_dest (its would-be cache destination) set for the caller.
+# Shared by the three staging-failure tests below: a fresh repo pinned to a fake swiftlint release, with $r, $_sha and $_dest (its would-be cache destination) set for the caller.
 staging_failure_fixture() {
     r=$(new_repo)
     _sha=$(fake_release "$r" 0.63.2)
@@ -1274,9 +1272,7 @@ staging_failure_fixture() {
 }
 
 it "an mv failure while publishing into an absent destination does not leave staging behind"
-# publish_dir's else branch (destination absent) ran its mv unchecked, so a failed rename still let
-# the run report success while nothing was actually published; gated on the destination argument so
-# only the publish rename fails, not any other mv install_tool might run first.
+# Gated on the destination argument so only the publish rename fails, not any other mv install_tool might run first.
 staging_failure_fixture
 _mvshim="$r/mv-shim"; mkdir -p "$_mvshim" || fixture_die "cannot create $_mvshim"
 _realmv="$(command -v mv)" || fixture_die "no real mv on PATH to wrap"
@@ -1305,8 +1301,7 @@ else
 fi
 
 it "a cp failure while staging the extracted files does not publish a partial entry"
-# cp -R into staging was unchecked, letting a copy that lands the executable but fails on a sibling
-# still publish; gated on the literal -R flag so the fixture curl shim's own flagless cp still works.
+# Gated on the literal -R flag so the fixture curl shim's own flagless cp still works.
 staging_failure_fixture
 _cpshim="$r/cp-shim"; mkdir -p "$_cpshim" || fixture_die "cannot create $_cpshim"
 _realcp="$(command -v cp)" || fixture_die "no real cp on PATH to wrap"
@@ -1334,8 +1329,7 @@ else
 fi
 
 it "an unzip failure after partial extraction does not publish a partial entry"
-# unzip -oq was unchecked; an extractor that exits nonzero after writing some members still let
-# install_tool proceed to stage and publish whatever had already landed on disk.
+# The shim fails only after the real unzip has written its members, so a nonzero extractor exit that follows partial output is what this proves refused, not an extractor that fails outright.
 staging_failure_fixture
 _unzipshim="$r/unzip-shim"; mkdir -p "$_unzipshim" || fixture_die "cannot create $_unzipshim"
 _realunzip="$(command -v unzip)" || fixture_die "no real unzip on PATH to wrap"
@@ -1780,9 +1774,7 @@ rm -rf "$_real" 2>/dev/null
 mkdir -p "$r/.cache" 2>/dev/null
 
 it "doctor names GRUBSTAKE_CACHE exactly once for a relative override, not once per pinned tool"
-# cache_root's relative-path refusal is shared by every caller, including tool_bin inside doctor's
-# own per-tool loop, so an unresolved root named there too -- once per pinned tool -- repeats the
-# same warning doctor's own header already printed instead of doctor resolving it once, up front.
+# cache_root's relative-path refusal is shared by every caller, including tool_bin inside doctor's own per-tool loop, so doctor resolves it once, up front, instead of repeating the warning once per pinned tool.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A
 swiftformat 0.55.0 $SHA_B $SHA_B"
@@ -3107,8 +3099,7 @@ r=$(new_repo)
 _before="$(cat "$r/grubstake.sh")"
 _raw="$(mktemp -d "$ROOT/inert-release.XXXXXX")" || fixture_die "cannot create the inert release fixture dir"
 mkdir -p "$_raw/v9.9.9" || fixture_die "cannot create the inert release version dir"
-# main "$@" appears mid-file, then another definition follows, so this only refuses under a check
-# anchored on the LAST line -- a check that greps for the line anywhere would wrongly accept it.
+# main "$@" appears mid-file here, then another definition follows, so only a check anchored on the LAST line refuses it -- one that greps for the line anywhere would wrongly accept it.
 printf '#!/bin/sh\nGRUBSTAKE_VERSION="9.9.9"\nmain() { :; }\nmain "$@"\nextra() { :; }\n' > "$_raw/v9.9.9/grubstake.sh"
 _out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$_raw" ./grubstake.sh update 9.9.9 2>&1 ); _rc=$?
 _after="$(cat "$r/grubstake.sh")"
@@ -3124,8 +3115,7 @@ else
 fi
 
 it "update does not accept a version line an unescaped dot wildcard happens to match"
-# An unescaped "." in a BRE is a wildcard, so a fetched line naming a different version could still
-# satisfy an unanchored, non-literal match as long as every dot in the real one lined up with any character.
+# An unescaped "." in a BRE is a wildcard, so a fetched line naming a different version could still satisfy an unanchored, non-literal match as long as every dot in the real one lined up with any character.
 r=$(new_repo)
 _before="$(cat "$r/grubstake.sh")"
 _raw="$(mktemp -d "$ROOT/wildcard-release.XXXXXX")" || fixture_die "cannot create the wildcard release fixture dir"
@@ -3230,8 +3220,7 @@ it "the previous release can update to this one"
 # Resolved from the remote, not from local tags: a shallow clone by tag has one tag, which made
 # this report a failure when the real cause was "nothing to compare against". A test that cannot
 # tell "I could not run" from "the thing is broken" gets ignored the first time it goes red.
-#
-# F14/#137: "the version moved" passed with both ends real and the checked-out candidate never participating; GRUBSTAKE_REPO/GRUBSTAKE_RAW now aim the fetched old client at a local fixture serving $GS, so the assertion is a byte comparison against $GS itself.
+# GRUBSTAKE_REPO/GRUBSTAKE_RAW aim the fetched old client at a local fixture serving $GS, so the assertion is a byte comparison against $GS itself.
 if [ "$NETWORK" = 1 ]; then
     # The named default is the source of truth; a plain literal assignment is the fallback shape.
     _repo="$(sed -n 's/^GRUBSTAKE_REPO_DEFAULT="\(.*\)"$/\1/p' "$GS")"
@@ -3244,16 +3233,14 @@ if [ "$NETWORK" = 1 ]; then
     if [ -z "$_prev" ]; then
         printf '  skip  %s\n' "$CURRENT (no release published yet)"
     elif [ "$_prev" = "$_cand" ]; then
-        # On the tag-push trigger the candidate's own tag is already the newest published one, so an
-        # update to it is correctly a no-op, not a byte-for-byte replace; nothing to compare here.
+        # On the tag-push trigger the candidate's own tag is already the newest published one, so an update to it is correctly a no-op, not a byte-for-byte replace; nothing to compare here.
         printf '  skip  %s\n' "$CURRENT (candidate's tag is already the newest published release)"
     else
         r=$(new_repo)
         if curl -fsSL "https://raw.githubusercontent.com/seriouslysean/grubstake/v$_prev/grubstake.sh" \
              -o "$r/grubstake.sh" 2>/dev/null; then
             chmod +x "$r/grubstake.sh"
-            # A future previous release that drops these overrides would leave this test with no
-            # honest way to aim it at the candidate at all.
+            # A future previous release that drops these overrides would leave this test with no honest way to aim it at the candidate at all.
             if ! grep -q 'GRUBSTAKE_REPO="${GRUBSTAKE_REPO:-' "$r/grubstake.sh" \
                 || ! grep -q 'GRUBSTAKE_RAW="${GRUBSTAKE_RAW:-' "$r/grubstake.sh"; then
                 fail "v$_prev does not honour GRUBSTAKE_REPO/GRUBSTAKE_RAW, so this test cannot aim it at the candidate"
@@ -4572,8 +4559,7 @@ new_hook_repo() {
 # not of this function, so a cache set only in this shell would leave the hook resolving against
 # the developer's real cache: the tests would still go green, for a reason the fixture never
 # controlled. GIT_ALLOW_PROTOCOL keeps post-commit's backgrounded refresh off the network, since
-# git then refuses the transport outright instead of dialling out. $2, optional: a directory to put
-# ahead of PATH, for a fixture that needs the hook to see a shim rather than the real tool.
+# git then refuses the transport outright instead of dialling out. $2, optional: a directory to put ahead of PATH, for a fixture that needs the hook to see a shim rather than the real tool.
 hook_commit() {
     _hcr="$1"
     _hcp="${2:-}"
@@ -4804,9 +4790,7 @@ else
 fi
 
 it "a regular file staged over a symlink, then turned back into a symlink, is refused (TT)"
-# git reports this as TT: type-changed in the index, then type-changed again in the worktree. A
-# pattern of [ACMRT]M alone missed the worktree T, so the linter read the symlink's target while a
-# regular blob was about to commit.
+# git reports this as TT: type-changed in the index, then type-changed again in the worktree; a pattern of [ACMRT]M alone misses the worktree T.
 r=$(new_hook_repo)
 ( cd "$r" && ln -s README.md A.swift && git add A.swift && git commit -q -m "seed a symlink" ) \
     || fixture_die "cannot seed a symlink commit in $r"
@@ -5016,12 +5000,7 @@ elif [ "$(commits "$r")" != 2 ]; then fail "exited 0 without committing"
 else pass; fi
 
 it "a cache entry that vanishes between the hook's check and its path call still refuses offline"
-# check is existence-only, so it cannot see a binary that a concurrent clean removes right after it
-# passes; only GRUBSTAKE_OFFLINE on the later path call stands between that gap and the commit path
-# downloading. Landing the clean inside that window is not reproducible on demand, so this fixture
-# makes check answer "passed" unconditionally instead, and never installs the binary at all -- the
-# one difference such a race would have left behind -- then drives a real commit through the real
-# hook to prove the guard, not a stand-in for it.
+# Landing the clean inside this window is not reproducible on demand, so the fixture makes check answer "passed" unconditionally and never installs the binary, then drives a real commit through the real hook to prove the guard.
 r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 mv "$r/grubstake.sh" "$r/grubstake-real.sh" || fixture_die "cannot move grubstake.sh aside in $r"
 cat > "$r/grubstake.sh" <<WRAP || fixture_die "cannot write the check-always-passes wrapper in $r"
@@ -6172,8 +6151,7 @@ case "$_out" in
 esac
 
 it "scan-for-leaks scans the index, not the working tree, so a staged leak survives a clean-looking worktree"
-# git grep with no --cached reads the working tree; a commit publishes the index, not the worktree,
-# so a leak staged and then scrubbed on disk without re-adding must still be caught.
+# git grep with no --cached reads the working tree; a commit publishes the index, not the worktree, so a leak staged and then scrubbed on disk without re-adding must still be caught.
 r=$(leaks_repo)
 printf 'contact admin@example.com\n' > "$r/notes.md" || fixture_die "cannot write the staged-leak fixture in $r"
 ( cd "$r" && git add notes.md ) || fixture_die "cannot stage the leak fixture in $r"
@@ -6185,8 +6163,7 @@ case "$_out" in
 esac
 
 it "scan-for-leaks does not read git's stderr as a hit when git succeeds"
-# git can warn on stderr and still exit 0, and a warning carrying a path matches the home-path
-# pattern, so merging stderr into the variable the verdict is read from would invent a leak.
+# git can warn on stderr and still exit 0, and a warning carrying a path matches the home-path pattern, so merging stderr into the variable the verdict is read from would invent a leak.
 _gs="$ROOT/git-warns.$$.$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
 mkdir -p "$_gs/bin" "$_gs/repo/test" || fixture_die "cannot create $_gs"
 cat > "$_gs/bin/git" <<'SHIM'
@@ -6356,8 +6333,7 @@ else
 fi
 
 it "a plain commit in a hook-installed repo never reaches the network for the post-commit refresh"
-# new_hook_repo installs the same post-commit hook adopted_repo does; every other test here commits
-# through hook_commit, so only deny_transports (not this test) closes this fixture's own gap.
+# new_hook_repo installs the same post-commit hook adopted_repo does; every other test here commits through hook_commit, so only deny_transports (not this test) closes this fixture's own gap.
 r=$(new_hook_repo)
 _shim=$(remote_helper_shim)
 stage "$r" NOTES.md "notes"

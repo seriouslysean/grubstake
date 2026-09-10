@@ -50,9 +50,7 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     # Known limitation: SwiftLint reads the working tree, so this checks the current contents of
     # files whose paths are staged, not the staged blobs. Linting a temp copy would break config
     # resolution, and stashing the remainder to lint the index is what strands work in the tools
-    # that do it. Both shapes it can detect are refused below -- a second status column of D, where
-    # there is nothing to read, and M or T, where what was read is not what is staged -- and CI
-    # lints the committed tree.
+    # that do it. Both shapes it can detect are refused below -- a second status column of D, where there is nothing to read, and M or T, where what was read is not what is staged -- and CI lints the committed tree.
     STATUS=$(git status --porcelain -- '*.swift')
     # Second column D means the worktree copy is gone, decided here rather than trusted to the linter's exit status, which a batched run can mask.
     GONE=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMRT]D //p')

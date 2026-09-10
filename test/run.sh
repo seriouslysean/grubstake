@@ -4537,6 +4537,12 @@ fi
 # calls it, never what happens inside a commit. These fixtures install the hooks the way
 # `grubstake install` does and drive them through a real `git commit`.
 
+# protocol.allow, not GIT_ALLOW_PROTOCOL: a plain `git commit` fires the post-commit hook's backgrounded lookup, and no caller below can be trusted to remember an env var only one of them sets.
+deny_transports() {
+    ( cd "$1" && git config protocol.allow never && git config protocol.file.allow always ) \
+        || fixture_die "cannot deny network transports in $1"
+}
+
 # A repo with the shipped hooks installed and one commit of history. The baseline commit is made
 # before core.hooksPath is set, so building the fixture never runs the hooks under test.
 new_hook_repo() {
@@ -4549,6 +4555,7 @@ new_hook_repo() {
       && git config commit.gpgsign false \
       && git add README.md \
       && git commit -q -m baseline ) || fixture_die "cannot seed a commit in $_hr"
+    deny_transports "$_hr"
     mkdir -p "$_hr/.githooks" || fixture_die "cannot create $_hr/.githooks"
     cp "$HOOKS/pre-commit" "$HOOKS/post-commit" "$_hr/.githooks/" \
         || fixture_die "cannot copy hooks into $_hr"
@@ -6315,6 +6322,7 @@ adopted_repo() {
       && git config user.email test@example.invalid \
       && git config user.name "grubstake suite" \
       && git config commit.gpgsign false ) || fixture_die "cannot configure $_ar"
+    deny_transports "$_ar"
     mkdir -p "$_ar/no-net" || fixture_die "cannot create the network shim dir in $_ar"
     printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' > "$_ar/no-net/curl" \
         || fixture_die "cannot write the network shim in $_ar"
@@ -6323,6 +6331,45 @@ adopted_repo() {
         || fixture_die "install failed in $_ar"
     echo "$_ar"
 }
+
+# git resolves a remote helper through GIT_EXEC_PATH, checked only after protocol.allow, so a fake git-remote-https placed there only ever runs on a genuine dial-out attempt.
+remote_helper_shim() {
+    _rhs="$(mktemp -d "$ROOT/remote-helper-shim.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
+    printf '#!/bin/sh\n: > "%s/dialed"\nexit 1\n' "$_rhs" > "$_rhs/git-remote-https" \
+        || fixture_die "cannot write the network shim in $_rhs"
+    chmod +x "$_rhs/git-remote-https" || fixture_die "cannot make the network shim executable in $_rhs"
+    echo "$_rhs"
+}
+
+it "a plain commit in an adopted repo never reaches the network for the post-commit refresh"
+# F16/#137: asserting only that the stamp's second line came back empty proved nothing answered, which an offline machine also produces unfixed; the shim below proves no dial-out was even attempted.
+r=$(adopted_repo)
+_shim=$(remote_helper_shim)
+( cd "$r" && GIT_EXEC_PATH="$_shim" git commit -q --allow-empty -m 'chore: fixture' ) >/dev/null 2>&1 \
+    || fixture_die "cannot commit in $r"
+if ! wait_for_stamp "$r" 0; then
+    fail "a lookup that answered nothing left no stamp, so the next commit fires it again"
+elif [ -f "$_shim/dialed" ]; then
+    fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
+else
+    pass
+fi
+
+it "a plain commit in a hook-installed repo never reaches the network for the post-commit refresh"
+# new_hook_repo installs the same post-commit hook adopted_repo does; every other test here commits
+# through hook_commit, so only deny_transports (not this test) closes this fixture's own gap.
+r=$(new_hook_repo)
+_shim=$(remote_helper_shim)
+stage "$r" NOTES.md "notes"
+( cd "$r" && GIT_EXEC_PATH="$_shim" git commit -q -m fixture ) >/dev/null 2>&1 \
+    || fixture_die "cannot commit in $r"
+if ! wait_for_stamp "$r" 0; then
+    fail "a lookup that answered nothing left no stamp, so the next commit fires it again"
+elif [ -f "$_shim/dialed" ]; then
+    fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
+else
+    pass
+fi
 
 it "a repo holding only what install wrote refuses an agent-session reference in a message"
 # What an adopter actually gets. The shipped hook cannot exec test/scan-for-leaks.sh, which is this

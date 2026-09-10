@@ -1418,8 +1418,10 @@ release_tags() {
 fetch_release() {
     curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$GRUBSTAKE_RAW/v$1/grubstake.sh" -o "$2" 2>/dev/null || return 1
     sh -n "$2" 2>/dev/null || return 1
-    # A tag is a mutable ref, so assert the bytes identify as what the tag claims.
-    grep -q "^GRUBSTAKE_VERSION=\"$1\"" "$2" || return 1
+    # A tag is a mutable ref, and an unescaped "." in $1 is a grep wildcard, so match the whole line literally.
+    grep -qxF "GRUBSTAKE_VERSION=\"$1\"" "$2" || return 1
+    # sh -n proves syntax, not completeness: a file truncated at a definition boundary parses clean, so require the call main() needs to not be inert.
+    [ "$(grep -v '^[[:space:]]*$' "$2" | tail -1)" = 'main "$@"' ] || return 1
 }
 
 cmd_update() {

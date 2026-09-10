@@ -2989,6 +2989,63 @@ else
     esac
 fi
 
+it "update refuses a fetched release that never calls main"
+# sh -n proves syntax, not completeness, so a truncated file that never reaches main "$@" parses clean.
+r=$(new_repo)
+_before="$(cat "$r/grubstake.sh")"
+_raw="$(mktemp -d "$ROOT/inert-release.XXXXXX")" || fixture_die "cannot create the inert release fixture dir"
+mkdir -p "$_raw/v9.9.9" || fixture_die "cannot create the inert release version dir"
+# main "$@" appears mid-file, then another definition follows, so this only refuses under a check
+# anchored on the LAST line -- a check that greps for the line anywhere would wrongly accept it.
+printf '#!/bin/sh\nGRUBSTAKE_VERSION="9.9.9"\nmain() { :; }\nmain "$@"\nextra() { :; }\n' > "$_raw/v9.9.9/grubstake.sh"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$_raw" ./grubstake.sh update 9.9.9 2>&1 ); _rc=$?
+_after="$(cat "$r/grubstake.sh")"
+if [ "$_rc" -eq 0 ]; then
+    fail "update exited 0 for a release that never calls main: $_out"
+elif [ "$_after" != "$_before" ]; then
+    fail "the running script was replaced despite the fetched release being refused"
+else
+    case "$_out" in
+        *"is not a usable release"*) pass ;;
+        *) fail "refused, but without saying why: $_out" ;;
+    esac
+fi
+
+it "update does not accept a version line an unescaped dot wildcard happens to match"
+# An unescaped "." in a BRE is a wildcard, so a fetched line naming a different version could still
+# satisfy an unanchored, non-literal match as long as every dot in the real one lined up with any character.
+r=$(new_repo)
+_before="$(cat "$r/grubstake.sh")"
+_raw="$(mktemp -d "$ROOT/wildcard-release.XXXXXX")" || fixture_die "cannot create the wildcard release fixture dir"
+mkdir -p "$_raw/v9.9.9" || fixture_die "cannot create the wildcard release version dir"
+printf '#!/bin/sh\nGRUBSTAKE_VERSION="9x9x9"\nmain() { :; }\nmain "$@"\n' > "$_raw/v9.9.9/grubstake.sh"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$_raw" ./grubstake.sh update 9.9.9 2>&1 ); _rc=$?
+_after="$(cat "$r/grubstake.sh")"
+if [ "$_rc" -eq 0 ]; then
+    fail "update exited 0 for a release whose version line only matched via an unescaped dot wildcard: $_out"
+elif [ "$_after" != "$_before" ]; then
+    fail "the running script was replaced despite the version line being a wildcard match, not a real one"
+else
+    pass
+fi
+
+it "update does not accept a version line with a trailing suffix grep -qxF's own anchoring refuses"
+# -F alone stops "." acting as a wildcard, but only -x stops a fixed string matching as a prefix of a longer line.
+r=$(new_repo)
+_before="$(cat "$r/grubstake.sh")"
+_raw="$(mktemp -d "$ROOT/suffixed-release.XXXXXX")" || fixture_die "cannot create the suffixed release fixture dir"
+mkdir -p "$_raw/v9.9.9" || fixture_die "cannot create the suffixed release version dir"
+printf '#!/bin/sh\nGRUBSTAKE_VERSION="9.9.9" # trailing\nmain() { :; }\nmain "$@"\n' > "$_raw/v9.9.9/grubstake.sh"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$_raw" ./grubstake.sh update 9.9.9 2>&1 ); _rc=$?
+_after="$(cat "$r/grubstake.sh")"
+if [ "$_rc" -eq 0 ]; then
+    fail "update exited 0 for a version line carrying a trailing suffix past the pinned version: $_out"
+elif [ "$_after" != "$_before" ]; then
+    fail "the running script was replaced despite the version line carrying a trailing suffix"
+else
+    pass
+fi
+
 it "the legacy handoff verb still answers, for clients that only speak it"
 # Removing it stranded every existing adopter: it is a protocol only OLD versions speak, so it is
 # the one thing that cannot be fixed forward. It stays as compatibility, not as a live path.
@@ -3513,10 +3570,9 @@ new_update_fixture() {
       && git push -q "$_uf/repo.git" HEAD:refs/heads/main --tags ) \
         || fixture_die "cannot seed the fixture release repo in $_uf"
     mkdir -p "$_uf/raw/v9.9.9" || fixture_die "cannot create the fixture raw tree in $_uf"
-    # Declares the version fetch_release's grep demands, and marks its own execution unconditionally
-    # -- on any argument, including "ensure", the argument an auto-run handoff would supply -- so
-    # the test can tell replaced-but-not-run apart from replaced-and-run.
-    printf '#!/bin/sh\nGRUBSTAKE_VERSION="9.9.9"\n[ -n "${GST_TEST_MARKER:-}" ] && touch "$GST_TEST_MARKER"\nexit 0\n' \
+    # Ends in main "$@" and marks its own execution unconditionally, on any argument including
+    # "ensure", so the test can tell replaced-but-not-run apart from replaced-and-run.
+    printf '#!/bin/sh\nGRUBSTAKE_VERSION="9.9.9"\nmain() {\n[ -n "${GST_TEST_MARKER:-}" ] && touch "$GST_TEST_MARKER"\n}\nmain "$@"\n' \
         > "$_uf/raw/v9.9.9/grubstake.sh" || fixture_die "cannot write the fixture release script"
     echo "$_uf"
 }

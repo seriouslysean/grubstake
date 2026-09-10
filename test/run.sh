@@ -3763,6 +3763,53 @@ r=$(new_repo); ( cd "$r" && git config core.hooksPath .other-hooks )
 gs_rc "$r" install
 if [ -d "$r/.githooks" ]; then fail "left .githooks behind after refusing"; else pass; fi
 
+it "install refuses when an executable .git/hooks/pre-commit would go silent"
+# hooksPath unset means git already runs whatever sits executable in .git/hooks; wiring .githooks over it would silence it.
+r=$(new_repo)
+printf '#!/bin/sh\nexit 0\n' > "$r/.git/hooks/pre-commit" || fixture_die "cannot write $r/.git/hooks/pre-commit"
+chmod +x "$r/.git/hooks/pre-commit" || fixture_die "cannot make $r/.git/hooks/pre-commit executable"
+# GIT_CONFIG_GLOBAL=/dev/null: a global core.hooksPath on the machine running this suite must not decide it.
+_out=$( cd "$r" && GIT_CONFIG_GLOBAL=/dev/null GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+_hp=$(cd "$r" && GIT_CONFIG_GLOBAL=/dev/null git config core.hooksPath 2>/dev/null || true)
+if [ "$_rc" -eq 0 ]; then
+    fail "install succeeded while silencing a live .git/hooks/pre-commit: $_out"
+elif [ -d "$r/.githooks" ]; then
+    fail "install wrote .githooks before refusing: $_out"
+elif [ -n "$_hp" ]; then
+    fail "install set core.hooksPath despite refusing (got '$_hp'): $_out"
+elif ! printf '%s' "$_out" | grep -q "pre-commit"; then
+    fail "refused without naming the live hook: $_out"
+else
+    pass
+fi
+
+it "install does not report an executable subdirectory under .git/hooks as a live hook"
+# -e and -x alone are true for a directory too; only -f narrows the loop to actual hook files.
+r=$(new_repo)
+mkdir -p "$r/.git/hooks/not-a-hook" || fixture_die "cannot create a hooks subdirectory in $r"
+_out=$( cd "$r" && GIT_CONFIG_GLOBAL=/dev/null GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "install refused over a directory under .git/hooks, which is not a hook: $_out"
+else
+    pass
+fi
+
+it "install dies naming .git/hooks when it exists but cannot be read"
+# An unreadable directory leaves the glob below literal, which took the silent skip rule 16 forbids.
+r=$(new_repo)
+chmod 000 "$r/.git/hooks" || fixture_die "cannot make $r/.git/hooks unreadable"
+_out=$( cd "$r" && GIT_CONFIG_GLOBAL=/dev/null GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1 ); _rc=$?
+chmod 755 "$r/.git/hooks" || fixture_die "cannot restore $r/.git/hooks for cleanup"
+if [ "$_rc" -eq 0 ]; then
+    fail "install silently skipped the live-hook check on an unreadable .git/hooks: $_out"
+elif [ -d "$r/.githooks" ]; then
+    fail "install wrote .githooks before refusing: $_out"
+elif ! printf '%s' "$_out" | grep -q "$r/.git/hooks"; then
+    fail "refused without naming the unreadable directory: $_out"
+else
+    pass
+fi
+
 # The gst-embedded-hook-begin/end: <name> marker lines are the extraction interface this test and
 # grubstake.sh's own install share, so renaming or reformatting either side breaks both silently.
 # grubstake.sh must strip both marker lines when it writes the installed hook: if they reach

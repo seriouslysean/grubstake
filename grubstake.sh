@@ -1344,6 +1344,27 @@ cmd_install() {
     if [ -n "$_existing" ] && [ "$_existing" != ".githooks" ]; then
         die "core.hooksPath is already '$_existing'; move those hooks into .githooks first"
     fi
+    # Unset hooksPath means git already runs whatever sits executable in .git/hooks; wiring .githooks over it would silence that hook, the failure rule 16 exists to close.
+    if [ -z "$_existing" ]; then
+        _gh="$(git -C "$_root" rev-parse --git-path hooks)"
+        case "$_gh" in
+            /*) : ;;
+            *)  _gh="$_root/$_gh" ;;
+        esac
+        # An unreadable directory leaves the glob below literal and the whole gate silently skipped.
+        if [ -d "$_gh" ] && [ ! -r "$_gh" ]; then
+            die "cannot read $_gh to check for live hooks"
+        fi
+        _active=""
+        for _f in "$_gh"/*; do
+            [ -e "$_f" ] || continue
+            [ -f "$_f" ] || continue
+            case "$(basename "$_f")" in *.sample) continue ;; esac
+            [ -x "$_f" ] || continue
+            _active="$_active $(basename "$_f")"
+        done
+        [ -z "$_active" ] || die "$_gh has active hook(s) that would go silent:$_active -- move them under .githooks/ first, since <hook>.d/ only gates the hooks the spine offers"
+    fi
     mkdir -p "$_root/.githooks"
 
     for _hook in pre-commit post-commit commit-msg; do

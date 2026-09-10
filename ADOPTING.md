@@ -139,7 +139,9 @@ rather than as a gap in the proof: it is being downloaded on every cold cache fo
 
 `./grubstake.sh install` wires `core.hooksPath` to `.githooks` and installs a pre-commit spine, a
 commit-msg spine, and a post-commit version notice. It refuses to run if another hooks directory is
-already configured, and it leaves existing hook files alone.
+already configured, or if `.git/hooks` holds an executable hook that wiring `.githooks` would
+silence; move that hook under `.githooks/` first. Once installed, it leaves existing hook files
+alone.
 
 The commit-msg spine refuses a commit message carrying an agent-session trailer or a transcript
 link. Both name a transcript outside the repository, which nobody reading the history later can

@@ -73,7 +73,10 @@ grubstake.tools   the pinned tools, one per line: name version sha256-darwin sha
 ```
 
 Binaries are cached in `~/Library/Caches/grubstake`, or under `$XDG_CACHE_HOME` on Linux, so nothing
-downloaded ever lands in the repo. Set `GRUBSTAKE_CACHE` if you want them somewhere else.
+downloaded ever lands in the repo. Set `GRUBSTAKE_CACHE` if you want them somewhere else. Set
+`GRUBSTAKE_OFFLINE` to a non-empty value if you want `path` to refuse a missing tool instead of
+installing it, which the pre-commit spine does on your behalf so a clean racing a commit never
+puts curl on the commit path.
 
 Each entry is a directory named for the archive hash it was installed from, so changing a pin
 installs alongside rather than over, and two repos pinning different hashes of the same version

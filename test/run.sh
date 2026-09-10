@@ -2989,6 +2989,37 @@ esac
 it "path fails for a tool that is not pinned"
 r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"; expect_fail "$r" path periphery
 
+it "GRUBSTAKE_OFFLINE refuses to install a missing pinned tool instead of reaching for curl"
+# A clean racing the spine's own check can leave the binary missing right when a commit reaches for it, so the commit path must refuse rather than put curl on it.
+r=$(new_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_shim="$(mktemp -d "$ROOT/offline-curl.XXXXXX")" || fixture_die "cannot create the offline curl shim dir"
+printf '#!/bin/sh\necho "curl must not run on the commit path" >&2\nexit 1\n' > "$_shim/curl" \
+    || fixture_die "cannot write the offline curl shim"
+chmod +x "$_shim/curl" || fixture_die "cannot make the offline curl shim executable"
+_out=$( cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_OFFLINE=1 ./grubstake.sh path swiftlint 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "GRUBSTAKE_OFFLINE=1 exited 0 without the tool ever being installed: $_out"
+else
+    case "$_out" in
+        *"must not run"*) fail "curl ran despite GRUBSTAKE_OFFLINE=1: $_out" ;;
+        *"not installed"*"grubstake ensure"*) pass ;;
+        *) fail "refused without the documented message: $_out" ;;
+    esac
+fi
+
+it "path installs a missing pinned tool by default, GRUBSTAKE_OFFLINE unset"
+r=$(new_repo)
+_sha=$(fake_release "$r" 0.63.2)
+pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+_out=$( cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftlint 2>&1 ); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "path did not install a missing pinned tool by default (rc $_rc): $_out"
+elif [ ! -x "$r/.cache/swiftlint/$_sha/swiftlint" ]; then
+    fail "path exited 0 but nothing was installed: $_out"
+else
+    pass
+fi
+
 it "path fails for a tool with no artifact on this platform"
 # It used to print a cache path that did not exist and exit 0, which after a cutover hands CI
 # a path to nothing instead of an error.
@@ -4469,11 +4500,13 @@ new_hook_repo() {
 # not of this function, so a cache set only in this shell would leave the hook resolving against
 # the developer's real cache: the tests would still go green, for a reason the fixture never
 # controlled. GIT_ALLOW_PROTOCOL keeps post-commit's backgrounded refresh off the network, since
-# git then refuses the transport outright instead of dialling out.
+# git then refuses the transport outright instead of dialling out. $2, optional: a directory to put
+# ahead of PATH, for a fixture that needs the hook to see a shim rather than the real tool.
 hook_commit() {
     _hcr="$1"
+    _hcp="${2:-}"
     ( cd "$_hcr" \
-      && GRUBSTAKE_CACHE="$_hcr/.cache" GIT_ALLOW_PROTOCOL=file \
+      && PATH="${_hcp:+$_hcp:}$PATH" GRUBSTAKE_CACHE="$_hcr/.cache" GIT_ALLOW_PROTOCOL=file \
          git commit -q -m change 2>&1 )
 }
 
@@ -4909,6 +4942,41 @@ _out=$(hook_commit "$r"); _rc=$?
 if [ "$_rc" -ne 0 ]; then fail "a cold cache blocked a non-Swift commit (rc $_rc): $_out"
 elif [ "$(commits "$r")" != 2 ]; then fail "exited 0 without committing"
 else pass; fi
+
+it "a cache entry that vanishes between the hook's check and its path call still refuses offline"
+# check is existence-only, so it cannot see a binary that a concurrent clean removes right after it
+# passes; only GRUBSTAKE_OFFLINE on the later path call stands between that gap and the commit path
+# downloading. Landing the clean inside that window is not reproducible on demand, so this fixture
+# makes check answer "passed" unconditionally instead, and never installs the binary at all -- the
+# one difference such a race would have left behind -- then drives a real commit through the real
+# hook to prove the guard, not a stand-in for it.
+r=$(new_hook_repo); pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+mv "$r/grubstake.sh" "$r/grubstake-real.sh" || fixture_die "cannot move grubstake.sh aside in $r"
+cat > "$r/grubstake.sh" <<WRAP || fixture_die "cannot write the check-always-passes wrapper in $r"
+#!/bin/sh
+case "\$1" in
+    check) exit 0 ;;
+    *) exec "$r/grubstake-real.sh" "\$@" ;;
+esac
+WRAP
+chmod +x "$r/grubstake.sh" || fixture_die "cannot make the wrapper executable in $r"
+_marker="$r/CURL-RAN"
+_shim="$r/curl-shim"
+mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+printf '#!/bin/sh\n: > "%s"\nexit 1\n' "$_marker" > "$_shim/curl" || fixture_die "cannot write the curl marker shim"
+chmod +x "$_shim/curl" || fixture_die "cannot make the curl marker shim executable"
+stage "$r" A.swift "struct A {}"
+_out=$(hook_commit "$r" "$_shim"); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "the commit went through though the pinned binary was never installed: $_out"
+elif [ -f "$_marker" ]; then
+    fail "curl ran on the commit path racing a stale check: $_out"
+else
+    case "$_out" in
+        *"not installed"*"grubstake ensure"*) pass ;;
+        *) fail "refused without the documented offline message: $_out" ;;
+    esac
+fi
 
 it "a failing pre-commit.d gate blocks the commit"
 r=$(new_hook_repo); gate "$r" 10-gate 1

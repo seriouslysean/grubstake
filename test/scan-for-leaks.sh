@@ -45,13 +45,21 @@ RE_ANY="$RE_HOME|$RE_EMAIL|$RE_ISSUE|$RE_TRAILER|$RE_LINK"
 
 report() { FOUND=1; printf '  %s\n' "$1"; }
 
+# An unreported git failure and a real all-clear look identical at the caller, so this exits 2 here.
+git_op_failed() { printf '  %s: %s failed (exit %s)\n\nrefusing: git failed mid-scan, so the scan did not complete.\n' "$1" "$2" "$3" >&2; exit 2; }
+
 scan() {
     _what="$1"; _re="$2"
-    # Exclude this file and the suite: they contain the patterns by definition.
-    _hits="$(git grep -nE "$_re" -- . ':!test/scan-for-leaks.sh' ':!test/run.sh' 2>/dev/null)"
+    # --cached scans the index (what a commit publishes), excluding this file and the suite, which contain the patterns by definition.
+    _hits="$(git grep --cached -nE "$_re" -- . ':!test/scan-for-leaks.sh' ':!test/run.sh' 2>/dev/null)"; _rc=$?
+    # git grep: 0 is a match, 1 is no match, anything else is an operational failure, not a clean scan.
+    [ "$_rc" -gt 1 ] && git_op_failed "$_what" "git grep" "$_rc"
     [ -n "$_hits" ] && printf '%s\n' "$_hits" | while IFS= read -r _l; do printf '  %s: %s\n' "$_what" "$_l"; done
     # A leak can live entirely in a tracked filename with clean content, invisible to git grep above.
-    _names="$(git ls-files -- . ':!test/scan-for-leaks.sh' ':!test/run.sh' | grep -E "$_re" 2>/dev/null)"
+    _names="$(git ls-files -- . ':!test/scan-for-leaks.sh' ':!test/run.sh' 2>/dev/null)"; _rc=$?
+    # git ls-files has no "no match" case, so any nonzero exit here is an operational failure too.
+    [ "$_rc" -ne 0 ] && git_op_failed "$_what" "git ls-files" "$_rc"
+    _names="$(printf '%s\n' "$_names" | grep -E "$_re")"
     [ -n "$_names" ] && printf '%s\n' "$_names" | while IFS= read -r _n; do printf '  %s (filename): %s\n' "$_what" "$_n"; done
     [ -z "$_hits" ] && [ -z "$_names" ]
 }
@@ -84,7 +92,9 @@ scan "agent-session link" "$RE_LINK" || FOUND=1
 
 if [ "${1:-}" = "--all" ]; then
     printf 'scanning commit messages\n'
-    _hits="$(git log --all --format='%H %s%n%b' | grep -nE "$RE_ANY")"
+    _log="$(git log --all --format='%H %s%n%b')"; _rc=$?
+    [ "$_rc" -ne 0 ] && git_op_failed "commit history" "git log" "$_rc"
+    _hits="$(printf '%s\n' "$_log" | grep -nE "$RE_ANY")"
     [ -n "$_hits" ] && { printf '%s\n' "$_hits" | head -20; FOUND=1; }
 fi
 

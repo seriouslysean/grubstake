@@ -5741,6 +5741,81 @@ case "$_out" in
     *)                 fail "a scanner off its exclusion pathspec did not report the leak planted in it: $_out" ;;
 esac
 
+it "scan-for-leaks scans the index, not the working tree, so a staged leak survives a clean-looking worktree"
+# git grep with no --cached reads the working tree; a commit publishes the index, not the worktree,
+# so a leak staged and then scrubbed on disk without re-adding must still be caught.
+r=$(leaks_repo)
+printf 'contact admin@example.com\n' > "$r/notes.md" || fixture_die "cannot write the staged-leak fixture in $r"
+( cd "$r" && git add notes.md ) || fixture_die "cannot stage the leak fixture in $r"
+printf 'nothing to see here\n' > "$r/notes.md" || fixture_die "cannot scrub the working copy in $r"
+_out=$( cd "$r" && ./test/scan-for-leaks.sh 2>&1 )
+case "$_out" in
+    *"email address"*"notes.md"*) pass ;;
+    *) fail "a leak staged for commit but scrubbed from the working tree was not named: $_out" ;;
+esac
+
+it "scan-for-leaks does not read git's stderr as a hit when git succeeds"
+# git can warn on stderr and still exit 0, and a warning carrying a path matches the home-path
+# pattern, so merging stderr into the variable the verdict is read from would invent a leak.
+_gs="$ROOT/git-warns.$$.$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
+mkdir -p "$_gs/bin" "$_gs/repo/test" || fixture_die "cannot create $_gs"
+cat > "$_gs/bin/git" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    grep)     exit 1 ;;
+    ls-files) printf 'warning: broken ref under /home/nobody/x\n' >&2; exit 0 ;;
+esac
+exit 1
+SHIM
+chmod +x "$_gs/bin/git" || fixture_die "cannot make the git shim executable in $_gs"
+cp "$REPO/test/scan-for-leaks.sh" "$_gs/repo/test/scan-for-leaks.sh" || fixture_die "cannot copy scan-for-leaks.sh into $_gs"
+chmod +x "$_gs/repo/test/scan-for-leaks.sh" || fixture_die "cannot make scan-for-leaks.sh executable in $_gs"
+_out=$( cd "$_gs/repo" && PATH="$_gs/bin:$PATH" ./test/scan-for-leaks.sh 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then pass; else fail "git's stderr on a successful call was read as a leak (rc $_rc): $_out"; fi
+
+it "scan-for-leaks exits 2, never clean, when git ls-files fails after grep finds nothing"
+# grep finding nothing must not mask a later operational failure from git ls-files.
+_lf="$ROOT/git-lsfiles-fails.$$.$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
+mkdir -p "$_lf/bin" "$_lf/repo/test" || fixture_die "cannot create $_lf"
+cat > "$_lf/bin/git" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    grep)     exit 1 ;;
+    ls-files) exit 2 ;;
+esac
+exit 1
+SHIM
+chmod +x "$_lf/bin/git" || fixture_die "cannot make the git shim executable in $_lf"
+cp "$REPO/test/scan-for-leaks.sh" "$_lf/repo/test/scan-for-leaks.sh" || fixture_die "cannot copy scan-for-leaks.sh into $_lf"
+chmod +x "$_lf/repo/test/scan-for-leaks.sh" || fixture_die "cannot make scan-for-leaks.sh executable in $_lf"
+_out=$( cd "$_lf/repo" && PATH="$_lf/bin:$PATH" ./test/scan-for-leaks.sh 2>&1 ); _rc=$?
+case "$_out" in
+    *clean*) fail "an operational git ls-files failure was reported as clean" ;;
+    *) [ "$_rc" -eq 2 ] && pass || fail "git ls-files failed operationally but the scanner did not exit 2 (rc $_rc): $_out" ;;
+esac
+
+it "scan-for-leaks --all exits 2, never clean, when git log fails"
+# git log piped straight into grep let a failing log read as grep finding no hits.
+_lg="$ROOT/git-log-fails.$$.$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
+mkdir -p "$_lg/bin" "$_lg/repo/test" || fixture_die "cannot create $_lg"
+cat > "$_lg/bin/git" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    grep)     exit 1 ;;
+    ls-files) exit 0 ;;
+    log)      exit 2 ;;
+esac
+exit 1
+SHIM
+chmod +x "$_lg/bin/git" || fixture_die "cannot make the git shim executable in $_lg"
+cp "$REPO/test/scan-for-leaks.sh" "$_lg/repo/test/scan-for-leaks.sh" || fixture_die "cannot copy scan-for-leaks.sh into $_lg"
+chmod +x "$_lg/repo/test/scan-for-leaks.sh" || fixture_die "cannot make scan-for-leaks.sh executable in $_lg"
+_out=$( cd "$_lg/repo" && PATH="$_lg/bin:$PATH" ./test/scan-for-leaks.sh --all 2>&1 ); _rc=$?
+case "$_out" in
+    *clean*) fail "a git log failure under --all was reported as clean" ;;
+    *) [ "$_rc" -eq 2 ] && pass || fail "git log failed but --all did not exit 2 (rc $_rc): $_out" ;;
+esac
+
 it "scan-for-leaks refuses an agent-session trailer typed into a commit message"
 # The tracked-file tier reads committed content, so a leak typed into a message is invisible to it.
 _m="$ROOT/msg-trailer"

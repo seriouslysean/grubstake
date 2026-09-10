@@ -71,17 +71,29 @@ platform() {
 
 cache_root() {
     if [ -n "${GRUBSTAKE_CACHE:-}" ]; then
-        echo "$GRUBSTAKE_CACHE"
-        return 0
-    fi
-    # Checked, not tested directly: a die inside $( ) only kills that subshell, so comparing its
-    # empty result against "darwin" would read as false and fall through to a Linux-shaped path.
-    _cr_plat="$(platform)" || return 1
-    if [ "$_cr_plat" = darwin ]; then
-        echo "$HOME/Library/Caches/grubstake"
+        _cr_var=GRUBSTAKE_CACHE
+        _cr_root="$GRUBSTAKE_CACHE"
     else
-        echo "${XDG_CACHE_HOME:-$HOME/.cache}/grubstake"
+        # Checked, not tested directly: a die inside $( ) only kills that subshell, so comparing its
+        # empty result against "darwin" would read as false and fall through to a Linux-shaped path.
+        _cr_plat="$(platform)" || return 1
+        if [ "$_cr_plat" = darwin ]; then
+            _cr_var=HOME
+            _cr_root="$HOME/Library/Caches/grubstake"
+        elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+            _cr_var=XDG_CACHE_HOME
+            _cr_root="$XDG_CACHE_HOME/grubstake"
+        else
+            _cr_var=HOME
+            _cr_root="$HOME/.cache/grubstake"
+        fi
     fi
+    # Shared by every command, not just clean: STABILITY.md promises an absolute path, so whichever variable produced a relative one -- override or environment -- is refused here, not per caller.
+    case "$_cr_root" in
+        /*) : ;;
+        *)  warn "$_cr_var must be an absolute path, got: $_cr_root"; return 1 ;;
+    esac
+    echo "$_cr_root"
 }
 
 sha256_file() {
@@ -639,7 +651,9 @@ verify_tool() {
     # An unknown tool name must fail here too, not read as an empty, not-published URL and pass.
     _url="$(tool_url "$_tool" "$2" "$_plat")" || return 1
     [ -n "$_url" ] || return 0
-    [ -x "$(tool_bin "$_tool" "$_sha")" ] && return 0
+    # Assigned first, not nested: a failed tool_bin (cache_root's own refusal) must stand alone, not read as -x "" and be relabeled "not installed" below.
+    _bin="$(tool_bin "$_tool" "$_sha")" || return 1
+    [ -x "$_bin" ] && return 0
     # Warned, not died: cmd_check's own loop is where every missing tool gets named, not just the first.
     warn "$_tool $2: not installed (run: grubstake ensure)"
     return 1
@@ -1081,10 +1095,11 @@ cmd_doctor() {
     fi
     printf 'platform   %s\n' "$_plat"
     # Same shape as the platform field above: cache_root can fail on its own (GRUBSTAKE_CACHE unset,
-    # platform unsupported) even when $_plat_ok already covered the platform line's own failure.
-    # 2>/dev/null: cache_root's own nested platform() call still writes its die to stderr directly,
-    # unredirected by cache_root's own capture, so it must be silenced here or it leaks past this report.
-    if _cache="$(cache_root 2>/dev/null)"; then
+    # platform unsupported, or a relative override) even when $_plat_ok already covered the platform
+    # line's own failure. 2>&1, not 2>/dev/null: the refusal reason is the only way this line can say
+    # more than "unresolved" without a stale label naming just one of several now-possible causes.
+    if _cache="$(cache_root 2>&1)"; then
+        _cache_ok=1
         printf 'cache      %s\n' "$_cache"
         # Skipped when the cache dir does not exist yet: nothing has run against this root, so there is
         # nothing to report -- install_tool's own backfill is what first writes the sentinel (#95).
@@ -1107,7 +1122,9 @@ cmd_doctor() {
             fi
         fi
     else
-        printf 'cache      unresolved (platform unsupported)\n'
+        _cache_ok=0
+        _cache="${_cache#\[grubstake\] }"
+        printf 'cache      unresolved (%s)\n' "$_cache"
     fi
     _hookspath="$(git -C "$_root" config core.hooksPath || true)"
     printf 'hooksPath  %s\n' "${_hookspath:-(unset)}"
@@ -1154,6 +1171,10 @@ cmd_doctor() {
         fi
         if [ -z "$_url" ]; then
             printf '  %-12s %-10s n/a on %s\n' "$_tool" "$_ver" "$_plat"
+        elif [ "$_cache_ok" = 0 ]; then
+            # Reuses $_cache_ok from the header instead of tool_bin's own cache_root call, which
+            # would otherwise repeat cache_root's refusal warning once per pinned tool.
+            printf '  %-12s %-10s could not resolve\n' "$_tool" "$_ver"
         elif [ -x "$(tool_bin "$_tool" "$(pin_sha "$_tool" "$_plat")")" ]; then
             printf '  %-12s %-10s installed\n' "$_tool" "$_ver"
         else
@@ -1219,14 +1240,12 @@ clean_trash_teardown() {
 }
 
 # No validate_pins: a malformed grubstake.tools must not block the one command that recovers from
-# a wedged cache. cache_root can now fail outright (unsupported platform, no GRUBSTAKE_CACHE override);
-# a degenerate or relative path is the only case left for the checks below to refuse.
+# a wedged cache. cache_root can now fail outright (unsupported platform, no GRUBSTAKE_CACHE override,
+# or a relative one); a degenerate path is the only case left for the check below to refuse.
 cmd_clean() {
-    _root="$(cache_root)" || die "cannot determine the cache root: platform unsupported"
+    _root="$(cache_root)" || die "cannot determine the cache root"
     case "$_root" in
         /|//|/.|/..) die "refusing to remove cache root: '$_root'" ;;
-        /*)          : ;;
-        *)           die "refusing to remove cache root, not an absolute path: '$_root'" ;;
     esac
     # rm -rf on a symlink unlinks the link and leaves its target untouched while still reporting success.
     [ -L "$_root" ] && die "refusing to remove cache root, it is a symlink: '$_root' -> '$(readlink "$_root")'"

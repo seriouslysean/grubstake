@@ -605,6 +605,37 @@ else
     pass
 fi
 
+it "path refuses a relative GRUBSTAKE_CACHE instead of printing a relative path"
+# F17: only cmd_clean checked for a relative override, so every other command built and printed a relative path underneath it, breaking the absolute-path contract STABILITY.md documents for `path`.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+mkdir -p "$r/cache/swiftlint/$SHA_A" || fixture_die "cannot create the relative-cache fixture dir"
+printf '#!/bin/sh\necho 0.63.2\n' > "$r/cache/swiftlint/$SHA_A/swiftlint"
+chmod +x "$r/cache/swiftlint/$SHA_A/swiftlint" || fixture_die "cannot make the fixture binary executable"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="cache" ./grubstake.sh path swiftlint 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "path exited 0 for a relative GRUBSTAKE_CACHE, printing: $_out"
+elif ! printf '%s' "$_out" | grep -q "GRUBSTAKE_CACHE"; then
+    fail "refused, but without naming GRUBSTAKE_CACHE: $_out"
+else
+    pass
+fi
+
+it "check reports cache_root's own refusal once, not a second, misleading not-installed line"
+# F17: verify_tool's "[ -x \"\$(tool_bin ...)\" ]" read a failed tool_bin as -x "", so cache_root's own refusal was followed by a second, misleading "not installed (run: grubstake ensure)" as if the tool had simply never been fetched.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="cache" ./grubstake.sh check 2>&1 ); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "check exited 0 for a relative GRUBSTAKE_CACHE: $_out"
+elif ! printf '%s' "$_out" | grep -q "GRUBSTAKE_CACHE"; then
+    fail "refused, but without naming GRUBSTAKE_CACHE: $_out"
+elif printf '%s' "$_out" | grep -q "not installed"; then
+    fail "cache_root's own refusal was followed by a misleading not-installed line: $_out"
+else
+    pass
+fi
+
 it "doctor on an unsupported arch stays advisory, without a stray guard message leaking past its report"
 # #70's remaining survey item at cmd_doctor covers two nestings. The header's own capture
 # ("_plat=\"\$(platform 2>&1)\"") redirects platform()'s stderr into the captured value, so a failure
@@ -664,6 +695,24 @@ if [ "$_rc" -eq 0 ]; then
     fail "clean exited 0 on an unsupported arch instead of refusing: $_out"
 elif ! printf '%s' "$_out" | grep -q "cannot determine the cache root"; then
     fail "refused, but not with cmd_clean's own cache-root message: $_out"
+else
+    pass
+fi
+
+it "path and clean refuse a relative HOME the same way they refuse a relative GRUBSTAKE_CACHE"
+# F17: cache_root validated only a set GRUBSTAKE_CACHE; a relative HOME (the darwin branch's own source) reached a relative root too, and clean's own guard on the final root had been removed.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_pout=$( cd "$r" && env -u GRUBSTAKE_CACHE -u XDG_CACHE_HOME HOME="fake-home" ./grubstake.sh path swiftlint 2>&1 ); _prc=$?
+_cout=$( cd "$r" && env -u GRUBSTAKE_CACHE -u XDG_CACHE_HOME HOME="fake-home" ./grubstake.sh clean 2>&1 ); _crc=$?
+if [ "$_prc" -eq 0 ]; then
+    fail "path exited 0 for a relative HOME, printing: $_pout"
+elif [ "$_crc" -eq 0 ]; then
+    fail "clean exited 0 for a relative HOME: $_cout"
+elif ! printf '%s' "$_pout" | grep -q "HOME"; then
+    fail "path refused, but without naming HOME: $_pout"
+elif ! printf '%s' "$_cout" | grep -q "HOME"; then
+    fail "clean refused, but without naming HOME: $_cout"
 else
     pass
 fi
@@ -1729,6 +1778,24 @@ fi
 rm -f "$r/.cache" 2>/dev/null
 rm -rf "$_real" 2>/dev/null
 mkdir -p "$r/.cache" 2>/dev/null
+
+it "doctor names GRUBSTAKE_CACHE exactly once for a relative override, not once per pinned tool"
+# cache_root's relative-path refusal is shared by every caller, including tool_bin inside doctor's
+# own per-tool loop, so an unresolved root named there too -- once per pinned tool -- repeats the
+# same warning doctor's own header already printed instead of doctor resolving it once, up front.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A
+swiftformat 0.55.0 $SHA_B $SHA_B"
+_out=$( cd "$r" && GRUBSTAKE_CACHE="cache" ./grubstake.sh doctor 2>&1 )
+_named=$(printf '%s\n' "$_out" | grep -c "GRUBSTAKE_CACHE")
+_unresolved=$(printf '%s\n' "$_out" | grep -c "could not resolve")
+if [ "$_named" -ne 1 ]; then
+    fail "expected GRUBSTAKE_CACHE named exactly once, got $_named: $_out"
+elif [ "$_unresolved" -ne 2 ]; then
+    fail "expected both pinned tools to report could not resolve, got $_unresolved: $_out"
+else
+    pass
+fi
 
 it "an interrupted clean does not strand a full copy of the cache beside the root"
 # mv detaches the root, chmod clears read-only, then rm -rf removes the trash. A signal landing

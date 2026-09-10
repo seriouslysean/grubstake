@@ -1397,11 +1397,16 @@ cmd_install() {
     log "installed. Review and commit: grubstake.sh grubstake.tools .githooks/"
 }
 
+# $1 < $2, dotted x.y.z only -- the shape both call sites already validate before this runs.
+version_lt() {
+    [ "$1" = "$2" ] && return 1
+    [ "$(printf '%s\n%s\n' "$1" "$2" \
+        | LC_ALL=C sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$1" ]
+}
+
 # Every release below the floor has a known blocking defect, so it is not offered or installable.
 below_floor() {
-    [ "$(printf '%s\n%s\n' "$1" "$GRUBSTAKE_MIN_VERSION" \
-        | LC_ALL=C sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$1" ] \
-        && [ "$1" != "$GRUBSTAKE_MIN_VERSION" ]
+    version_lt "$1" "$GRUBSTAKE_MIN_VERSION"
 }
 
 # Release tags, newest first. No mutable "latest" pointer.
@@ -1450,6 +1455,12 @@ cmd_update() {
         _target=""
         for _c in $_candidates; do
             [ "$_c" = "$GRUBSTAKE_VERSION" ] && { log "already on $GRUBSTAKE_VERSION"; return 0; }
+            # release_tags sorts newest first, so the first candidate that is not newer means none after it are either.
+            version_lt "$GRUBSTAKE_VERSION" "$_c" || { log "no usable release newer than $GRUBSTAKE_VERSION"; return 0; }
+            if below_floor "$_c"; then
+                warn "v$_c is below the supported floor $GRUBSTAKE_MIN_VERSION, skipping"
+                continue
+            fi
             log "fetching $_c"
             if fetch_release "$_c" "$_tmp"; then _target="$_c"; break; fi
             warn "v$_c is not a usable release, skipping"

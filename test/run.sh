@@ -3468,17 +3468,12 @@ top=$(printf '0.2.0\n0.10.0\n0.9.9\n' | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3n
 # before either site's sort ever sees these values.
 git_tags_shim() {
     mkdir -p "$1" || fixture_die "cannot create the git shim dir"
-    cat > "$1/git" <<'SHIM'
+    # $2 advertises that one release instead of the fixed set below, for a fixture needing a single tag.
+    _refs="${2:+aaa $2}"; _refs="${_refs:-aaa 0.2.0 bbb 0.10.0 ccc 0.9.9 ddd 1.2.3-beta eee 1.2 fff v1.2.3 ggg abc}"
+    cat > "$1/git" <<SHIM
 #!/bin/sh
-if [ "$1" = "ls-remote" ]; then
-    printf '%s\trefs/tags/v%s\n' \
-        aaa 0.2.0 \
-        bbb 0.10.0 \
-        ccc 0.9.9 \
-        ddd 1.2.3-beta \
-        eee 1.2 \
-        fff v1.2.3 \
-        ggg abc
+if [ "\$1" = "ls-remote" ]; then
+    printf '%s\trefs/tags/v%s\n' $_refs
     exit 0
 fi
 exit 1
@@ -3554,6 +3549,7 @@ fi
 # for commits: a globally configured signing key would block the tag too, and a fixture that cannot
 # be built is not a test result.
 new_update_fixture() {
+    _ver="${1:-9.9.9}"
     _uf="$(mktemp -d "$ROOT/update-fixture.XXXXXX")" || fixture_die "cannot create an update fixture dir"
     git init -q --bare "$_uf/repo.git" || fixture_die "cannot init the fixture release repo"
     _uw="$(mktemp -d "$ROOT/update-fixture-work.XXXXXX")" || fixture_die "cannot create a work dir for the fixture release"
@@ -3566,16 +3562,57 @@ new_update_fixture() {
       && printf 'fixture release\n' > README.md \
       && git add README.md \
       && git commit -q -m release \
-      && git tag -a v9.9.9 -m "fixture release 9.9.9" \
+      && git tag -a "v$_ver" -m "fixture release $_ver" \
       && git push -q "$_uf/repo.git" HEAD:refs/heads/main --tags ) \
         || fixture_die "cannot seed the fixture release repo in $_uf"
-    mkdir -p "$_uf/raw/v9.9.9" || fixture_die "cannot create the fixture raw tree in $_uf"
-    # Ends in main "$@" and marks its own execution unconditionally, on any argument including
-    # "ensure", so the test can tell replaced-but-not-run apart from replaced-and-run.
-    printf '#!/bin/sh\nGRUBSTAKE_VERSION="9.9.9"\nmain() {\n[ -n "${GST_TEST_MARKER:-}" ] && touch "$GST_TEST_MARKER"\n}\nmain "$@"\n' \
-        > "$_uf/raw/v9.9.9/grubstake.sh" || fixture_die "cannot write the fixture release script"
+    mkdir -p "$_uf/raw/v$_ver" || fixture_die "cannot create the fixture raw tree in $_uf"
+    # Marks its own execution on any argument, so the test can tell replaced-but-not-run apart from replaced-and-run.
+    printf '#!/bin/sh\nGRUBSTAKE_VERSION="%s"\nmain() {\n[ -n "${GST_TEST_MARKER:-}" ] && touch "$GST_TEST_MARKER"\n}\nmain "$@"\n' "$_ver" \
+        > "$_uf/raw/v$_ver/grubstake.sh" || fixture_die "cannot write the fixture release script"
     echo "$_uf"
 }
+
+it "bare update refuses when the only advertised release is below the supported floor"
+# cmd_update's loop never called below_floor, so a below-floor-only remote was adopted silently by plain update.
+r=$(new_repo)
+sed -i.bak 's/^GRUBSTAKE_VERSION=.*/GRUBSTAKE_VERSION="0.1.0"/' "$r/grubstake.sh" && rm -f "$r/grubstake.sh.bak"
+_before="$(cat "$r/grubstake.sh")"
+_shim="$(mktemp -d "$ROOT/floor-shim.XXXXXX")" || fixture_die "cannot create the floor-only git shim dir"
+git_tags_shim "$_shim" 0.2.0
+f=$(new_update_fixture 0.2.0)
+_out=$( cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$f/raw" ./grubstake.sh update 2>&1 ); _rc=$?
+_after="$(cat "$r/grubstake.sh")"
+if [ "$_rc" -eq 0 ]; then
+    fail "bare update exited 0 with only a below-floor release available: $_out"
+elif [ "$_after" != "$_before" ]; then
+    fail "the running script was replaced with a release below the supported floor"
+else
+    case "$_out" in
+        *"below the supported floor"*) pass ;;
+        *) fail "refused, but without naming the floor: $_out" ;;
+    esac
+fi
+
+it "bare update refuses a release older than the one already installed"
+# cmd_update's loop fetched the first candidate without checking it was newer, so a downgrade was adopted by plain update.
+r=$(new_repo)
+sed -i.bak 's/^GRUBSTAKE_VERSION=.*/GRUBSTAKE_VERSION="1.0.0"/' "$r/grubstake.sh" && rm -f "$r/grubstake.sh.bak"
+_before="$(cat "$r/grubstake.sh")"
+_shim="$(mktemp -d "$ROOT/downgrade-shim.XXXXXX")" || fixture_die "cannot create the downgrade-only git shim dir"
+git_tags_shim "$_shim" 0.5.0
+f=$(new_update_fixture 0.5.0)
+_out=$( cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$f/raw" ./grubstake.sh update 2>&1 ); _rc=$?
+_after="$(cat "$r/grubstake.sh")"
+if [ "$_rc" -ne 0 ]; then
+    fail "bare update exited non-zero refusing a downgrade, expected a quiet no-op: $_out"
+elif [ "$_after" != "$_before" ]; then
+    fail "the running script was replaced with an older release: $_out"
+else
+    case "$_out" in
+        *"no usable release newer than"*) pass ;;
+        *) fail "did not say why it stopped: $_out" ;;
+    esac
+fi
 
 it "update replaces the script and stops, without running the fetched code"
 # GRUBSTAKE_REPO and GRUBSTAKE_RAW are env-overridable so update can be pointed at a local

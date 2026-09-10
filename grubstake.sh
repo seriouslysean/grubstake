@@ -429,7 +429,7 @@ publish_dir() {
             chmod -R a-w "$2" 2>/dev/null || true
         fi
     else
-        mv "$1" "$2"
+        mv "$1" "$2" || { warn "$3: cannot publish into $2"; return 1; }
         chmod -R a-w "$2" 2>/dev/null || true
     fi
 }
@@ -539,10 +539,10 @@ install_tool() {
   got      $_got"
 
     _extract="$_tmp/x"
-    mkdir -p "$_extract"
+    mkdir -p "$_extract" || die "$_tool $_ver: could not create extraction directory"
     case "$_url" in
-        *.tar.xz) tar -xJf "$_archive" -C "$_extract" ;;
-        *)        unzip -oq "$_archive" -d "$_extract" ;;
+        *.tar.xz) tar -xJf "$_archive" -C "$_extract" || die "$_tool $_ver: extraction failed" ;;
+        *)        unzip -oq "$_archive" -d "$_extract" || die "$_tool $_ver: extraction failed" ;;
     esac
 
     _member="$(tool_member "$_tool" "$_plat")"
@@ -556,10 +556,12 @@ install_tool() {
     # shellcheck disable=SC2064
     trap "rm -rf $(sq "$_tmp") $(sq "$_staging")" EXIT HUP INT TERM
     rm -rf "$_staging"
+    # A stale staging surviving rm -rf (e.g. mode 000) would have cp -R merge into it rather than start clean.
+    [ ! -e "$_staging" ] || die "$_tool $_ver: cannot clear stale $_staging"
     mkdir -p "$_staging"
-    cp -R "$(dirname "$_found")"/. "$_staging"/
-    [ "$_member" = "$_tool" ] || mv "$_staging/$_member" "$_staging/$_tool"
-    chmod +x "$_staging/$_tool"
+    cp -R "$(dirname "$_found")"/. "$_staging"/ || die "$_tool $_ver: could not stage extracted files"
+    [ "$_member" = "$_tool" ] || mv "$_staging/$_member" "$_staging/$_tool" || die "$_tool $_ver: could not stage $_member as $_tool"
+    chmod +x "$_staging/$_tool" || die "$_tool $_ver: could not mark staged binary executable"
 
     # Asserted once, here, on bytes that have already matched the pin. No later run re-checks it.
     _reported="$(reported_version "$_staging/$_tool" "$_tool" || echo '')"
@@ -570,7 +572,8 @@ install_tool() {
     # tmp+mv needed here: staging rides one atomic rename into place, so this is never seen half-written.
     _bsha="$(hashed_or_empty "$_staging/$_tool")"
     if [ -n "$_bsha" ]; then
-        printf 'receipt 1\nbinary-sha256 %s\nversion %s\n' "$_bsha" "$_ver" > "$(receipt_file "$_staging")"
+        printf 'receipt 1\nbinary-sha256 %s\nversion %s\n' "$_bsha" "$_ver" > "$(receipt_file "$_staging")" \
+            || die "$_tool $_ver: cannot write the receipt"
     else
         # A hash that failed or came back empty must never be written: publishing receiptless is a
         # fully supported state -- the same one every legacy entry is in -- and self-heals next ensure.

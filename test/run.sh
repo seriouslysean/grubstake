@@ -1201,6 +1201,101 @@ else
     esac
 fi
 
+# Shared by the three staging-failure tests below: a fresh repo pinned to a fake swiftlint release,
+# with $r, $_sha and $_dest (its would-be cache destination) set for the caller.
+staging_failure_fixture() {
+    r=$(new_repo)
+    _sha=$(fake_release "$r" 0.63.2)
+    pins "$r" "swiftlint 0.63.2 $_sha $_sha"
+    _dest="$r/.cache/swiftlint/$_sha"
+}
+
+it "an mv failure while publishing into an absent destination does not leave staging behind"
+# publish_dir's else branch (destination absent) ran its mv unchecked, so a failed rename still let
+# the run report success while nothing was actually published; gated on the destination argument so
+# only the publish rename fails, not any other mv install_tool might run first.
+staging_failure_fixture
+_mvshim="$r/mv-shim"; mkdir -p "$_mvshim" || fixture_die "cannot create $_mvshim"
+_realmv="$(command -v mv)" || fixture_die "no real mv on PATH to wrap"
+cat > "$_mvshim/mv" <<SHIM
+#!/bin/sh
+if [ "\$#" -eq 2 ] && [ "\$2" = "$_dest" ]; then
+    exit 1
+fi
+exec "$_realmv" "\$@"
+SHIM
+chmod +x "$_mvshim/mv" || fixture_die "cannot make the mv shim executable"
+_out=$( cd "$r" && PATH="$_mvshim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+n=$(find "$r/.cache" -name '*.staging.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite the publish rename failing: $_out"
+elif [ -x "$_dest/swiftlint" ]; then
+    fail "a partial entry was published even though the publish rename failed: $_out"
+elif [ "$n" != "0" ]; then
+    fail "$n staging directories left behind after the publish rename failed: $_out"
+elif printf '%s' "$_out" | grep -q ": installed"; then
+    fail "an installed line was printed despite the publish rename failing: $_out"
+elif ! printf '%s' "$_out" | grep -q "cannot publish into"; then
+    fail "refused, but not with publish_dir's own message: $_out"
+else
+    pass
+fi
+
+it "a cp failure while staging the extracted files does not publish a partial entry"
+# cp -R into staging was unchecked, letting a copy that lands the executable but fails on a sibling
+# still publish; gated on the literal -R flag so the fixture curl shim's own flagless cp still works.
+staging_failure_fixture
+_cpshim="$r/cp-shim"; mkdir -p "$_cpshim" || fixture_die "cannot create $_cpshim"
+_realcp="$(command -v cp)" || fixture_die "no real cp on PATH to wrap"
+cat > "$_cpshim/cp" <<SHIM
+#!/bin/sh
+if [ "\$1" = -R ]; then
+    "$_realcp" "\$@"
+    exit 1
+fi
+exec "$_realcp" "\$@"
+SHIM
+chmod +x "$_cpshim/cp" || fixture_die "cannot make the cp shim executable"
+_out=$( cd "$r" && PATH="$_cpshim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+n=$(find "$r/.cache" -name '*.staging.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite the copy into staging failing: $_out"
+elif [ -x "$_dest/swiftlint" ]; then
+    fail "a partial entry was published even though the copy into staging failed: $_out"
+elif [ "$n" != "0" ]; then
+    fail "$n staging directories left behind after the copy failure: $_out"
+elif ! printf '%s' "$_out" | grep -q "could not stage extracted files"; then
+    fail "refused, but not with install_tool's own staging-copy message: $_out"
+else
+    pass
+fi
+
+it "an unzip failure after partial extraction does not publish a partial entry"
+# unzip -oq was unchecked; an extractor that exits nonzero after writing some members still let
+# install_tool proceed to stage and publish whatever had already landed on disk.
+staging_failure_fixture
+_unzipshim="$r/unzip-shim"; mkdir -p "$_unzipshim" || fixture_die "cannot create $_unzipshim"
+_realunzip="$(command -v unzip)" || fixture_die "no real unzip on PATH to wrap"
+cat > "$_unzipshim/unzip" <<SHIM
+#!/bin/sh
+"$_realunzip" "\$@"
+exit 1
+SHIM
+chmod +x "$_unzipshim/unzip" || fixture_die "cannot make the unzip shim executable"
+_out=$( cd "$r" && PATH="$_unzipshim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1 ); _rc=$?
+n=$(find "$r/.cache" -name '*.staging.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 despite extraction failing: $_out"
+elif [ -x "$_dest/swiftlint" ]; then
+    fail "a partial entry was published even though extraction failed: $_out"
+elif [ "$n" != "0" ]; then
+    fail "$n staging directories left behind after the extraction failure: $_out"
+elif ! printf '%s' "$_out" | grep -q "extraction failed"; then
+    fail "refused, but not with install_tool's own extraction message: $_out"
+else
+    pass
+fi
+
 it "clean refuses a symlinked cache root rather than lying about removal"
 # rm -rf on a symlink unlinks the link itself and leaves whatever it points at completely untouched,
 # while still reporting success -- so a `clean` built on a bare `rm -rf "$GRUBSTAKE_CACHE"` would

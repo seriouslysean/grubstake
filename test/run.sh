@@ -3230,6 +3230,8 @@ it "the previous release can update to this one"
 # Resolved from the remote, not from local tags: a shallow clone by tag has one tag, which made
 # this report a failure when the real cause was "nothing to compare against". A test that cannot
 # tell "I could not run" from "the thing is broken" gets ignored the first time it goes red.
+#
+# F14/#137: "the version moved" passed with both ends real and the checked-out candidate never participating; GRUBSTAKE_REPO/GRUBSTAKE_RAW now aim the fetched old client at a local fixture serving $GS, so the assertion is a byte comparison against $GS itself.
 if [ "$NETWORK" = 1 ]; then
     # The named default is the source of truth; a plain literal assignment is the fallback shape.
     _repo="$(sed -n 's/^GRUBSTAKE_REPO_DEFAULT="\(.*\)"$/\1/p' "$GS")"
@@ -3237,18 +3239,81 @@ if [ "$NETWORK" = 1 ]; then
     _prev=$(git ls-remote --tags --refs "$_repo" 'v*' 2>/dev/null \
         | awk '{print $2}' | sed 's|refs/tags/v||' \
         | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-        | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | sed -n 2p)
+        | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | sed -n 1p)
+    _cand="$(sed -n 's/^GRUBSTAKE_VERSION="\(.*\)"$/\1/p' "$GS")"
     if [ -z "$_prev" ]; then
-        printf '  skip  %s\n' "$CURRENT (fewer than two releases published)"
+        printf '  skip  %s\n' "$CURRENT (no release published yet)"
+    elif [ "$_prev" = "$_cand" ]; then
+        # On the tag-push trigger the candidate's own tag is already the newest published one, so an
+        # update to it is correctly a no-op, not a byte-for-byte replace; nothing to compare here.
+        printf '  skip  %s\n' "$CURRENT (candidate's tag is already the newest published release)"
     else
         r=$(new_repo)
         if curl -fsSL "https://raw.githubusercontent.com/seriouslysean/grubstake/v$_prev/grubstake.sh" \
              -o "$r/grubstake.sh" 2>/dev/null; then
             chmod +x "$r/grubstake.sh"
-            _now="$(gs "$r" version)"
-            gs_rc "$r" update
-            _after="$(gs "$r" version)"
-            if [ "$_after" != "$_now" ]; then pass; else fail "update from $_now did not move it (still $_after)"; fi
+            # A future previous release that drops these overrides would leave this test with no
+            # honest way to aim it at the candidate at all.
+            if ! grep -q 'GRUBSTAKE_REPO="${GRUBSTAKE_REPO:-' "$r/grubstake.sh" \
+                || ! grep -q 'GRUBSTAKE_RAW="${GRUBSTAKE_RAW:-' "$r/grubstake.sh"; then
+                fail "v$_prev does not honour GRUBSTAKE_REPO/GRUBSTAKE_RAW, so this test cannot aim it at the candidate"
+            else
+                _uf="$(mktemp -d "$ROOT/candidate-update.XXXXXX")" || fixture_die "cannot create a candidate update fixture dir"
+                git init -q --bare "$_uf/repo.git" || fixture_die "cannot init the candidate fixture release repo"
+                _uw="$(mktemp -d "$ROOT/candidate-update-work.XXXXXX")" || fixture_die "cannot create a work dir for the candidate fixture release"
+                ( cd "$_uw" \
+                  && git init -q . \
+                  && git config user.email test@example.invalid \
+                  && git config user.name "grubstake suite" \
+                  && git config commit.gpgsign false \
+                  && git config tag.gpgSign false \
+                  && printf 'candidate release\n' > README.md \
+                  && git add README.md \
+                  && git commit -q -m release \
+                  && git tag -a "v$_cand" -m "candidate release $_cand" \
+                  && git push -q "$_uf/repo.git" HEAD:refs/heads/main --tags ) \
+                    || fixture_die "cannot seed the candidate update fixture in $_uf"
+                mkdir -p "$_uf/raw/v$_cand" || fixture_die "cannot create the candidate raw tree in $_uf"
+                cp "$GS" "$_uf/raw/v$_cand/grubstake.sh" || fixture_die "cannot serve the candidate as the update target"
+                # curl/git shimmed to file:// only, so an override-reading regression fails loudly here instead of silently falling back to https:// and coincidentally passing against the real release.
+                _realcurl="$(command -v curl)" || fixture_die "no curl on PATH"
+                _realgit="$(command -v git)" || fixture_die "no git on PATH"
+                _shims="$(mktemp -d "$ROOT/candidate-update-shims.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shims"
+                cat > "$_shims/curl" <<SHIM
+#!/bin/sh
+for a in "\$@"; do
+    case "\$a" in
+        file://*) exec "$_realcurl" "\$@" ;;
+    esac
+done
+echo "curl: network blocked in test" >&2
+exit 6
+SHIM
+                cat > "$_shims/git" <<SHIM
+#!/bin/sh
+if [ "\${1:-}" = "ls-remote" ]; then
+    _ok=1
+    for a in "\$@"; do
+        case "\$a" in file://*) _ok=0 ;; esac
+    done
+    if [ "\$_ok" = 1 ]; then
+        echo "git: network blocked in test" >&2
+        exit 128
+    fi
+fi
+exec "$_realgit" "\$@"
+SHIM
+                chmod +x "$_shims/curl" "$_shims/git"
+                _now="$(gs "$r" version)"
+                ( cd "$r" && PATH="$_shims:$PATH" \
+                    GRUBSTAKE_REPO="file://$_uf/repo.git" GRUBSTAKE_RAW="file://$_uf/raw" \
+                    ./grubstake.sh update ) >/dev/null 2>&1
+                if ! cmp -s "$r/grubstake.sh" "$GS"; then
+                    fail "the previous release ($_now) did not end up byte-identical to the candidate after update"
+                else
+                    pass
+                fi
+            fi
         else
             fail "v$_prev is published but could not be fetched"
         fi

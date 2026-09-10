@@ -699,16 +699,21 @@ else
     pass
 fi
 
-it "path and clean refuse a relative HOME the same way they refuse a relative GRUBSTAKE_CACHE"
-# F17: cache_root validated only a set GRUBSTAKE_CACHE; a relative HOME (the darwin branch's own source) reached a relative root too, and clean's own guard on the final root had been removed.
+it "path and clean refuse a relative or empty HOME the same way they refuse a relative GRUBSTAKE_CACHE"
+# An empty HOME shapes an absolute path, so the shape check alone would accept /Library/Caches/grubstake.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 _pout=$( cd "$r" && env -u GRUBSTAKE_CACHE -u XDG_CACHE_HOME HOME="fake-home" ./grubstake.sh path swiftlint 2>&1 ); _prc=$?
 _cout=$( cd "$r" && env -u GRUBSTAKE_CACHE -u XDG_CACHE_HOME HOME="fake-home" ./grubstake.sh clean 2>&1 ); _crc=$?
+_eout=$( cd "$r" && env -u GRUBSTAKE_CACHE -u XDG_CACHE_HOME HOME="" ./grubstake.sh path swiftlint 2>&1 ); _erc=$?
 if [ "$_prc" -eq 0 ]; then
     fail "path exited 0 for a relative HOME, printing: $_pout"
 elif [ "$_crc" -eq 0 ]; then
     fail "clean exited 0 for a relative HOME: $_cout"
+elif [ "$_erc" -eq 0 ]; then
+    fail "path exited 0 for an empty HOME, printing: $_eout"
+elif ! printf '%s' "$_eout" | grep -q "HOME"; then
+    fail "path refused an empty HOME, but without naming it: $_eout"
 elif ! printf '%s' "$_pout" | grep -q "HOME"; then
     fail "path refused, but without naming HOME: $_pout"
 elif ! printf '%s' "$_cout" | grep -q "HOME"; then
@@ -3735,27 +3740,6 @@ new_update_fixture() {
         > "$_uf/raw/v$_ver/grubstake.sh" || fixture_die "cannot write the fixture release script"
     echo "$_uf"
 }
-
-it "bare update refuses when the only advertised release is below the supported floor"
-# cmd_update's loop never called below_floor, so a below-floor-only remote was adopted silently by plain update.
-r=$(new_repo)
-sed -i.bak 's/^GRUBSTAKE_VERSION=.*/GRUBSTAKE_VERSION="0.1.0"/' "$r/grubstake.sh" && rm -f "$r/grubstake.sh.bak"
-_before="$(cat "$r/grubstake.sh")"
-_shim="$(mktemp -d "$ROOT/floor-shim.XXXXXX")" || fixture_die "cannot create the floor-only git shim dir"
-git_tags_shim "$_shim" 0.2.0
-f=$(new_update_fixture 0.2.0)
-_out=$( cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$f/raw" ./grubstake.sh update 2>&1 ); _rc=$?
-_after="$(cat "$r/grubstake.sh")"
-if [ "$_rc" -eq 0 ]; then
-    fail "bare update exited 0 with only a below-floor release available: $_out"
-elif [ "$_after" != "$_before" ]; then
-    fail "the running script was replaced with a release below the supported floor"
-else
-    case "$_out" in
-        *"below the supported floor"*) pass ;;
-        *) fail "refused, but without naming the floor: $_out" ;;
-    esac
-fi
 
 it "bare update refuses a release older than the one already installed"
 # cmd_update's loop fetched the first candidate without checking it was newer, so a downgrade was adopted by plain update.

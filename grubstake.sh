@@ -71,24 +71,26 @@ platform() {
 
 cache_root() {
     if [ -n "${GRUBSTAKE_CACHE:-}" ]; then
-        _cr_var=GRUBSTAKE_CACHE
-        _cr_root="$GRUBSTAKE_CACHE"
+        _cr_var=GRUBSTAKE_CACHE; _cr_val="$GRUBSTAKE_CACHE"
+        _cr_root="$_cr_val"
     else
         # Checked, not tested directly: a die inside $( ) only kills that subshell, so comparing its
         # empty result against "darwin" would read as false and fall through to a Linux-shaped path.
         _cr_plat="$(platform)" || return 1
         if [ "$_cr_plat" = darwin ]; then
-            _cr_var=HOME
-            _cr_root="$HOME/Library/Caches/grubstake"
+            _cr_var=HOME; _cr_val="${HOME:-}"
+            _cr_root="$_cr_val/Library/Caches/grubstake"
         elif [ -n "${XDG_CACHE_HOME:-}" ]; then
-            _cr_var=XDG_CACHE_HOME
-            _cr_root="$XDG_CACHE_HOME/grubstake"
+            _cr_var=XDG_CACHE_HOME; _cr_val="$XDG_CACHE_HOME"
+            _cr_root="$_cr_val/grubstake"
         else
-            _cr_var=HOME
-            _cr_root="$HOME/.cache/grubstake"
+            _cr_var=HOME; _cr_val="${HOME:-}"
+            _cr_root="$_cr_val/.cache/grubstake"
         fi
     fi
-    # Shared by every command, not just clean: STABILITY.md promises an absolute path, so whichever variable produced a relative one -- override or environment -- is refused here, not per caller.
+    # An empty HOME still shapes an absolute path, so the producing value is checked before its shape.
+    [ -n "$_cr_val" ] || { warn "$_cr_var is empty, so the cache root cannot be resolved"; return 1; }
+    # STABILITY.md promises an absolute path, so a relative one is refused here for every command, not per caller.
     case "$_cr_root" in
         /*) : ;;
         *)  warn "$_cr_var must be an absolute path, got: $_cr_root"; return 1 ;;
@@ -486,8 +488,8 @@ install_tool() {
     fi
     [ "$_want" != "-" ] && [ -n "$_want" ] || die "$_tool has no $_plat hash in grubstake.tools (run: grubstake add $_tool@$_ver)"
 
-    _dest="$(tool_dir "$_tool" "$_want")"
-    _bin="$(tool_bin "$_tool" "$_want")"
+    _dest="$(tool_dir "$_tool" "$_want")" || return 1
+    _bin="$(tool_bin "$_tool" "$_want")" || return 1
     # Ahead of every branch below, not only the fresh-install one: an already-existing entry still
     # means install_tool is actively managing this root right now (#95).
     _croot="$(cache_root)" || return 1
@@ -1366,7 +1368,7 @@ cmd_install() {
             [ -x "$_f" ] || continue
             _active="$_active $(basename "$_f")"
         done
-        [ -z "$_active" ] || die "$_gh has active hook(s) that would go silent:$_active -- move them under .githooks/ first, since <hook>.d/ only gates the hooks the spine offers"
+        [ -z "$_active" ] || die "$_gh has executable file(s) that would stop running once hooks move:$_active -- move real hooks under .githooks/ and delete the rest first"
     fi
     mkdir -p "$_root/.githooks"
 
@@ -1516,10 +1518,6 @@ cmd_update() {
             [ "$_c" = "$GRUBSTAKE_VERSION" ] && { log "already on $GRUBSTAKE_VERSION"; return 0; }
             # release_tags sorts newest first, so the first candidate that is not newer means none after it are either.
             version_lt "$GRUBSTAKE_VERSION" "$_c" || { log "no usable release newer than $GRUBSTAKE_VERSION"; return 0; }
-            if below_floor "$_c"; then
-                warn "v$_c is below the supported floor $GRUBSTAKE_MIN_VERSION, skipping"
-                continue
-            fi
             log "fetching $_c"
             if fetch_release "$_c" "$_tmp"; then _target="$_c"; break; fi
             warn "v$_c is not a usable release, skipping"

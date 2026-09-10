@@ -31,3 +31,13 @@ changed_digest() {
         done
     } | sha_any
 }
+
+# One registry for the gate and the receipt, so a third reviewer that mints a kind is one edit here.
+# gst-shell-reviewer checks output discipline only and mints no receipt, so it carries no kind.
+reviewer_kind() {
+    case "$1" in
+        gst-shell-critic) echo shell ;;
+        gst-leak-auditor) echo leak ;;
+        *) return 1 ;;
+    esac
+}

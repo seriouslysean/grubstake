@@ -24,29 +24,43 @@ INPUT=$(cat)
 session=$(printf '%s' "$INPUT" | json_field session_id)
 transcript=$(printf '%s' "$INPUT" | json_field transcript_path)
 
+# need_kinds names the receipt kind(s) the marker must carry; a kind missing there is not a satisfied need.
 need=""
+need_kinds=""
 if changed_paths | grep -qE '(^|-> )(grubstake\.sh$|hooks/)'; then
     need="gst-shell-critic over the shell changes"
+    need_kinds="$(reviewer_kind gst-shell-critic)"
 fi
 if [ -n "$transcript" ] && [ -f "$transcript" ] \
     && grep -qE '"command"[^{}]*gh (issue|pr|release) (create|comment|edit)' "$transcript" 2>/dev/null; then
     need="${need:+$need, and }gst-leak-auditor over the published prose"
+    need_kinds="${need_kinds:+$need_kinds }$(reviewer_kind gst-leak-auditor)"
 fi
 [ -z "$need" ] && exit 0
 
 digest=$(changed_digest)
 
 if [ -f "$MARKER" ]; then
-    m_status=$(sed -n 1p "$MARKER"); m_session=$(sed -n 2p "$MARKER"); m_digest=$(sed -n 3p "$MARKER")
+    # One read: a receipt renamed into place between separate reads would pair one write's digest with another's kinds.
+    marker=$(cat "$MARKER")
+    m_status=$(printf '%s\n' "$marker" | sed -n 1p); m_session=$(printf '%s\n' "$marker" | sed -n 2p); m_digest=$(printf '%s\n' "$marker" | sed -n 3p)
     if [ "$m_digest" = "$digest" ]; then
         case "$m_status" in
             pass)
                 # Accept an unknown session on either side; the digest is the freshness proof.
                 if [ "$m_session" = "$session" ] || [ "$m_session" = "-" ] || [ -z "$session" ]; then
-                    exit 0
+                    m_kinds=$(printf '%s\n' "$marker" | sed -n 4p)
+                    missing=""
+                    for k in $need_kinds; do
+                        case " $m_kinds " in
+                            *" $k "*) ;;
+                            *) missing="${missing:+$missing }$k" ;;
+                        esac
+                    done
+                    [ -z "$missing" ] && exit 0
                 fi ;;
             skip)
-                printf 'advisory-skip %s %s %s\n' "$(date +%s)" "$digest" "$(sed -n 4p "$MARKER")" >> "$LOG"
+                printf 'advisory-skip %s %s %s\n' "$(date +%s)" "$digest" "$(printf '%s\n' "$marker" | sed -n 4p)" >> "$LOG"
                 exit 0 ;;
         esac
     fi

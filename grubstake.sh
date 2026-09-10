@@ -28,6 +28,18 @@ die()  { printf '[grubstake] %s\n' "$1" >&2; exit 1; }
 # so a value embedded in it has to survive that second parse regardless of what characters it holds.
 sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
+# ---------------------------------------------------------------------------- signal cleanup
+
+# A trap with no exit resumes the interrupted script once cleanup runs; the signal case disarms EXIT before exiting, so a caught signal never runs the same cleanup twice.
+arm_cleanup() {
+    # shellcheck disable=SC2064
+    trap "$1" EXIT
+    # shellcheck disable=SC2064
+    trap "trap - EXIT; $1; exit 1" HUP INT TERM
+}
+
+disarm_cleanup() { trap - EXIT HUP INT TERM; }
+
 usage() {
     cat <<'USAGE'
 grubstake: pinned, verified build tooling for iOS repos.
@@ -528,8 +540,7 @@ install_tool() {
     fi
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
-    # shellcheck disable=SC2064
-    trap "rm -rf $(sq "$_tmp")" EXIT HUP INT TERM
+    arm_cleanup "rm -rf $(sq "$_tmp")"
 
     log "$_tool $_ver: downloading"
     _archive="$_tmp/archive"
@@ -556,8 +567,7 @@ install_tool() {
     # Keep the binary's siblings: periphery loads libIndexStore.dylib via @rpath from its own dir.
     _staging="$_dest.staging.$$"
     # Staging lives outside $_tmp, so a die between here and publish leaked it; rm -rf tolerates publish having moved it.
-    # shellcheck disable=SC2064
-    trap "rm -rf $(sq "$_tmp") $(sq "$_staging")" EXIT HUP INT TERM
+    arm_cleanup "rm -rf $(sq "$_tmp") $(sq "$_staging")"
     rm -rf "$_staging"
     # A stale staging surviving rm -rf (e.g. mode 000) would have cp -R merge into it rather than start clean.
     [ ! -e "$_staging" ] || die "$_tool $_ver: cannot clear stale $_staging"
@@ -587,9 +597,9 @@ install_tool() {
     # errexit is suspended for this function's whole body under cmd_ensure's "install_tool ... || _bad=1".
     with_lock "$_dest.lock" publish_dir "$_staging" "$_dest" "$_tool" || {
         rm -rf "$_tmp"
-        trap - EXIT HUP INT TERM
         chmod -R u+w "$_staging" 2>/dev/null || true
         rm -rf "$_staging"
+        disarm_cleanup
         # Named only if it survives the attempt above: a plain lock failure never touched staging at all.
         if [ -e "$_staging" ]; then
             warn "$_tool $_ver: could not finish publishing (remove $_staging and retry)"
@@ -600,7 +610,7 @@ install_tool() {
     }
 
     rm -rf "$_tmp"
-    trap - EXIT HUP INT TERM
+    disarm_cleanup
     # Should be unreachable: a with_lock failure above already warns and returns before this executes.
     [ -x "$_bin" ] || die "$_tool $_ver: install incomplete (remove $_dest and retry)"
     log "$_tool $_ver: installed"
@@ -901,8 +911,7 @@ add_one() {
     is_known_tool "$_tool" || die "unknown tool: $_tool"
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
-    # shellcheck disable=SC2064
-    trap "rm -rf $(sq "$_tmp")" EXIT HUP INT TERM
+    arm_cleanup "rm -rf $(sq "$_tmp")"
 
     # Hash every platform, so a macOS run still pins what Linux CI fetches.
     _shas=""
@@ -945,8 +954,7 @@ add_one() {
         [ "$_waited" -gt 50 ] && die "grubstake.tools is locked by another run ($_lock)"
         sleep 0.1 2>/dev/null || sleep 1
     done
-    # shellcheck disable=SC2064
-    trap "rm -rf $(sq "$_tmp") $(sq "$_pt") $(sq "$_lock")" EXIT HUP INT TERM
+    arm_cleanup "rm -rf $(sq "$_tmp") $(sq "$_pt") $(sq "$_lock")"
     # The fetch above can run for minutes with nothing holding the pins file, so its contents are
     # only known-good once the lock that guards the rewrite below is held.
     validate_pins
@@ -986,10 +994,11 @@ add_one() {
     [ "$_before" -eq 0 ] || [ "$_after" -ge "$_before" ] \
         || die "$_pins: rewrite would drop pins ($_before -> $_after), $_tool@$_ver was not recorded"
     mv "$_pt" "$_pins"
+    rm -rf "$_tmp"
+    # Disarmed before rmdir: armed past it, a signal here would rm -rf a successor's lock at this same path.
+    disarm_cleanup
     rmdir "$_lock" 2>/dev/null || true
 
-    rm -rf "$_tmp"
-    trap - EXIT HUP INT TERM
     log "pinned $_tool $_ver"
     install_tool "$_tool" "$_ver"
 }
@@ -1320,12 +1329,11 @@ cmd_install() {
         if [ ! -f "$_dest" ]; then
             # mktemp beside $_dest, not in $TMPDIR: mv across filesystems can silently stop being atomic.
             _hooktmp="$(mktemp "$_root/.githooks/.$_hook.XXXXXX")" || die "cannot create a temp file to install $_hook"
-            # shellcheck disable=SC2064
-            trap "rm -f $(sq "$_hooktmp")" EXIT HUP INT TERM
+            arm_cleanup "rm -f $(sq "$_hooktmp")"
             embedded_hook "$_hook" > "$_hooktmp"
             chmod +x "$_hooktmp"
             mv "$_hooktmp" "$_dest"
-            trap - EXIT HUP INT TERM
+            disarm_cleanup
             log "$_hook: installed"
             continue
         fi
@@ -1351,12 +1359,11 @@ cmd_install() {
             # The recorded constraint licenses re-upgrading any hook byte-identical to a known
             # previous copy, even a deliberate revert; removing the marker line is how to opt out.
             _hooktmp="$(mktemp "$_root/.githooks/.$_hook.XXXXXX")" || die "cannot create a temp file to refresh $_hook"
-            # shellcheck disable=SC2064
-            trap "rm -f $(sq "$_hooktmp")" EXIT HUP INT TERM
+            arm_cleanup "rm -f $(sq "$_hooktmp")"
             embedded_hook "$_hook" > "$_hooktmp"
             chmod +x "$_hooktmp"
             mv "$_hooktmp" "$_dest"
-            trap - EXIT HUP INT TERM
+            disarm_cleanup
             log "$_hook: refreshed to the current embedded copy"
         else
             warn "$_hook: differs from every known copy, left alone (repo-local edits are never overwritten)"
@@ -1432,8 +1439,7 @@ fetch_release() {
 cmd_update() {
     _pinned="${1:-}"
     _tmp="$(mktemp "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
-    # shellcheck disable=SC2064
-    trap "rm -f $(sq "$_tmp")" EXIT HUP INT TERM
+    arm_cleanup "rm -f $(sq "$_tmp")"
 
     # Silent on the common path; an overridden source is the one case a reader cannot infer from
     # the rest of the output, since fetch_release never repeats the host it pulled from.
@@ -1476,11 +1482,12 @@ cmd_update() {
     _self="$(script_path)"
     _self="$(cd "$(dirname "$_self")" && pwd)/$(basename "$_self")"
     _staged="$(mktemp "$(dirname "$_self")/.grubstake.XXXXXX")" || die "cannot stage beside $_self"
+    arm_cleanup "rm -f $(sq "$_tmp") $(sq "$_staged")"
     cp "$_tmp" "$_staged"
     chmod +x "$_staged"
     mv -f "$_staged" "$_self"
     rm -f "$_tmp"
-    trap - EXIT HUP INT TERM
+    disarm_cleanup
 
     log "updated to $_target"
     # install, not ensure: a hook a release adds or fixes reaches the repo through install alone, and install ensures on its way out.

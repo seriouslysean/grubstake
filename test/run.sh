@@ -5573,6 +5573,71 @@ else
     pass
 fi
 
+it "a signal after add_one releases its pins lock but before disarming its trap does not delete a successor's lock"
+# F02: simulates a second add's mkdir reclaiming $_lockdir between this run's own rmdir and disarm; guarded to fire once so a repeat rmdir on this same path does not re-signal the parent.
+r=$(new_repo)
+fake_release "$r" 1.0.0 >/dev/null
+_lockdir="$r/grubstake.tools.lock"
+_marker="$r/grubstake.tools.lock.fired"
+_shim="$r/rmdir-shim"
+mkdir -p "$_shim" || fixture_die "cannot create the rmdir shim dir"
+_realrmdir="$(command -v rmdir)" || fixture_die "no real rmdir on PATH to wrap"
+cat > "$_shim/rmdir" <<SHIM
+#!/bin/sh
+if [ "\$1" = "$_lockdir" ] && [ ! -e "$_marker" ]; then
+    : > "$_marker"
+    "$_realrmdir" "\$1"
+    mkdir "$_lockdir"
+    kill -TERM "\$PPID" 2>/dev/null
+    exit 0
+fi
+exec "$_realrmdir" "\$@"
+SHIM
+chmod +x "$_shim/rmdir" || fixture_die "cannot make the rmdir shim executable"
+( cd "$r" && PATH="$r/curl-shim:$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 >"$r/out" 2>&1 )
+if [ ! -f "$_marker" ]; then
+    fail "the rmdir shim never fired, so this proves nothing: $(cat "$r/out" 2>/dev/null)"
+elif [ -d "$_lockdir" ]; then
+    pass
+else
+    fail "a successor's lock (simulated) was deleted by add_one's own trap after the real lock was already released: $(cat "$r/out" 2>/dev/null)"
+fi
+rm -f "$_marker" 2>/dev/null
+rm -rf "$_lockdir" 2>/dev/null
+
+it "a signal after add_one renames grubstake.tools into place does not let a killed run report success"
+# F02: deferred until the rename returns, a signal here must not let the run finish silently -- exit 0, "installed" printed -- as if the kill never landed.
+r=$(new_repo)
+fake_release "$r" 1.0.0 >/dev/null
+_pins="$r/grubstake.tools"
+_marker="$r/mv.fired"
+_shim="$r/mv-shim"
+mkdir -p "$_shim" || fixture_die "cannot create the mv shim dir"
+_realmv="$(command -v mv)" || fixture_die "no real mv on PATH to wrap"
+cat > "$_shim/mv" <<SHIM
+#!/bin/sh
+if [ "\$#" -eq 2 ] && [ "\$2" = "$_pins" ] && [ ! -e "$_marker" ]; then
+    : > "$_marker"
+    "$_realmv" "\$1" "\$2"
+    _rc=\$?
+    kill -TERM "\$PPID" 2>/dev/null
+    exit \$_rc
+fi
+exec "$_realmv" "\$@"
+SHIM
+chmod +x "$_shim/mv" || fixture_die "cannot make the mv shim executable"
+_out=$( cd "$r" && PATH="$r/curl-shim:$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1 ); _rc=$?
+if [ ! -f "$_marker" ]; then
+    fail "the mv shim never fired, so this proves nothing: $_out"
+elif [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 after being killed mid-rename, as if the signal never landed: $_out"
+elif printf '%s' "$_out" | grep -q ': installed'; then
+    fail "add finished installing after being killed mid-rename: $_out"
+else
+    pass
+fi
+rm -f "$_marker" 2>/dev/null
+
 if [ "$NETWORK" = 1 ]; then
     printf '\nadd, network\n'
 

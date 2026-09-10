@@ -16,9 +16,9 @@ it, and grubstake does not pretend otherwise.
 Fetch the script and adopt the repo.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.2.0/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.2.1/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
-./grubstake.sh version   # expect 1.2.0
+./grubstake.sh version   # expect 1.2.1
 ./grubstake.sh install
 ```
 

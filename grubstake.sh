@@ -6,7 +6,7 @@
 
 set -eu
 
-GRUBSTAKE_VERSION="1.2.0"
+GRUBSTAKE_VERSION="1.2.1"
 GRUBSTAKE_MIN_VERSION="0.3.0"   # every earlier release has a known blocking defect
 # Named so cmd_update can tell an override apart from the default it is comparing against.
 GRUBSTAKE_REPO_DEFAULT="https://github.com/seriouslysean/grubstake"
@@ -885,6 +885,76 @@ GST_EMBED_COMMIT_MSG
     esac
 }
 
+# git resolves a relative core.hooksPath against the worktree root, never $GIT_DIR, so a string compare instead of resolving here let an absolute spelling of the same directory read as foreign (#139; git help config, core.hooksPath; githooks(5) DESCRIPTION).
+resolve_hooks_path() {
+    _rhp_root="$1"
+    case "$2" in
+        /*) _rhp_p="$2" ;;
+        *)  _rhp_p="$_rhp_root/$2" ;;
+    esac
+    # A trailing slash or /. would otherwise reach basename/dirname below as an empty or self-referential final component, resolving against a parent that may not exist yet instead of the real one.
+    while :; do
+        case "$_rhp_p" in
+            */) _rhp_p="${_rhp_p%/}" ;;
+            */.) _rhp_p="${_rhp_p%/.}" ;;
+            *)  break ;;
+        esac
+    done
+    if [ -d "$_rhp_p" ]; then
+        CDPATH= cd -P "$_rhp_p" && pwd -P && return 0
+        warn "cannot resolve $_rhp_p"
+        return 1
+    fi
+    if [ -e "$_rhp_p" ]; then
+        warn "$_rhp_p exists and is not a directory"
+        return 1
+    fi
+    if [ -L "$_rhp_p" ]; then
+        warn "$_rhp_p is a dangling symlink"
+        return 1
+    fi
+    _rhp_base="$(basename "$_rhp_p")"
+    _rhp_dir="$(dirname "$_rhp_p")"
+    _rhp_pp="$(CDPATH= cd -P "$_rhp_dir" 2>/dev/null && pwd -P)" || { warn "cannot resolve $_rhp_dir"; return 1; }
+    printf '%s/%s\n' "$_rhp_pp" "$_rhp_base"
+}
+
+# Shared by cmd_install and cmd_doctor, ordered the same way in both: the configured value is
+# resolved first, and only its own failure is ever surfaced, because a failure resolving this
+# repo's own .githooks afterward cannot make the two paths equal but is not evidence of what IS
+# wrong either -- reporting it anyway blamed an unrelated dangling .githooks symlink for a
+# hooksPath that actually just points elsewhere (#139 follow-up). Sets _hp_reason to a complete,
+# ready-to-print sentence when there is one worth showing, empty otherwise (both callers then fall
+# back to their own plain "not .githooks" wording). Returns 0 (true) when $2 is foreign to this
+# worktree, 1 when it names this worktree's own .githooks.
+hookspath_is_foreign() {
+    _hif_root="$1"
+    _hif_configured="$2"
+    _hp_reason=""
+    # core.hooksPath is shared config across every worktree of a repository (git-worktree(1)), but
+    # git resolves a relative value against each worktree's own root while an absolute one is the
+    # same literal path everywhere -- so an absolute spelling that happens to match just one
+    # worktree's own .githooks would silently retarget every other worktree's hooks at it too.
+    case "$_hif_configured" in
+        /*)
+            if _hif_wtn="$(git -C "$_hif_root" worktree list --porcelain 2>/dev/null | grep -c '^worktree ')"; then :; else _hif_wtn=0; fi
+            if [ "$_hif_wtn" -gt 1 ]; then
+                _hp_reason="core.hooksPath is absolute, and this repository has linked worktrees that share it as one value; only the relative .githooks form resolves safely in every one of them"
+                return 0
+            fi
+            ;;
+    esac
+    if ! _hif_resolved="$(resolve_hooks_path "$_hif_root" "$_hif_configured" 2>&1)"; then
+        _hp_reason="cannot resolve core.hooksPath '$_hif_configured': ${_hif_resolved#\[grubstake\] }"
+        return 0
+    fi
+    if ! _hif_own="$(resolve_hooks_path "$_hif_root" .githooks 2>&1)"; then
+        return 0
+    fi
+    [ "$_hif_resolved" = "$_hif_own" ] && return 1
+    return 0
+}
+
 # The one place this ownership-marker grep is spelled out: test/run.sh's own reword-drift test
 # extracts it from here verbatim, so cmd_install and cmd_doctor share this rather than each
 # spelling it out again, and the variable below is named to match what that test expects.
@@ -1128,10 +1198,39 @@ cmd_doctor() {
         _cache="${_cache#\[grubstake\] }"
         printf 'cache      unresolved (%s)\n' "$_cache"
     fi
-    _hookspath="$(git -C "$_root" config core.hooksPath || true)"
-    printf 'hooksPath  %s\n' "${_hookspath:-(unset)}"
+    # --path matches cmd_install's own read; rc 1 is unset, anything else is a real read failure and must be named rather than folded into unset, which is what let a bad ~user expansion grade as .githooks.
+    if _hookspath="$(git -C "$_root" config --path --get core.hooksPath 2>/dev/null)"; then _hp_rc=0; else _hp_rc=$?; fi
+    case "$_hp_rc" in
+        0) : ;;
+        1) _hookspath="" ;;
+        # Stderr re-read separately rather than merged into the first capture, so a clean value on the success path can never carry git's own error text riding along with it; || true, since this second read failing the same way must still reach the report below rather than exit on git's own raw status.
+        *) _hp_err="$(git -C "$_root" config --path --get core.hooksPath 2>&1 >/dev/null)" || true
+           _hookspath_unreadable=1 ;;
+    esac
+    if [ "${_hookspath_unreadable:-0}" = 1 ]; then
+        printf 'hooksPath  cannot read core.hooksPath: %s\n' "$_hp_err"
+    elif [ "$_hp_rc" -eq 1 ]; then
+        printf 'hooksPath  (unset)\n'
+    elif [ -z "$_hookspath" ]; then
+        # Named explicitly, not left blank: a bare "hooksPath  " reads as a rendering bug to a human, not as the configured-empty value it actually is, the very reading this fix exists to close.
+        printf "hooksPath  '' (empty, resolves to the worktree root)\n"
+    else
+        printf 'hooksPath  %s\n' "$_hookspath"
+    fi
     printf 'pins       %s\n' "$(pins_file)"
-    if [ -n "$_hookspath" ] && [ "$_hookspath" != ".githooks" ]; then
+    _hookspath_foreign=0
+    _hp_reason=""
+    if [ "${_hookspath_unreadable:-0}" = 1 ]; then
+        _hookspath_foreign=1
+    elif [ "$_hp_rc" -eq 0 ]; then
+        # Shared with cmd_install so neither call site reports whichever of the two resolves happened to fail first (#139 follow-up).
+        hookspath_is_foreign "$_root" "$_hookspath" && _hookspath_foreign=1
+    fi
+    if [ "${_hookspath_unreadable:-0}" = 1 ]; then
+        printf '  hooks        not graded, core.hooksPath could not be read\n'
+    elif [ -n "$_hp_reason" ]; then
+        printf '  hooks        not graded, %s\n' "$_hp_reason"
+    elif [ "$_hookspath_foreign" -eq 1 ]; then
         # A foreign hooksPath means the repo owns its hooks, the same reason install refuses one.
         printf '  hooks        not graded, hooksPath is not .githooks\n'
     else
@@ -1345,9 +1444,21 @@ cmd_legacy_replace() {
 cmd_install() {
     _root="$(repo_root)"
     # Check before writing anything: refusing after creating files is a half-adopted repo.
-    _existing="$(git -C "$_root" config core.hooksPath || true)"
-    if [ -n "$_existing" ] && [ "$_existing" != ".githooks" ]; then
-        die "core.hooksPath is already '$_existing'; move those hooks into .githooks first"
+    # --path matches how git itself expands core.hooksPath; --get's own exit code (1 for unset) is what tells "nothing configured" apart from git failing to read the value at all.
+    if _existing="$(git -C "$_root" config --path --get core.hooksPath 2>/dev/null)"; then _gcrc=0; else _gcrc=$?; fi
+    case "$_gcrc" in
+        0) : ;;
+        1) _existing="" ;;
+        # Stderr re-read separately rather than merged into the first capture, so a clean value on the success path can never carry git's own error text riding along with it; || true, since this second read failing the same way must still reach die below rather than exit on git's own raw status.
+        *) _gcerr="$(git -C "$_root" config --path --get core.hooksPath 2>&1 >/dev/null)" || true
+           die "cannot read core.hooksPath: $_gcerr" ;;
+    esac
+    if [ "$_gcrc" -eq 0 ]; then
+        # Shared with cmd_doctor so neither call site reports whichever of the two resolves happened to fail first (#139 follow-up).
+        if hookspath_is_foreign "$_root" "$_existing"; then
+            [ -z "$_hp_reason" ] || die "$_hp_reason"
+            die "core.hooksPath is already '$_existing'; move those hooks into .githooks first"
+        fi
     fi
     # Unset hooksPath means git already runs whatever sits executable in .git/hooks; wiring .githooks over it would silence that hook, the failure rule 16 exists to close.
     if [ -z "$_existing" ]; then
@@ -1425,30 +1536,35 @@ cmd_install() {
         fi
     done
 
-    # git's own config lock is not this script's to hold: a concurrent install racing the same
-    # .git/config.lock fails immediately with git's own raw message, not a retryable one, so the
-    # retry has to live here rather than trusting git to wait it out.
-    # Retried only on git's own "File exists" text -- the literal signature of its own lock file
-    # already being held -- so any other failure (a read-only .git, say) fails on the first attempt
-    # with git's real words instead of spinning the budget and blaming a lock nobody held; an
-    # unrecognized message falls to that same immediate-failure default rather than risking a silent false retry.
-    _gcw=0
-    while :; do
-        # LC_ALL=C, the same convention this file already uses at every sort site: the discriminator
-        # below reads git's own message, so that message has to stay in the language it was read in.
-        _gcerr="$(LC_ALL=C git -C "$_root" config core.hooksPath .githooks 2>&1 >/dev/null)" && break
-        # Anchored to the end, not a bare substring: git's message can itself embed a path (an
-        # ambient GIT_DIR overrides the plain ".git/config" this normally reads), so an unanchored
-        # match would let a path containing "File exists" collide with git's own trailing reason.
-        case "$_gcerr" in
-            *": File exists") : ;;
-            *) die "cannot set core.hooksPath: $_gcerr" ;;
-        esac
-        _gcw=$((_gcw + 1))
-        [ "$_gcw" -gt 50 ] && die "cannot set core.hooksPath: git kept losing the lock on $_root/.git/config: $_gcerr"
-        sleep 0.1 2>/dev/null || sleep 1
-    done
-    log "hooksPath: .githooks"
+    # Written only when nothing was configured yet: an equivalent existing value is left exactly as spelled, since rewriting shared git config can retarget hooks running against other worktrees of the same repo (rule 9).
+    if [ -z "$_existing" ]; then
+        # git's own config lock is not this script's to hold: a concurrent install racing the same
+        # .git/config.lock fails immediately with git's own raw message, not a retryable one, so the
+        # retry has to live here rather than trusting git to wait it out.
+        # Retried only on git's own "File exists" text -- the literal signature of its own lock file
+        # already being held -- so any other failure (a read-only .git, say) fails on the first attempt
+        # with git's real words instead of spinning the budget and blaming a lock nobody held; an
+        # unrecognized message falls to that same immediate-failure default rather than risking a silent false retry.
+        _gcw=0
+        while :; do
+            # LC_ALL=C, the same convention this file already uses at every sort site: the discriminator
+            # below reads git's own message, so that message has to stay in the language it was read in.
+            _gcerr="$(LC_ALL=C git -C "$_root" config core.hooksPath .githooks 2>&1 >/dev/null)" && break
+            # Anchored to the end, not a bare substring: git's message can itself embed a path (an
+            # ambient GIT_DIR overrides the plain ".git/config" this normally reads), so an unanchored
+            # match would let a path containing "File exists" collide with git's own trailing reason.
+            case "$_gcerr" in
+                *": File exists") : ;;
+                *) die "cannot set core.hooksPath: $_gcerr" ;;
+            esac
+            _gcw=$((_gcw + 1))
+            [ "$_gcw" -gt 50 ] && die "cannot set core.hooksPath: git kept losing the lock on $_root/.git/config: $_gcerr"
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+        log "hooksPath: .githooks"
+    else
+        log "hooksPath: kept $_existing"
+    fi
 
     [ -f "$(pins_file)" ] || {
         printf '# grubstake pins: name version sha256-darwin sha256-linux\n' > "$(pins_file)"

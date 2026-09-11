@@ -88,6 +88,20 @@ new_gated_repo() {
     echo "$_gr"
 }
 
+# A repo with one commit, for "git worktree add" -- git before 2.42 refuses to add a worktree
+# against an unborn HEAD outright, unlike the --orphan inference newer git infers on its own.
+new_committed_repo() {
+    _cr="$(new_repo)"
+    printf 'fixture\n' > "$_cr/README.md" || fixture_die "cannot write $_cr/README.md"
+    ( cd "$_cr" \
+      && git config user.email test@example.invalid \
+      && git config user.name "grubstake suite" \
+      && git config commit.gpgsign false \
+      && git add README.md \
+      && git commit -q -m baseline ) || fixture_die "cannot seed a commit in $_cr"
+    echo "$_cr"
+}
+
 # Run grubstake in a repo with that repo's own cache.
 gs() {
     _repo="$1"; shift
@@ -343,17 +357,17 @@ SHIM
 
 # Pauses "git" only on cmd_install's own hooksPath write ("git -C <root> config core.hooksPath
 # .githooks", five arguments exactly), never the read earlier in the same command ("git -C <root>
-# config core.hooksPath", four arguments, no value) -- pausing that one too would strand the caller
-# before it ever reaches the call under test. Each paused invocation writes "$_reached.$GST_LABEL",
-# a label the caller sets per racer (GST_LABEL=1, GST_LABEL=2), not a pid: measured directly against
-# git's own lock (not through a full "install"), a poll-with-sleep handshake on either side of the
-# release only landed the two racers on top of each other 3-5 times in 15-20 tries -- enough slack
-# for one side to slip through git's lock window before the other arrives. A tight, sleep-free
-# busy-wait on a plain "[ -f ]" test on both sides (no external `find`/`wc` call standing between a
-# racer finishing and the poll noticing) raised that to 12-16 in 15-20. This is still a real race,
-# not a guarantee: a clean run on this half proves nothing beyond itself, the same as every other
-# probabilistic catch in this suite, but a red one is real, and it now fires often enough to trust
-# watching it fail once as real evidence rather than a fluke.
+# config --path --get core.hooksPath", six arguments, no value) -- pausing that one too would
+# strand the caller before it ever reaches the call under test. Each paused invocation writes
+# "$_reached.$GST_LABEL", a label the caller sets per racer (GST_LABEL=1, GST_LABEL=2), not a pid:
+# measured directly against git's own lock (not through a full "install"), a poll-with-sleep
+# handshake on either side of the release only landed the two racers on top of each other 3-5 times
+# in 15-20 tries -- enough slack for one side to slip through git's lock window before the other
+# arrives. A tight, sleep-free busy-wait on a plain "[ -f ]" test on both sides (no external
+# `find`/`wc` call standing between a racer finishing and the poll noticing) raised that to 12-16 in
+# 15-20. This is still a real race, not a guarantee: a clean run on this half proves nothing beyond
+# itself, the same as every other probabilistic catch in this suite, but a red one is real, and it
+# now fires often enough to trust watching it fail once as real evidence rather than a fluke.
 git_pause_shim() {
     _gpdir="$1"; _gpreached="$2"; _gpgo="$3"
     mkdir -p "$_gpdir" || fixture_die "cannot create the git-pause shim dir $_gpdir"
@@ -3886,6 +3900,184 @@ extract_embedded_hook() {
     sed -n "/^# gst-embedded-hook-begin: $1\$/,/^# gst-embedded-hook-end: $1\$/p" "$GS" | sed '1d;$d'
 }
 
+it "install accepts the absolute path to its own hooks directory and leaves the value as it found it"
+# git resolves core.hooksPath the same way whether it is spelled as an absolute path or as
+# ".githooks" itself (git help config, core.hooksPath) -- refusing the absolute spelling of this
+# repo's own hooks directory is exactly #139: new_repo's own path is logical (symlinked TMPDIR),
+# while repo_root() (git rev-parse --show-toplevel) resolves physical, so a plain string compare of
+# the two would see them as different directories even though they name the same one.
+r=$(new_repo)
+( cd "$r" && git config core.hooksPath "$r/.githooks" ) || fixture_die "cannot seed core.hooksPath in $r"
+_hp_before=$(cd "$r" && git config core.hooksPath)
+[ "$_hp_before" = "$r/.githooks" ] || fixture_die "core.hooksPath did not read back as seeded in $r"
+_out=$(gs "$r" install); _rc=$?
+_hp_after=$(cd "$r" && git config core.hooksPath)
+_bad=""
+if [ "$_rc" -ne 0 ]; then
+    _bad="install refused its own hooks directory spelled as an absolute path (rc $_rc): $_out"
+elif [ "$_hp_after" != "$_hp_before" ]; then
+    _bad="install rewrote an already-equivalent core.hooksPath (was '$_hp_before', now '$_hp_after'): $_out"
+else
+    for _hook in pre-commit post-commit commit-msg; do
+        [ -z "$_bad" ] || break
+        _dest="$r/.githooks/$_hook"
+        _got="$(mktemp "$ROOT/abs-hookspath.XXXXXX")" || fixture_die "cannot create a scratch file for $_hook extraction"
+        extract_embedded_hook "$_hook" > "$_got"
+        if [ ! -x "$_dest" ]; then
+            _bad="$_hook is missing or not executable: $_out"
+        elif ! cmp -s "$_got" "$_dest"; then
+            _bad="$_hook does not match the embedded copy: $_out"
+        fi
+    done
+fi
+[ -z "$_bad" ] && pass || fail "$_bad"
+
+it "install refuses an absolute hooksPath that resolves elsewhere before writing anything"
+# The overcorrection guard for the fix above: an absolute path that merely looks like it could be
+# this repo's own .githooks, but physically resolves under a different repo entirely, must still
+# be refused, and refused before anything is written.
+r=$(new_repo)
+_other=$(new_repo)
+( cd "$r" && git config core.hooksPath "$_other/.githooks" ) || fixture_die "cannot seed core.hooksPath in $r"
+_hp_before=$(cd "$r" && git config core.hooksPath)
+_out=$(gs "$r" install); _rc=$?
+_hp_after=$(cd "$r" && git config core.hooksPath)
+_expected="[grubstake] core.hooksPath is already '$_hp_before'; move those hooks into .githooks first"
+if [ "$_rc" -eq 0 ]; then
+    fail "install accepted an absolute hooksPath that resolves to a different repo entirely: $_out"
+elif [ "$_hp_after" != "$_hp_before" ]; then
+    fail "install changed core.hooksPath despite refusing (was '$_hp_before', now '$_hp_after'): $_out"
+elif [ -d "$r/.githooks" ]; then
+    fail "install wrote .githooks before refusing: $_out"
+elif [ -f "$r/grubstake.tools" ]; then
+    fail "install wrote grubstake.tools before refusing: $_out"
+elif [ "$_out" != "$_expected" ]; then
+    fail "did not refuse with the exact expected line: got '$_out'"
+else
+    pass
+fi
+
+it "install refuses an explicitly empty core.hooksPath, and doctor names it rather than reading it as unset"
+# git treats core.hooksPath= as the worktree root, not as unset (git -c core.hooksPath= rev-parse
+# --git-path hooks -> ./) -- --path --get exits 0 with empty output for it, so folding rc 0 into rc 1
+# (unset) would let install silently adopt a value that actually resolves somewhere else entirely.
+r=$(new_repo)
+( cd "$r" && git config core.hooksPath "" ) || fixture_die "cannot seed an empty core.hooksPath in $r"
+# rc 0 with no output is what set-and-empty looks like; a plain string readback cannot tell it apart from unset.
+( cd "$r" && git config --get core.hooksPath ) >/dev/null 2>&1 \
+    || fixture_die "core.hooksPath did not read back as set (empty) in $r"
+_out=$(gs "$r" install); _rc=$?
+_expected="[grubstake] core.hooksPath is already ''; move those hooks into .githooks first"
+if [ "$_rc" -eq 0 ]; then
+    fail "install accepted an explicitly empty core.hooksPath: $_out"
+elif [ -d "$r/.githooks" ]; then
+    fail "install wrote .githooks before refusing an empty core.hooksPath: $_out"
+elif [ "$_out" != "$_expected" ]; then
+    fail "did not refuse the empty core.hooksPath with the exact expected line: got '$_out'"
+else
+    _doc=$(gs "$r" doctor)
+    case "$_doc" in
+        *"hooksPath  (unset)"*) fail "doctor read an explicitly empty core.hooksPath as unset: $_doc" ;;
+        *"not graded, hooksPath is not .githooks"*) pass ;;
+        *) fail "doctor did not grade the empty core.hooksPath as foreign: $_doc" ;;
+    esac
+fi
+
+it "install accepts its own hooks directory spelled with a trailing /. before .githooks exists"
+# resolve_hooks_path only stripped a trailing slash; a trailing /. left dirname resolving to the
+# not-yet-created .githooks itself, which cd -P cannot enter on a fresh repo.
+r=$(new_repo)
+( cd "$r" && git config core.hooksPath "$r/.githooks/." ) || fixture_die "cannot seed core.hooksPath in $r"
+_out=$(gs "$r" install); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "install refused its own hooks directory spelled with a trailing /. (rc $_rc): $_out"
+elif [ ! -x "$r/.githooks/pre-commit" ]; then
+    fail "install reported success but did not install into .githooks: $_out"
+else
+    pass
+fi
+
+it "install dies naming a core.hooksPath it cannot read, rather than exiting on git's raw status"
+# The stderr-only re-read on this branch is itself a fallible git invocation under set -eu; a bare
+# assignment failing here would exit on git's own raw status before the die message it exists to print.
+r=$(new_repo)
+( cd "$r" && git config core.hooksPath "~nosuchuser/hooks" ) || fixture_die "cannot seed core.hooksPath in $r"
+_out=$(gs "$r" install); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "install accepted a core.hooksPath it could not read: $_out"
+elif [ -d "$r/.githooks" ]; then
+    fail "install wrote .githooks before refusing: $_out"
+else
+    case "$_out" in
+        *"cannot read core.hooksPath"*) pass ;;
+        *) fail "install exited without naming the read failure: $_out" ;;
+    esac
+fi
+
+it "install refuses a shared absolute hooksPath from a linked worktree, and doctor reports the same from the main one"
+# core.hooksPath is shared git config, not per-worktree; a relative value resolves against each
+# worktree's own root, but an absolute one is the same literal path everywhere, so an absolute
+# spelling that happens to equal just the linked worktree's own .githooks would silently retarget
+# the main worktree's hooks at it too. Pre-fix both install (from the linked worktree) and doctor
+# (from the main one) refused this; the defect made install here read it as equivalent (#139 follow-up).
+r=$(new_committed_repo)
+_link="$ROOT/linked-abs.$$.$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
+( cd "$r" && git worktree add "$_link" ) >/dev/null 2>&1 || fixture_die "cannot add a linked worktree at $_link"
+cp "$GS" "$_link/grubstake.sh" || fixture_die "cannot copy grubstake.sh into $_link"
+mkdir -p "$_link/.cache" || fixture_die "cannot create $_link/.cache"
+( cd "$r" && git config core.hooksPath "$_link/.githooks" ) || fixture_die "cannot seed core.hooksPath in $r"
+_out=$(gs "$_link" install); _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "install from the linked worktree accepted a shared absolute core.hooksPath: $_out"
+elif [ -e "$_link/.githooks" ]; then
+    fail "install wrote .githooks in the linked worktree before refusing: $_out"
+elif ! printf '%s' "$_out" | grep -qi "linked worktree"; then
+    fail "did not name linked worktrees as the reason: $_out"
+else
+    _doc=$(gs "$r" doctor)
+    case "$_doc" in
+        *"linked worktree"*) pass ;;
+        *) fail "doctor did not report the same linked-worktree reason from the main worktree: $_doc" ;;
+    esac
+fi
+
+it "install accepts the relative .githooks form from a linked worktree, since core.hooksPath resolves per-worktree"
+# The relative spelling is exactly what a linked worktree needs instead of the absolute one refused above.
+r=$(new_committed_repo)
+( cd "$r" && git config core.hooksPath .githooks ) || fixture_die "cannot seed core.hooksPath in $r"
+_link="$ROOT/linked-rel.$$.$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
+( cd "$r" && git worktree add "$_link" ) >/dev/null 2>&1 || fixture_die "cannot add a linked worktree at $_link"
+cp "$GS" "$_link/grubstake.sh" || fixture_die "cannot copy grubstake.sh into $_link"
+mkdir -p "$_link/.cache" || fixture_die "cannot create $_link/.cache"
+_out=$(gs "$_link" install); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "install refused the relative .githooks form in a linked worktree (rc $_rc): $_out"
+elif [ ! -x "$_link/.githooks/pre-commit" ]; then
+    fail "install reported success but did not install into the linked worktree's own .githooks: $_out"
+else
+    pass
+fi
+
+it "install blames the configured hooksPath, not an unrelated dangling .githooks symlink, when both are wrong"
+# resolve_hooks_path is tried against the configured value first; a failure resolving this repo's
+# own .githooks afterward cannot make the two paths equal, but is not evidence of what IS wrong
+# either, so it must not be reported as the reason instead of the real, foreign hooksPath (#139 follow-up).
+r=$(new_repo)
+_elsewhere=$(new_repo)
+ln -s "$r/does-not-exist" "$r/.githooks" || fixture_die "cannot create a dangling symlink at $r/.githooks"
+( cd "$r" && git config core.hooksPath "$_elsewhere/.githooks" ) || fixture_die "cannot seed core.hooksPath in $r"
+_out=$(gs "$r" install); _rc=$?
+_expected="[grubstake] core.hooksPath is already '$_elsewhere/.githooks'; move those hooks into .githooks first"
+if [ "$_rc" -eq 0 ]; then
+    fail "install accepted a foreign hooksPath alongside its own dangling .githooks symlink: $_out"
+elif printf '%s' "$_out" | grep -qi "dangling symlink"; then
+    fail "install blamed its own dangling .githooks symlink instead of the foreign hooksPath: $_out"
+elif [ "$_out" != "$_expected" ]; then
+    fail "did not refuse with the exact expected line: got '$_out'"
+else
+    pass
+fi
+
 # known_hook_hashes/is_known_hook_hash, for the ratchet test below to assert through the real
 # lookup rather than a bare grep across the whole file: a hash filed under the wrong hook's own
 # case arm (the exact "forgot to append it in the right place" failure #58's ratchet exists to
@@ -4191,13 +4383,17 @@ it "two concurrent installs against the same refresh-eligible repo do not race e
 # processes racing to create it land on the same bytes either way once "mv" wins for whichever one
 # gets there first.
 #
-# Two concurrent installs share more than the hook tmp name: both also run the unconditional
-# `git config core.hooksPath .githooks` write at the end of the command, which races on git's own
-# ".git/config.lock" the same way -- one process's write can lose that race and surface git's own
-# raw "error: could not lock config file" instead of anything grubstake ever voices. Either race is
-# the same class of defect (an unguarded shared write two concurrent installs both make), so both
-# are asserted as one contract here -- "two concurrent installs must not corrupt each other or leak
-# a raw tool error" -- with the failure message naming which one actually fired.
+# Two concurrent installs share more than the hook tmp name: both also race on git's own
+# ".git/config.lock" the same way when both reach the `git config core.hooksPath .githooks` write
+# at the end of the command -- one process's write can lose that race and surface git's own raw
+# "error: could not lock config file" instead of anything grubstake ever voices. That write is now
+# skipped once an equivalent hooksPath is already set (#139: install stopped rewriting a value that
+# already resolves to this repo's own .githooks), so each iteration below unsets core.hooksPath
+# first -- otherwise only the first of the five iterations would ever reach the write both racers
+# are pinned at, and the other four would prove nothing. Either race is the same class of defect
+# (an unguarded shared write two concurrent installs both make), so both are asserted as one
+# contract here -- "two concurrent installs must not corrupt each other or leak a raw tool error" --
+# with the failure message naming which one actually fired.
 #
 # A natural race, hoping two full "install" runs happen to reach the same call at the same
 # instant, is what the earlier version of this test relied on -- it caught the git-config race only
@@ -4227,6 +4423,9 @@ _i=0
 _bad=""
 while [ "$_i" -lt "$_iterations" ] && [ -z "$_bad" ]; do
     _i=$((_i + 1))
+    # Unset first: install no longer rewrites an already-equivalent hooksPath (#139), so without
+    # this reset only iteration 1 would ever reach the write both racers are pinned at below.
+    ( cd "$r" && git config --unset core.hooksPath ) >/dev/null 2>&1 || :
     rm -f "$_reached".* "$_go"
     mkdir -p "$r/.githooks"
     cat > "$r/.githooks/post-commit" <<'GST_V0_5_0_POST_COMMIT_RACE'
@@ -5381,6 +5580,77 @@ else
     case "$_out" in
         *"not installed"*|*"DRIFTED"*) fail "doctor graded a hook in a repo it was never asked to install: $_out" ;;
         *) pass ;;
+    esac
+fi
+
+it "doctor names a core.hooksPath it cannot read instead of grading it as unset"
+# ~nosuchuser/hooks fails git's own user-dir expansion (rc 128, not rc 1 for unset) -- doctor's own
+# read discarded every nonzero status, which graded that failure the same as .githooks.
+r=$(new_repo)
+( cd "$r" && git config core.hooksPath "~nosuchuser/hooks" ) || fixture_die "cannot seed core.hooksPath in $r"
+_out=$(gs "$r" doctor); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "doctor exited non-zero rather than reporting the read failure (rc $_rc): $_out"
+else
+    case "$_out" in
+        *"hooksPath  (unset)"*) fail "doctor graded an unreadable core.hooksPath as unset: $_out" ;;
+        *"not installed"*|*"DRIFTED"*) fail "doctor graded hooks despite failing to read core.hooksPath: $_out" ;;
+        *"cannot read core.hooksPath"*) pass ;;
+        *) fail "doctor did not name the read failure: $_out" ;;
+    esac
+fi
+
+it "doctor grades an absolute hooksPath naming its own directory as adopted"
+# Nothing above ran doctor against the absolute spelling from #139; only install's own read was proved.
+r=$(new_repo)
+( cd "$r" && git config core.hooksPath "$r/.githooks" ) || fixture_die "cannot seed core.hooksPath in $r"
+gs "$r" install >/dev/null 2>&1 || fixture_die "cannot install into $r to seed doctor's fixture"
+_out=$(gs "$r" doctor)
+_rel=$(new_repo)
+gs "$_rel" install >/dev/null 2>&1 || fixture_die "cannot install into $_rel to seed the relative-form comparison"
+_relout=$(gs "$_rel" doctor)
+_hooks=$(printf '%s\n' "$_out" | grep -e 'pre-commit' -e 'post-commit' -e 'commit-msg' -e 'not graded')
+_relhooks=$(printf '%s\n' "$_relout" | grep -e 'pre-commit' -e 'post-commit' -e 'commit-msg' -e 'not graded')
+# -n first: under "set -u" alone (no pipefail), "" != "" is false and would pass vacuously if both
+# greps above matched nothing, proving nothing about the absolute spelling at all.
+if [ -z "$_hooks" ]; then
+    fail "doctor produced no per-hook lines to compare at all: absolute='$_hooks' relative='$_relhooks'"
+elif [ "$_hooks" != "$_relhooks" ]; then
+    fail "doctor graded the absolute spelling differently than the relative form: absolute='$_hooks' relative='$_relhooks'"
+else
+    pass
+fi
+
+it "doctor names a dangling .githooks symlink instead of leaving the not-graded line unexplained"
+# resolve_hooks_path's own warn -- its only account of why grading was skipped -- was discarded here.
+r=$(new_repo)
+ln -s "$r/does-not-exist" "$r/.githooks" || fixture_die "cannot create a dangling symlink at $r/.githooks"
+( cd "$r" && git config core.hooksPath .githooks ) || fixture_die "cannot set core.hooksPath in $r"
+_out=$(gs "$r" doctor); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "doctor exited non-zero on a dangling .githooks symlink (rc $_rc): $_out"
+else
+    case "$_out" in
+        *"dangling symlink"*) pass ;;
+        *) fail "doctor did not name why grading a dangling .githooks symlink was skipped: $_out" ;;
+    esac
+fi
+
+it "doctor blames the configured hooksPath, not an unrelated dangling .githooks symlink, when both are wrong"
+# Same ordering fix as install's equivalent test above: the configured value here resolves fine to
+# a real, foreign directory, so the dangling .githooks symlink must not be reported as the reason.
+r=$(new_repo)
+_elsewhere=$(new_repo)
+ln -s "$r/does-not-exist" "$r/.githooks" || fixture_die "cannot create a dangling symlink at $r/.githooks"
+( cd "$r" && git config core.hooksPath "$_elsewhere/.githooks" ) || fixture_die "cannot seed core.hooksPath in $r"
+_out=$(gs "$r" doctor); _rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "doctor exited non-zero on a foreign hooksPath (rc $_rc): $_out"
+else
+    case "$_out" in
+        *"dangling symlink"*) fail "doctor blamed its own dangling .githooks symlink instead of the foreign hooksPath: $_out" ;;
+        *"not graded, hooksPath is not .githooks"*) pass ;;
+        *) fail "doctor did not report the plain not-.githooks refusal: $_out" ;;
     esac
 fi
 

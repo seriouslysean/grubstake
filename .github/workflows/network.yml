@@ -1,15 +1,19 @@
 name: network
 
-# The tier that downloads real artifacts, on release tags, where the bytes a pin names are the
-# thing being proved. It lives in its own workflow rather than behind an `if` in test.yml: a job
-# skipped by a job-level `if` still reports, and its name is posted unexpanded, so every pull
-# request would carry a check called `network (${{ matrix.platform }})` forever.
+# The tier that downloads real artifacts: on release tags, where the bytes a pin names are the
+# thing being proved, and on a pull request touching grubstake.sh, as an early non-required signal
+# since that tier cannot run against a commit that does not exist yet. It lives in its own workflow
+# rather than behind an `if` in test.yml: a job skipped by a job-level `if` still reports, and its
+# name is posted unexpanded, so every pull request would carry a check called
+# `network (${{ matrix.platform }})` forever.
 
 # Dispatchable as well as tag-triggered: on a tag it confirms what was published, which is too late
 # to stop anything. A release runs it against the candidate first, and records the SHA it checked out.
 on:
   push:
     tags: ['v*']
+  pull_request:
+    paths: [grubstake.sh]
   workflow_dispatch:
 
 permissions:
@@ -17,19 +21,25 @@ permissions:
 
 jobs:
   network:
-    name: network (${{ matrix.platform }})
+    # Named apart from the tag-triggered run: a pull request's head commit is not what gets
+    # tagged, so nothing should ever mark this preview name a required check in its place.
+    name: ${{ github.event_name == 'pull_request' && format('network preview ({0})', matrix.platform) || format('network ({0})', matrix.platform) }}
     runs-on: ${{ matrix.runner }}
+    # Downloads plus the offline suite; 30 covers a slow release-tier fetch without masking a hang.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
           # Each platform verifies its own pinned hash, so both are downloaded before a release.
           - platform: linux
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - platform: macos
-            runner: macos-latest
+            runner: macos-26
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # This tier runs the offline tests too, including the one that needs a dash to parse with.
       - name: install dash

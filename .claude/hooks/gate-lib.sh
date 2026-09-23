@@ -16,21 +16,44 @@ sha_any() {
     fi
 }
 
-# The turn's footprint: uncommitted paths plus any commits the upstream has not seen.
+# A hook's cwd is whatever launched it, not necessarily the project; $CLAUDE_PROJECT_DIR is the one root Claude Code guarantees.
+git_run() {
+    if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
+        git -C "$CLAUDE_PROJECT_DIR" "$@"
+    else
+        git "$@"
+    fi
+}
+
+# A branch with no upstream (a new branch, a detached HEAD) has no @{u}; fall back to where it forked from origin/HEAD so a committed shell change is still seen.
+turn_base() {
+    if git_run rev-parse -q --verify '@{u}' >/dev/null 2>&1; then
+        printf '@{u}\n'
+        return
+    fi
+    git_run merge-base HEAD origin/HEAD 2>/dev/null
+}
+
+# The turn's footprint: uncommitted paths plus any commits the upstream has not seen. -z and
+# --no-renames keep every path raw and single-field, so a later anchor can trust column 0.
 changed_paths() {
-    git status --porcelain 2>/dev/null | cut -c4-
-    git log --format= --name-only '@{u}..HEAD' 2>/dev/null
+    git_run status --porcelain -z --no-renames 2>/dev/null | tr '\0' '\n' | cut -c4-
+    _base=$(turn_base)
+    [ -n "$_base" ] && git_run log --format= --name-only "$_base..HEAD" 2>/dev/null
 }
 
 # Digest the changed state, not just the path list, or an edit made after the antagonist ran
 # would hide under the receipt minted for the state it reviewed.
 changed_digest() {
+    _base=$(turn_base)
     {
-        git status --porcelain 2>/dev/null
-        git diff HEAD 2>/dev/null
-        git log --format=%H '@{u}..HEAD' 2>/dev/null
-        git ls-files --others --exclude-standard 2>/dev/null | while IFS= read -r _f; do
-            [ -f "$_f" ] && sha_any <"$_f"
+        git_run status --porcelain 2>/dev/null
+        git_run diff HEAD 2>/dev/null
+        [ -n "$_base" ] && git_run log --format=%H "$_base..HEAD" 2>/dev/null
+        # ls-files paths are project-relative, not cwd-relative, so a caller elsewhere needs the same root prefixed back on.
+        git_run ls-files --others --exclude-standard 2>/dev/null | while IFS= read -r _f; do
+            _p="${CLAUDE_PROJECT_DIR:+$CLAUDE_PROJECT_DIR/}$_f"
+            [ -f "$_p" ] && sha_any <"$_p"
         done
     } | sha_any
 }

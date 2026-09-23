@@ -13,7 +13,8 @@ set -u
 
 . "$(dirname "$0")/gate-lib.sh"
 
-GITDIR=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+# --absolute-git-dir, not --git-dir: git -C prints the latter relative to the -C target, which is wrong once cwd differs from it.
+GITDIR=$(git_run rev-parse --absolute-git-dir 2>/dev/null) || exit 0
 MARKER="$GITDIR/grubstake-antagonist"
 BLOCKS="$GITDIR/grubstake-antagonist-blocks"
 LOG="$GITDIR/grubstake-antagonist-log"
@@ -46,6 +47,15 @@ fi
 # The orchestrator deduplicates on rule ids, so output without them cannot be merged.
 check() { msg_has "$2" || msg_has "No findings." || block "$1 must return findings carrying its rule ids, or exactly: No findings."; }
 
+# The header must open the field: a name only present mid-prose is a mention, not a completed pass.
+# grep -F sidesteps escaping the literal backslash-n a JSON newline is encoded as.
+first_line_header() {
+    printf '%s' "$INPUT" | grep -qF "\"last_assistant_message\":\"Antagonist: $1.\\n" \
+        || printf '%s' "$INPUT" | grep -qF "\"last_assistant_message\":\"Antagonist: $1.\""
+}
+
+agent_type=$(printf '%s' "$INPUT" | json_field agent_type)
+
 digest=$(changed_digest)
 
 # Read once: a writer interleaving between separate reads of digest and kinds could relabel a stale kind under the current digest.
@@ -66,12 +76,12 @@ add_kind() {
 }
 
 mint=0
-if msg_has "Antagonist: gst-shell-critic."; then
+if [ "$agent_type" = gst-shell-critic ] && first_line_header gst-shell-critic; then
     check gst-shell-critic "critic-"
     mint=1
     add_kind "$(reviewer_kind gst-shell-critic)"
 fi
-if msg_has "Antagonist: gst-leak-auditor."; then
+if [ "$agent_type" = gst-leak-auditor ] && first_line_header gst-leak-auditor; then
     check gst-leak-auditor "leak-"
     mint=1
     add_kind "$(reviewer_kind gst-leak-auditor)"

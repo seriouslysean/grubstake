@@ -3,8 +3,9 @@
 # run over what the turn touched, per AGENTS.md 26.
 #
 # Scope is mechanical rather than semantic, because a script cannot judge what a change meant:
-# touching grubstake.sh or hooks/ needs gst-shell-critic, a gh issue/pr/release write in the
-# transcript needs gst-leak-auditor, and anything else passes untouched.
+# touching grubstake.sh, hooks/, .githooks/, .claude/hooks/, or a test/*.sh file needs
+# gst-shell-critic, a gh issue/pr/release write in the transcript needs gst-leak-auditor, and
+# anything else passes untouched.
 #
 # The receipt is minted only by antagonist-receipt.sh when an antagonist subagent finishes,
 # and lives under .git/ so it needs no gitignore entry. After 3 blocks on the same state the
@@ -14,20 +15,25 @@ set -u
 
 . "$(dirname "$0")/gate-lib.sh"
 
-GITDIR=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+# --absolute-git-dir, not --git-dir: git -C prints the latter relative to the -C target, which is wrong once cwd differs from it.
+GITDIR=$(git_run rev-parse --absolute-git-dir 2>/dev/null) || exit 0
 MARKER="$GITDIR/grubstake-antagonist"
 BLOCKS="$GITDIR/grubstake-antagonist-blocks"
 LOG="$GITDIR/grubstake-antagonist-log"
 LIMIT=3
 
 INPUT=$(cat)
+
+# A block already issued once; re-blocking here would just loop the turn instead of asking again.
+printf '%s' "$INPUT" | grep -qE '"stop_hook_active"[[:space:]]*:[[:space:]]*true' && exit 0
+
 session=$(printf '%s' "$INPUT" | json_field session_id)
 transcript=$(printf '%s' "$INPUT" | json_field transcript_path)
 
 # need_kinds names the receipt kind(s) the marker must carry; a kind missing there is not a satisfied need.
 need=""
 need_kinds=""
-if changed_paths | grep -qE '(^|-> )(grubstake\.sh$|hooks/)'; then
+if changed_paths | grep -qE '^(grubstake\.sh$|hooks/|\.githooks/|test/[^/]*\.sh$|\.claude/hooks/)'; then
     need="gst-shell-critic over the shell changes"
     need_kinds="$(reviewer_kind gst-shell-critic)"
 fi
@@ -76,8 +82,10 @@ b_count=0
 [ -f "$BLOCKS" ] && read -r b_session b_digest b_count <"$BLOCKS" 2>/dev/null
 case "$b_count" in '' | *[!0-9]*) b_count=0 ;; esac
 count=1
-[ "$b_session" = "$session" ] && [ "$b_digest" = "$digest" ] && count=$((b_count + 1))
-printf '%s %s %s\n' "$session" "$digest" "$count" >"$BLOCKS"
+# An empty session written bare would leave a leading space read splits away, shifting every field left.
+key="${session:--}"
+[ "$b_session" = "$key" ] && [ "$b_digest" = "$digest" ] && count=$((b_count + 1))
+printf '%s %s %s\n' "$key" "$digest" "$count" >"$BLOCKS"
 
 if [ "$count" -gt "$LIMIT" ]; then
     printf 'gate-override %s %s %s after-%s-blocks\n' "$(date +%s)" "$session" "$digest" "$LIMIT" >>"$LOG"

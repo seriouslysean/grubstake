@@ -21,7 +21,11 @@ export GRUBSTAKE_OFFLINE=1
 # docs-only commit, and a repo with no pins has nothing to verify. Verified before the gates run,
 # so a gate reaching for a pinned tool refuses rather than downloading mid-commit.
 STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
-[ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
+CHECKED=0
+if [ -n "$STAGED_SWIFT" ]; then
+    "$GRUBSTAKE" check >/dev/null
+    CHECKED=1
+fi
 
 # Gates before the lint below, in glob order. A gate that formats staged Swift and re-stages it is
 # the whole reason this extension point exists, and linting first refuses exactly what such a gate
@@ -47,9 +51,10 @@ for gate in "$ROOT"/.githooks/pre-commit.d/*; do
 done
 
 # Re-read the index. A gate may have re-staged what it fixed, and may have staged Swift where none
-# was staged at all, which the read above would leave linted by nobody.
+# was staged at all, which the read above would leave linted by nobody. Run again only if the first
+# read skipped it: a gate that changed nothing must not cost a Swift commit two checks for one.
 STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
-[ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
+[ "$CHECKED" -eq 0 ] && [ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
 
 # Only lint if the repo pinned swiftlint. A repo that does not use it should not be blocked by
 # the shared spine; its own gates in pre-commit.d decide. Asked of the script rather than grepped

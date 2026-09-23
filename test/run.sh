@@ -5720,6 +5720,58 @@ r=$(new_hook_repo)
 stage "$r" NOTES.md "notes"
 assert_dangling_gate_refuses "$r" pre-commit.d 10-gate hook_commit "$r"
 
+it "check runs once for a Swift commit, not twice"
+# The spine re-read the staged Swift list after gates ran and called check again unconditionally,
+# even when the first read had already found Swift staged and already run it. A counting shim
+# proves the second call only fires when the first one was skipped.
+r=$(new_hook_repo)
+mv "$r/grubstake.sh" "$r/grubstake-real.sh" || fixture_die "cannot move grubstake.sh aside in $r"
+cat >"$r/grubstake.sh" <<WRAP || fixture_die "cannot write the counting check wrapper in $r"
+#!/bin/sh
+case "\$1" in
+    check)
+        n=\$(cat "$r/check.runs" 2>/dev/null || echo 0)
+        n=\$((n + 1))
+        echo "\$n" > "$r/check.runs"
+        exit 0
+        ;;
+    *) exec "$r/grubstake-real.sh" "\$@" ;;
+esac
+WRAP
+chmod +x "$r/grubstake.sh" || fixture_die "cannot make the counting check wrapper executable in $r"
+stage "$r" A.swift "struct A {}"
+hook_commit "$r" >/dev/null 2>&1
+_n=$(cat "$r/check.runs" 2>/dev/null || echo 0)
+[ "$_n" = 1 ] && pass || fail "check ran $_n time(s) for one staged Swift file, want 1"
+
+it "check still runs once when a gate is the one that stages Swift"
+# The other leg: deleting the second check call outright (rather than making it conditional) would
+# also read as 1 above but leaves this case at 0, which is wrong -- the first read found no Swift,
+# so check never ran, and the gate's own new Swift file needs it to run exactly once, not zero.
+r=$(new_hook_repo)
+mv "$r/grubstake.sh" "$r/grubstake-real.sh" || fixture_die "cannot move grubstake.sh aside in $r"
+cat >"$r/grubstake.sh" <<WRAP || fixture_die "cannot write the counting check wrapper in $r"
+#!/bin/sh
+case "\$1" in
+    check)
+        n=\$(cat "$r/check.runs" 2>/dev/null || echo 0)
+        n=\$((n + 1))
+        echo "\$n" > "$r/check.runs"
+        exit 0
+        ;;
+    *) exec "$r/grubstake-real.sh" "\$@" ;;
+esac
+WRAP
+chmod +x "$r/grubstake.sh" || fixture_die "cannot make the counting check wrapper executable in $r"
+gate_script "$r" 10-generate <<'GATE'
+printf 'let g = 1\n' > Generated.swift || exit 1
+git add -- Generated.swift || exit 1
+GATE
+stage "$r" NOTES.md "notes"
+hook_commit "$r" >/dev/null 2>&1
+_n=$(cat "$r/check.runs" 2>/dev/null || echo 0)
+[ "$_n" = 1 ] && pass || fail "check ran $_n time(s) when a gate staged Swift where none was staged first, want 1"
+
 it "a gate that fixes staged Swift runs before the lint that would have refused it"
 # #126: the spine linted first and dispatched the repo's gates afterwards, so the gate an adopter
 # writes to format staged Swift and re-stage it never ran on the commits that needed it most. The

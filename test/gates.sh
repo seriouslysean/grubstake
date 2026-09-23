@@ -18,11 +18,11 @@ trap 'rm -rf "$ROOT"; exit 2' HUP INT TERM
 
 R="$ROOT/repo"
 mkdir -p "$R/.claude/hooks"
-( cd "$R" && git init -q . )
+(cd "$R" && git init -q .)
 cp "$SRC/grubstake.sh" "$R/"
 cp "$SRC/.claude/hooks/gate-lib.sh" "$SRC/.claude/hooks/antagonist-gate.sh" \
-   "$SRC/.claude/hooks/antagonist-receipt.sh" "$R/.claude/hooks/"
-( cd "$R" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init )
+    "$SRC/.claude/hooks/antagonist-receipt.sh" "$R/.claude/hooks/"
+(cd "$R" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init)
 
 GATE="$R/.claude/hooks/antagonist-gate.sh"
 RCPT="$R/.claude/hooks/antagonist-receipt.sh"
@@ -34,26 +34,33 @@ PASS=0
 FAIL=0
 CURRENT=""
 
-it()   { CURRENT="$1"; }
-pass() { PASS=$((PASS + 1)); printf '  ok    %s\n' "$CURRENT"; }
-fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n         %s\n' "$CURRENT" "$1"; }
+it() { CURRENT="$1"; }
+pass() {
+    PASS=$((PASS + 1))
+    printf '  ok    %s\n' "$CURRENT"
+}
+fail() {
+    FAIL=$((FAIL + 1))
+    printf '  FAIL  %s\n         %s\n' "$CURRENT" "$1"
+}
 
 # Feed the Stop hook the payload Claude Code sends it; the transcript path is the only variable.
 gate() {
     printf '{"session_id":"s1","transcript_path":"%s","hook_event_name":"Stop"}' "${1:-/nonexistent}" \
-        | ( cd "$R" && "$GATE" )
+        | (cd "$R" && "$GATE")
 }
 receipt() {
     printf '{"session_id":"s1","hook_event_name":"SubagentStop","last_assistant_message":"%s"}' "$1" \
-        | ( cd "$R" && "$RCPT" )
+        | (cd "$R" && "$RCPT")
 }
 
 it "an out-of-scope turn passes untouched"
-out=$(gate); rc=$?
+out=$(gate)
+rc=$?
 if [ "$rc" -eq 0 ] && [ -z "$out" ]; then pass; else fail "rc=$rc out=$out"; fi
 
 it "a shell change blocks until an antagonist has run"
-echo "# poke" >> "$R/grubstake.sh"
+echo "# poke" >>"$R/grubstake.sh"
 out=$(gate)
 case "$out" in
     *'"decision":"block"'*gst-shell-critic*) pass ;;
@@ -65,9 +72,13 @@ it "the fourth block on the same state passes and records the override"
 # leaves behind, so inserting or reordering a test here cannot silently miscount to a wrong total,
 # or pass because an earlier test already wrote a gate-override line this one never earned.
 rm -f "$BLOCKS" "$LOG"
-gate >/dev/null; gate >/dev/null; gate >/dev/null
-out=$(gate); rc=$?
-if [ "$rc" -eq 0 ] && [ -z "$out" ] && grep -q '^gate-override' "$LOG"; then pass
+gate >/dev/null
+gate >/dev/null
+gate >/dev/null
+out=$(gate)
+rc=$?
+if [ "$rc" -eq 0 ] && [ -z "$out" ] && grep -q '^gate-override' "$LOG"; then
+    pass
 else fail "rc=$rc out=$out"; fi
 
 it "a completed antagonist pass mints the receipt"
@@ -75,15 +86,17 @@ rm -f "$MARKER" "$BLOCKS"
 receipt 'Antagonist: gst-shell-critic.\n\nNo findings.' >/dev/null
 # pass and skip are not equivalent: skip bypasses the gate's session check, so a genuine mint
 # mislabeled skip is strictly more permissive than a correct pass and must not read as ok here.
-if [ -f "$MARKER" ] && [ "$(sed -n 1p "$MARKER")" = pass ]; then pass
+if [ -f "$MARKER" ] && [ "$(sed -n 1p "$MARKER")" = pass ]; then
+    pass
 else fail "marker missing or not labeled pass: $(cat "$MARKER" 2>/dev/null)"; fi
 
 it "the gate passes on a fresh matching receipt"
-out=$(gate); rc=$?
+out=$(gate)
+rc=$?
 if [ "$rc" -eq 0 ] && [ -z "$out" ]; then pass; else fail "rc=$rc out=$out"; fi
 
 it "a stale receipt does not cover edits made after the pass"
-echo "# poke2" >> "$R/grubstake.sh"
+echo "# poke2" >>"$R/grubstake.sh"
 out=$(gate)
 case "$out" in
     *'"decision":"block"'*) pass ;;
@@ -102,22 +115,25 @@ rm -f "$MARKER"
 out=$(receipt 'Antagonist: gst-shell-critic.\nLooks good to me!')
 case "$out" in
     *'"decision":"block"'*)
-        if [ ! -f "$MARKER" ]; then pass; else fail "a receipt was minted"; fi ;;
+        if [ ! -f "$MARKER" ]; then pass; else fail "a receipt was minted"; fi
+        ;;
     *) fail "got: $out" ;;
 esac
 
 it "an unavailable antagonist records an advisory skip rather than passing silently"
 rm -f "$BLOCKS"
-( cd "$R" && "$RCPT" --skip "none available" ) >/dev/null
-out=$(gate); rc=$?
-if [ "$rc" -eq 0 ] && [ -z "$out" ] && grep -q '^advisory-skip' "$LOG"; then pass
+(cd "$R" && "$RCPT" --skip "none available") >/dev/null
+out=$(gate)
+rc=$?
+if [ "$rc" -eq 0 ] && [ -z "$out" ] && grep -q '^advisory-skip' "$LOG"; then
+    pass
 else fail "rc=$rc out=$out"; fi
 
 it "publishing an issue demands the leak auditor"
-( cd "$R" && git checkout -q grubstake.sh )
+(cd "$R" && git checkout -q grubstake.sh)
 rm -f "$MARKER" "$BLOCKS"
 T="$ROOT/transcript.jsonl"
-printf '{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"gh issue create"}}]}}\n' > "$T"
+printf '{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"gh issue create"}}]}}\n' >"$T"
 out=$(gate "$T")
 case "$out" in
     *'"decision":"block"'*gst-leak-auditor*) pass ;;
@@ -136,12 +152,13 @@ esac
 
 it "shell-critic and leak-auditor receipts on the same state together satisfy both requirements"
 rm -f "$MARKER" "$BLOCKS"
-echo "# poke3" >> "$R/grubstake.sh"
+echo "# poke3" >>"$R/grubstake.sh"
 out1=$(gate "$T")
 receipt 'Antagonist: gst-shell-critic.\n\nNo findings.' >/dev/null
 out2=$(gate "$T")
 receipt 'Antagonist: gst-leak-auditor.\n\nNo findings.' >/dev/null
-out3=$(gate "$T"); rc3=$?
+out3=$(gate "$T")
+rc3=$?
 if printf '%s' "$out1" | grep -q '"decision":"block"' \
     && printf '%s' "$out2" | grep -q '"decision":"block"' \
     && [ "$rc3" -eq 0 ] && [ -z "$out3" ]; then

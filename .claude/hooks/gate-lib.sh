@@ -7,9 +7,12 @@ json_field() { sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' 
 
 # Mirror grubstake.sh's own fallback chain; cksum is POSIX, and this digest is identity, not security.
 sha_any() {
-    if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -d' ' -f1
-    elif command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1
-    else cksum | tr ' \t' '--'
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | cut -d' ' -f1
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | cut -d' ' -f1
+    else
+        cksum | tr ' \t' '--'
     fi
 }
 
@@ -27,7 +30,7 @@ changed_digest() {
         git diff HEAD 2>/dev/null
         git log --format=%H '@{u}..HEAD' 2>/dev/null
         git ls-files --others --exclude-standard 2>/dev/null | while IFS= read -r _f; do
-            [ -f "$_f" ] && sha_any < "$_f"
+            [ -f "$_f" ] && sha_any <"$_f"
         done
     } | sha_any
 }

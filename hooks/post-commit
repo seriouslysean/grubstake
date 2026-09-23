@@ -10,7 +10,7 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 GRUBSTAKE="$ROOT/grubstake.sh"
 [ -x "$GRUBSTAKE" ] || exit 0
 
-CACHE="$(git rev-parse --git-dir)/grubstake-latest"   # inside .git, so it needs no gitignore entry
+CACHE="$(git rev-parse --git-dir)/grubstake-latest" # inside .git, so it needs no gitignore entry
 TTL=86400
 
 CURRENT="$("$GRUBSTAKE" version 2>/dev/null)" || exit 0
@@ -18,7 +18,7 @@ CURRENT="$("$GRUBSTAKE" version 2>/dev/null)" || exit 0
 now=$(date +%s)
 stamp=0
 [ -f "$CACHE" ] && stamp=$(sed -n 1p "$CACHE" 2>/dev/null || echo 0)
-case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
+case "$stamp" in '' | *[!0-9]*) stamp=0 ;; esac
 
 if [ $((now - stamp)) -gt "$TTL" ]; then
     # Backgrounded and detached: a slow or unreachable network must not extend a commit.
@@ -34,7 +34,7 @@ if [ $((now - stamp)) -gt "$TTL" ]; then
         # this lookup again on the very next commit, which is the network back on the commit path.
         # Renamed into place, because the read below runs while this is still in flight.
         tmp="$CACHE.$$.tmp"
-        printf '%s\n%s\n' "$now" "$latest" > "$tmp" && mv -f "$tmp" "$CACHE" || rm -f "$tmp"
+        printf '%s\n%s\n' "$now" "$latest" >"$tmp" && mv -f "$tmp" "$CACHE" || rm -f "$tmp"
     ) >/dev/null 2>&1 &
 fi
 

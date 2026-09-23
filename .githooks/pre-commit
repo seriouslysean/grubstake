@@ -26,11 +26,20 @@ STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
 # nothing below should spend a lint pass on an index a gate has already turned down.
 for gate in "$ROOT"/.githooks/pre-commit.d/*; do
     # A dangling symlink is neither -e nor an unmatched glob, and treating it as either is the silent skip rule 16 forbids.
-    [ -L "$gate" ] && [ ! -e "$gate" ] && { echo "[pre-commit] gate is a dangling symlink: $gate" >&2; exit 1; }
+    [ -L "$gate" ] && [ ! -e "$gate" ] && {
+        echo "[pre-commit] gate is a dangling symlink: $gate" >&2
+        exit 1
+    }
     [ -e "$gate" ] || continue
     # A gate that lost its exec bit must not look like one that passed.
-    [ -x "$gate" ] || { echo "[pre-commit] gate not executable: $gate" >&2; exit 1; }
-    "$gate" || { echo "[pre-commit] gate failed: $(basename "$gate")" >&2; exit 1; }
+    [ -x "$gate" ] || {
+        echo "[pre-commit] gate not executable: $gate" >&2
+        exit 1
+    }
+    "$gate" || {
+        echo "[pre-commit] gate failed: $(basename "$gate")" >&2
+        exit 1
+    }
 done
 
 # Re-read the index. A gate may have re-staged what it fixed, and may have staged Swift where none

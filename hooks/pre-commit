@@ -13,9 +13,13 @@ GRUBSTAKE="$ROOT/grubstake.sh"
     exit 1
 }
 
+# Exported for the whole spine, gates included: a gate reaching for any pinned tool must refuse a
+# cold cache rather than download mid-commit (AGENTS rule 17), and only this scope covers gates too.
+export GRUBSTAKE_OFFLINE=1
+
 # Only verify tools when something this spine gates is staged. A cold cache should not refuse a
 # docs-only commit, and a repo with no pins has nothing to verify. Verified before the gates run,
-# so a gate reaching for a pinned tool finds one rather than downloading mid-commit.
+# so a gate reaching for a pinned tool refuses rather than downloading mid-commit.
 STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
 [ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
 
@@ -50,8 +54,8 @@ STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
 # Only lint if the repo pinned swiftlint. A repo that does not use it should not be blocked by
 # the shared spine; its own gates in pre-commit.d decide. One line per tool, so grep is enough.
 if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.tools" 2>/dev/null; then
-    # GRUBSTAKE_OFFLINE keeps curl off the commit path: a clean racing this check must refuse, not download.
-    SWIFTLINT="$(GRUBSTAKE_OFFLINE=1 "$GRUBSTAKE" path swiftlint)" || exit 1
+    # GRUBSTAKE_OFFLINE (exported above, spine-wide) keeps curl off the commit path here too.
+    SWIFTLINT="$("$GRUBSTAKE" path swiftlint)" || exit 1
     # Verify and refuse rather than format-and-restage: re-adding after a fix folds unrelated
     # hunks into a partial `git add -p` and re-stages a working-tree deletion of a file staged
     # as new. The developer fixes and re-stages; the hook never touches the index.

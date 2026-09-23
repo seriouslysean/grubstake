@@ -5776,6 +5776,33 @@ elif [ "$(commits "$r")" != 2 ]; then
     fail "exited 0 without committing"
 else pass; fi
 
+it "a pre-commit.d gate's own cold-cache path call refuses offline instead of downloading mid-commit"
+# The spine only exported GRUBSTAKE_OFFLINE around its own swiftlint path call; a gate reaching for
+# any other pinned tool inherited nothing, and a docs-only commit never runs check at all, so a
+# gate calling path on a cold cache ran curl on the commit path (AGENTS rule 17). A curl shim that
+# records its own invocation catches a download rather than trusting the refusal message alone.
+r=$(new_hook_repo)
+pins "$r" "periphery 1.0.0 $SHA_A $SHA_A"
+gate_script "$r" 05-cold-cache <<'GATE'
+ROOT="$(git rev-parse --show-toplevel)"
+"$ROOT/grubstake.sh" path periphery >/dev/null
+GATE
+_marker="$r/CURL-RAN"
+_shim="$r/curl-shim"
+mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+printf '#!/bin/sh\n: > "%s"\nexit 1\n' "$_marker" >"$_shim/curl" || fixture_die "cannot write the curl marker shim"
+chmod +x "$_shim/curl" || fixture_die "cannot make the curl marker shim executable"
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r" "$_shim")
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "the commit went through though the pinned tool was never installed: $_out"
+elif [ -f "$_marker" ]; then
+    fail "a pre-commit.d gate's cold-cache path call reached curl on the commit path: $_out"
+else
+    pass
+fi
+
 it "post-commit reports a release newer than the one running"
 r=$(new_hook_repo)
 latest_cache "$r" 99.9.9

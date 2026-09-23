@@ -7240,49 +7240,72 @@ remote_helper_shim() {
 
 # The stamp is now written before the lookup even starts, so wait_for_stamp above returns on that
 # write, before a detached job has had any time to run at all -- checking a marker's absence right
-# after would prove nothing either way. Bounded, not open-ended: the marker either appears quickly
-# or (the passing case) never does.
-wait_up_to() {
-    _wu=0
-    while [ ! -e "$1" ] && [ "$_wu" -lt 3 ]; do
+# after would prove nothing either way. This shim wraps the real git the background subshell calls
+# and marks its own return, so a wait on that marker is a wait for the subshell itself to finish,
+# not a guess at how long that takes.
+lookup_shim() {
+    _ls="$(mktemp -d "$ROOT/lookup-shim.XXXXXX")" || fixture_die "cannot create a scratch dir for the lookup-completion shim"
+    _lsreal="$(command -v git)" || fixture_die "no real git on PATH to wrap"
+    cat >"$_ls/git" <<SHIM
+#!/bin/sh
+case " \$* " in
+    *" ls-remote "*)
+        "$_lsreal" "\$@"
+        _rc=\$?
+        : > "$_ls/finished"
+        exit "\$_rc"
+        ;;
+esac
+exec "$_lsreal" "\$@"
+SHIM
+    chmod +x "$_ls/git" || fixture_die "cannot make the lookup-completion shim executable"
+    echo "$_ls"
+}
+
+# Bounded only as a safety net against a genuinely hung lookup, never as the pass condition:
+# returning 1 here is a fixture failure (nothing to conclude from), not a passing test.
+wait_for_marker() {
+    _wfm=0
+    while [ ! -e "$1" ] && [ "$_wfm" -lt 10 ]; do
         sleep 1
-        _wu=$((_wu + 1))
+        _wfm=$((_wfm + 1))
     done
+    [ -e "$1" ]
 }
 
 it "a plain commit in an adopted repo never reaches the network for the post-commit refresh"
 # F16/#137: asserting only that the stamp's second line came back empty proved nothing answered, which an offline machine also produces unfixed; the shim below proves no dial-out was even attempted.
 r=$(adopted_repo)
 _shim=$(remote_helper_shim)
-(cd "$r" && GIT_EXEC_PATH="$_shim" git commit -q --allow-empty -m 'chore: fixture') >/dev/null 2>&1 \
+_lookup=$(lookup_shim)
+(cd "$r" && PATH="$_lookup:$PATH" GIT_EXEC_PATH="$_shim" git commit -q --allow-empty -m 'chore: fixture') >/dev/null 2>&1 \
     || fixture_die "cannot commit in $r"
 if ! wait_for_stamp "$r" 0; then
     fail "a lookup that answered nothing left no stamp, so the next commit fires it again"
+elif ! wait_for_marker "$_lookup/finished"; then
+    fail "the backgrounded lookup never finished, so this proves nothing about whether it dialed out"
+elif [ -f "$_shim/dialed" ]; then
+    fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
 else
-    wait_up_to "$_shim/dialed"
-    if [ -f "$_shim/dialed" ]; then
-        fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
-    else
-        pass
-    fi
+    pass
 fi
 
 it "a plain commit in a hook-installed repo never reaches the network for the post-commit refresh"
 # new_hook_repo installs the same post-commit hook adopted_repo does; every other test here commits through hook_commit, so only deny_transports (not this test) closes this fixture's own gap.
 r=$(new_hook_repo)
 _shim=$(remote_helper_shim)
+_lookup=$(lookup_shim)
 stage "$r" NOTES.md "notes"
-(cd "$r" && GIT_EXEC_PATH="$_shim" git commit -q -m fixture) >/dev/null 2>&1 \
+(cd "$r" && PATH="$_lookup:$PATH" GIT_EXEC_PATH="$_shim" git commit -q -m fixture) >/dev/null 2>&1 \
     || fixture_die "cannot commit in $r"
 if ! wait_for_stamp "$r" 0; then
     fail "a lookup that answered nothing left no stamp, so the next commit fires it again"
+elif ! wait_for_marker "$_lookup/finished"; then
+    fail "the backgrounded lookup never finished, so this proves nothing about whether it dialed out"
+elif [ -f "$_shim/dialed" ]; then
+    fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
 else
-    wait_up_to "$_shim/dialed"
-    if [ -f "$_shim/dialed" ]; then
-        fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
-    else
-        pass
-    fi
+    pass
 fi
 
 it "a repo holding only what install wrote refuses an agent-session reference in a message"

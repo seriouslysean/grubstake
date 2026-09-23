@@ -3973,10 +3973,14 @@ git_tags_shim() {
     _refs="${_refs:-aaa 0.2.0 bbb 0.10.0 ccc 0.9.9 ddd 1.2.3-beta eee 1.2 fff v1.2.3 ggg abc}"
     cat >"$1/git" <<SHIM
 #!/bin/sh
-if [ "\$1" = "ls-remote" ]; then
-    printf '%s\trefs/tags/v%s\n' $_refs
-    exit 0
-fi
+# "ls-remote" is checked anywhere in argv, not just \$1: post-commit's own pipeline calls it as
+# "git -c http.lowSpeedLimit=... -c http.lowSpeedTime=... ls-remote ...".
+case " \$* " in
+    *" ls-remote "*)
+        printf '%s\trefs/tags/v%s\n' $_refs
+        exit 0
+        ;;
+esac
 exit 1
 SHIM
     chmod +x "$1/git" || fixture_die "cannot make the git shim executable"
@@ -4029,7 +4033,7 @@ it "post-commit's own tag comparison excludes the same malformed shapes, not jus
 r=$(new_repo)
 _shim="$r/git-shim"
 git_tags_shim "$_shim"
-_snippet="$(sed -n '/^        latest=$(git ls-remote/,/head -1)$/p' "$HOOKS/post-commit")"
+_snippet="$(sed -n '/^        latest=$(git -c http.lowSpeedLimit/,/head -1)$/p' "$HOOKS/post-commit")"
 [ -n "$_snippet" ] || fixture_die "extract post-commit's latest= pipeline: nothing matched (reformatted?)"
 printf '%s\n' "$_snippet" | grep -qF "grep -E '^[0-9]+\\.[0-9]+\\.[0-9]+\$'" \
     || fixture_die "extract post-commit's latest= pipeline: the version filter is missing from the extraction (reformatted?)"
@@ -6035,6 +6039,50 @@ else
     esac
 fi
 
+it "two rapid post-commit invocations start only one ls-remote lookup"
+# #135: the stamp was written only once the lookup returned, so two commits made back to back both
+# saw the same stale (or absent) stamp and both started their own lookup. git prepends its own
+# exec-path to a hook's PATH, so a shim aimed at a real `git commit` cannot be trusted to win over
+# it; invoking the hook directly sidesteps that entirely. The shim appends one line per call before
+# sleeping, so two invocations racing a naive read-then-write counter cannot both observe 0 and hide
+# a real double-fire; it prints a real ls-remote answer after waking, which doubles as the signal
+# this test polls for -- proving the answer still lands even though the stamp moved before it did.
+r=$(new_hook_repo)
+_calls="$r/lsremote.calls"
+_shim="$(mktemp -d "$ROOT/sleepy-git-shim.XXXXXX")" || fixture_die "cannot create a scratch dir for the sleepy git shim"
+_realgit="$(command -v git)" || fixture_die "no real git on PATH to wrap"
+cat >"$_shim/git" <<SHIM
+#!/bin/sh
+case "\$*" in
+    *ls-remote*)
+        echo x >> "$_calls"
+        sleep 3
+        printf 'abc123def456\trefs/tags/v99.9.9\n'
+        exit 0
+        ;;
+esac
+exec "$_realgit" "\$@"
+SHIM
+chmod +x "$_shim/git" || fixture_die "cannot make the sleepy git shim executable"
+(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" sh "$r/.githooks/post-commit") >/dev/null 2>&1
+(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" sh "$r/.githooks/post-commit") >/dev/null 2>&1
+_wfa=0
+while :; do
+    [ "$(sed -n 2p "$r/.git/grubstake-latest" 2>/dev/null)" = "99.9.9" ] && break
+    _wfa=$((_wfa + 1))
+    [ "$_wfa" -ge 8 ] && break
+    sleep 1
+done
+_n=$(wc -l <"$_calls" 2>/dev/null || echo 0)
+_n=$(printf '%s' "$_n" | tr -d ' ')
+if [ "$(sed -n 2p "$r/.git/grubstake-latest" 2>/dev/null)" != "99.9.9" ]; then
+    fail "the lookup's own answer never landed in the cache, so this proves nothing"
+elif [ "$_n" != 1 ]; then
+    fail "$_n lookup(s) started for two invocations made back to back, want 1"
+else
+    pass
+fi
+
 it "doctor reports a hook that has drifted from grubstake's copy"
 # ADOPTING says install writes hooks once and leaves them alone, so a fix landing in hooks/ (like
 # #29) never reaches an already-adopted repo through update. doctor is the only place left that can
@@ -7165,6 +7213,18 @@ remote_helper_shim() {
     echo "$_rhs"
 }
 
+# The stamp is now written before the lookup even starts, so wait_for_stamp above returns on that
+# write, before a detached job has had any time to run at all -- checking a marker's absence right
+# after would prove nothing either way. Bounded, not open-ended: the marker either appears quickly
+# or (the passing case) never does.
+wait_up_to() {
+    _wu=0
+    while [ ! -e "$1" ] && [ "$_wu" -lt 3 ]; do
+        sleep 1
+        _wu=$((_wu + 1))
+    done
+}
+
 it "a plain commit in an adopted repo never reaches the network for the post-commit refresh"
 # F16/#137: asserting only that the stamp's second line came back empty proved nothing answered, which an offline machine also produces unfixed; the shim below proves no dial-out was even attempted.
 r=$(adopted_repo)
@@ -7173,10 +7233,13 @@ _shim=$(remote_helper_shim)
     || fixture_die "cannot commit in $r"
 if ! wait_for_stamp "$r" 0; then
     fail "a lookup that answered nothing left no stamp, so the next commit fires it again"
-elif [ -f "$_shim/dialed" ]; then
-    fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
 else
-    pass
+    wait_up_to "$_shim/dialed"
+    if [ -f "$_shim/dialed" ]; then
+        fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
+    else
+        pass
+    fi
 fi
 
 it "a plain commit in a hook-installed repo never reaches the network for the post-commit refresh"
@@ -7188,10 +7251,13 @@ stage "$r" NOTES.md "notes"
     || fixture_die "cannot commit in $r"
 if ! wait_for_stamp "$r" 0; then
     fail "a lookup that answered nothing left no stamp, so the next commit fires it again"
-elif [ -f "$_shim/dialed" ]; then
-    fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
 else
-    pass
+    wait_up_to "$_shim/dialed"
+    if [ -f "$_shim/dialed" ]; then
+        fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
+    else
+        pass
+    fi
 fi
 
 it "a repo holding only what install wrote refuses an agent-session reference in a message"

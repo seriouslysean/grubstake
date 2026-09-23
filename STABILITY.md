@@ -67,8 +67,8 @@ The pre-commit, commit-msg, and post-commit behaviour is a contract, not the hoo
   message file as their argument, and blocks the commit on failure.
 - post-commit reports when a newer grubstake release exists. It only reports, touches nothing
   but its own advisory cache inside `.git`, and never blocks a commit. That cache is stamped
-  whenever the lookup returns, answer or not, so a lookup that fails is not repeated on the next
-  commit.
+  before the lookup starts and again once it returns, answer or not, so a lookup that hangs is
+  never restarted by the next commit and one that fails is not repeated either.
 
 The hook scripts themselves may be rewritten release to release; only this behaviour is promised.
 

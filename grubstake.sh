@@ -840,8 +840,8 @@ GST_EMBED_PRE_COMMIT
 # never blocks, and never fails a commit.
 #
 # post-commit rather than pre-commit on purpose: nothing here should sit in the path that gates a
-# commit. The synchronous cost is one file read; the network refresh is backgrounded and only
-# runs once per TTL, so an offline machine stays silent instead of stalling.
+# commit. The synchronous cost is a file read, and on expiry a small write before the lookup
+# starts; the lookup itself is backgrounded, so an offline machine stays silent instead of stalling.
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 GRUBSTAKE="$ROOT/grubstake.sh"
@@ -858,17 +858,29 @@ stamp=0
 case "$stamp" in '' | *[!0-9]*) stamp=0 ;; esac
 
 if [ $((now - stamp)) -gt "$TTL" ]; then
-    # Backgrounded and detached: a slow or unreachable network must not extend a commit.
+    # Stamped before the lookup starts, not just when it returns: a hung lookup (a dropped
+    # connection, not a refused one) left the TTL expired, so every commit made while it hung
+    # started another (#135). Line 2 (the cached answer) is carried over untouched.
+    _prev_latest=$(sed -n 2p "$CACHE" 2>/dev/null)
+    _stamp_tmp="$CACHE.$$.stamp.tmp"
+    # rm only reaches here on a failed write or failed mv; a successful mv already made $_stamp_tmp disappear.
+    # shellcheck disable=SC2015
+    printf '%s\n%s\n' "$now" "$_prev_latest" >"$_stamp_tmp" && mv -f "$_stamp_tmp" "$CACHE" || rm -f "$_stamp_tmp"
+    # Backgrounded and detached: a slow or unreachable network must not extend a commit. Bounded so
+    # a dead link cannot pile up one hung process per commit made while it hangs, and silenced so a
+    # background prompt (a user's url.insteadOf rewrite to ssh, say) never surfaces at all.
     (
-        latest=$(git ls-remote --tags --refs https://github.com/seriouslysean/grubstake 'v*' 2>/dev/null \
+        GIT_TERMINAL_PROMPT=0
+        GIT_SSH_COMMAND='ssh -o BatchMode=yes'
+        export GIT_TERMINAL_PROMPT GIT_SSH_COMMAND
+        latest=$(git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 \
+            ls-remote --tags --refs https://github.com/seriouslysean/grubstake 'v*' 2>/dev/null \
             | awk '{print $2}' | sed 's|refs/tags/v||' \
             | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
             | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
         # A lookup that answered nothing keeps whatever answer is already cached, so an offline
         # week does not silence an advisory that was correct.
         [ -n "$latest" ] || latest=$(sed -n 2p "$CACHE" 2>/dev/null)
-        # Stamped whether or not it answered: an unwritten stamp leaves the TTL expired and fires
-        # this lookup again on the very next commit, which is the network back on the commit path.
         # Renamed into place, because the read below runs while this is still in flight.
         tmp="$CACHE.$$.tmp"
         # rm only reaches here on a failed write or failed mv; a successful mv already made $tmp disappear.
@@ -1085,7 +1097,7 @@ known_hook_hashes() {
             echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 1f1a0953e8ebe4bba4331251ca7d6a3da9f0c3ead68ff9285056fb94505a773f a1e18ebfe81064a0addf39ee74de7b477fc868d2c810679fdb486d27601a8c4b 7bbd9b3c1678aa93e9556c31a5ba1c660c617a71046429d8d879175900acc9a1 1b3c8ce3cef18d31a3e799a59a231b7260a62d06c78e8c63e02822f4ab0fee1a f5e2035b76358ce6d62907ac8ddf1eb2795bbf64c302a3e0165f036e0a0711f8"
             ;;
         post-commit)
-            echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494 3d5bdb2e6d05d6b4c5e4443f0e77788f71ba0d7e08e3c84935d7594e88af1660 3b8814f783d5bd3b16a61f3f944ff3e1ec783ec3873e3050fcd7c96e4d562029"
+            echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494 3d5bdb2e6d05d6b4c5e4443f0e77788f71ba0d7e08e3c84935d7594e88af1660 3b8814f783d5bd3b16a61f3f944ff3e1ec783ec3873e3050fcd7c96e4d562029 1853474b3b0a7e201e1a9c4d401940d45ed22d61e4537e61a5fd05f7d69c3e2b"
             ;;
         commit-msg)
             echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421 e2b2336f9737cc37cbd9930ac623cea7e997a58551450d684a181b5bc7861e93 131bd0c2591df52a7d99ac7575c413a8b8b787d0a3991da41997aa4bea5df2d6 b9b2182062a44aa0db4fe2b7997f1cb1fa594d6fa74fe231116db48487d02eab"

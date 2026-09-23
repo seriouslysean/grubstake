@@ -78,6 +78,8 @@ sha256_file() {
 
 # Downloads to a temp file in the cache and renames into place only once verified, so a reader
 # never sees a partial or unverified download and a failed one leaves nothing behind to trust.
+# dash does not run an EXIT trap on a caught signal, so HUP/INT/TERM are trapped to clean up and
+# exit themselves; the trap is disarmed once nothing temporary is left to remove.
 fetch_verified() {
     _url="$1"
     _sha="$2"
@@ -85,18 +87,19 @@ fetch_verified() {
     [ -f "$_dest" ] && [ "$(sha256_file "$_dest")" = "$_sha" ] && return 0
     mkdir -p "$(dirname "$_dest")"
     _tmp="$_dest.$$.tmp"
+    trap 'rm -f "$_tmp"' EXIT
+    trap 'rm -f "$_tmp"; exit 1' HUP INT TERM
     curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$_url" -o "$_tmp" || {
         printf 'lint.sh: download failed: %s\n' "$_url" >&2
-        rm -f "$_tmp"
         exit 1
     }
     _got="$(sha256_file "$_tmp")"
     [ "$_got" = "$_sha" ] || {
         printf 'lint.sh: sha256 mismatch for %s: got %s, want %s\n' "$_url" "$_got" "$_sha" >&2
-        rm -f "$_tmp"
         exit 1
     }
     mv -f "$_tmp" "$_dest"
+    trap - EXIT HUP INT TERM
 }
 
 # The member each tool's archive holds; shfmt ships as a bare binary, so it has none.
@@ -105,29 +108,38 @@ extract_member() {
         shellcheck) echo "shellcheck-v$SHELLCHECK_VERSION/shellcheck" ;;
         actionlint) echo "actionlint" ;;
         zizmor) echo "zizmor" ;;
+        *)
+            printf 'lint.sh: no archive member for %s\n' "$1" >&2
+            exit 1
+            ;;
     esac
 }
 
 # Installs one pinned tool for this platform into $CACHE/bin, verified and version-asserted, and
 # prints its path. A cache hit still re-asserts the version, so a stale binary left by an older
-# pin cannot pass as the one this run asked for.
+# pin cannot pass as the one this run asked for. The cache path itself carries the platform and
+# the pinned sha256, so a bumped pin or a cache shared across platforms can never reuse another
+# pin's bytes under the name of this one.
 install_tool() {
     _tool="$1"
     _version="$2"
     _plat="$(platform)"
-    _bin="$CACHE/bin/$_tool-$_version"
+    _spec="$(lint_asset "$_tool" "$_plat")"
+    _url="${_spec%% *}"
+    _sha="${_spec#* }"
+    _sha12="$(printf '%s' "$_sha" | cut -c1-12)"
+    _bin="$CACHE/bin/$_tool-$_version-$_plat-$_sha12"
     if [ ! -x "$_bin" ]; then
-        _spec="$(lint_asset "$_tool" "$_plat")"
-        _url="${_spec%% *}"
-        _sha="${_spec#* }"
         _archive="$CACHE/dl/$(basename "$_url")"
         fetch_verified "$_url" "$_sha" "$_archive"
         mkdir -p "$CACHE/bin"
         _stage="$_bin.$$.tmp"
+        _workdir="$CACHE/extract.$$"
+        trap 'rm -f "$_stage"; rm -rf "$_workdir"' EXIT
+        trap 'rm -f "$_stage"; rm -rf "$_workdir"; exit 1' HUP INT TERM
         if [ "$_tool" = shfmt ]; then
             cp "$_archive" "$_stage"
         else
-            _workdir="$CACHE/extract.$$"
             mkdir -p "$_workdir"
             tar -xf "$_archive" -C "$_workdir"
             mv "$_workdir/$(extract_member "$_tool")" "$_stage"
@@ -135,6 +147,7 @@ install_tool() {
         fi
         chmod +x "$_stage"
         mv -f "$_stage" "$_bin"
+        trap - EXIT HUP INT TERM
     fi
     assert_version "$_tool" "$_bin" "$_version"
     echo "$_bin"
@@ -179,7 +192,9 @@ selftest_fail() {
 # trusted against the real repo.
 selftest() {
     _fx="$(mktemp -d "${TMPDIR:-/tmp}/grubstake-lint-selftest.XXXXXX")"
+    # dash does not run an EXIT trap on a caught signal, so HUP/INT/TERM clean up and exit themselves.
     trap 'rm -rf "$_fx"' EXIT
+    trap 'rm -rf "$_fx"; exit 1' HUP INT TERM
 
     printf '#!/bin/sh\nfoo() {\n    local x=1\n    echo "$x"\n}\nfoo\n' >"$_fx/sc-bad.sh"
     printf '#!/bin/sh\nfoo() {\n    x=1\n    echo "$x"\n}\nfoo\n' >"$_fx/sc-good.sh"
@@ -217,17 +232,17 @@ selftest() {
 
     printf 'on: push\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n' >"$_fx/zz-bad.yml"
     printf 'on: push\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n' >"$_fx/zz-good.yml"
-    if "$ZIZMOR" --offline "$_fx/zz-bad.yml" 2>/dev/null | grep -q '^warning\[artipacked\]'; then
+    if "$ZIZMOR" --offline --color=never "$_fx/zz-bad.yml" 2>/dev/null | grep -q '^warning\[artipacked\]'; then
         selftest_ok "zizmor flags a checkout with no persist-credentials: false"
     else
         selftest_fail "zizmor did not flag the artipacked fixture"
     fi
-    "$ZIZMOR" --offline "$_fx/zz-good.yml" >/dev/null 2>&1 \
+    "$ZIZMOR" --offline --color=never "$_fx/zz-good.yml" >/dev/null 2>&1 \
         && selftest_ok "zizmor accepts the corrected twin" \
         || selftest_fail "zizmor rejected input with no known-bad shape"
 
     rm -rf "$_fx"
-    trap - EXIT
+    trap - EXIT HUP INT TERM
     printf '\nselftest: %s passed, %s failed\n' "$SELFTEST_PASS" "$SELFTEST_FAIL"
     [ "$SELFTEST_FAIL" -eq 0 ] || exit 1
 }
@@ -269,7 +284,7 @@ printf '\nactionlint\n'
 "$ACTIONLINT" -shellcheck="$SHELLCHECK" -pyflakes= || STATUS=1
 
 printf '\nzizmor\n'
-"$ZIZMOR" --offline .github/workflows || STATUS=1
+"$ZIZMOR" --offline --color=never .github/workflows || STATUS=1
 
 if [ "$STATUS" -eq 0 ]; then
     printf '\nlint: clean\n'

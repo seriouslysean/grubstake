@@ -62,9 +62,11 @@ The pre-commit, commit-msg, and post-commit behaviour is a contract, not the hoo
   is refused rather than linted, since the lint reads the working tree and any verdict it returned
   would be about bytes that are not being committed.
 - commit-msg refuses a message carrying an agent-session trailer or a transcript link, in any
-  casing, on every line of the message except the `--verbose` diff below git's scissors line, and
-  comment lines included. It then runs any repo-local gates in `.githooks/commit-msg.d/` with the
-  message file as their argument, and blocks the commit on failure.
+  casing, on every line of the message, comment lines included, with one exception: text below
+  git's own scissors line, and only when an editor actually produced it, since that is the only
+  path on which git itself ever removes that text. It then runs any repo-local gates in
+  `.githooks/commit-msg.d/` with the message file as their argument, and blocks the commit on
+  failure.
 - post-commit reports when a newer grubstake release exists. It only reports, touches nothing
   but its own advisory cache inside `.git`, and never blocks a commit. That cache is stamped
   before the lookup starts and again once it returns, answer or not, so a lookup that hangs is

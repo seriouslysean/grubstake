@@ -1,0 +1,5 @@
+# ShellCheck uses only the nearest .shellcheckrc walking up from each script (man shellcheck, RC
+# FILES); test/ has its own, so nothing here reaches a file under test/, and nothing merges.
+
+# A hook sources gate-lib.sh via its own dirname, which shellcheck cannot resolve across scripts without this.
+source-path=SCRIPTDIR

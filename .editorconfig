@@ -1,0 +1,9 @@
+# shfmt reads these when called with no parser/printer flags; any flag on the command line disables them.
+root = true
+
+[[shell]]
+indent_style = space
+indent_size = 4
+shell_variant = posix
+switch_case_indent = true
+binary_next_line = true

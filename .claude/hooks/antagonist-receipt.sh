@@ -21,15 +21,20 @@ LOG="$GITDIR/grubstake-antagonist-log"
 if [ "${1:-}" = "--skip" ]; then
     reason="${2:-unspecified}"
     tmp="$MARKER.$$.tmp"
-    printf 'skip\n-\n%s\n%s\n' "$(changed_digest)" "$reason" > "$tmp" && mv -f "$tmp" "$MARKER" || rm -f "$tmp"
-    printf 'skip-recorded %s %s\n' "$(date +%s)" "$reason" >> "$LOG"
+    # rm only reaches here on a failed write or failed mv; a successful mv already made $tmp disappear.
+    # shellcheck disable=SC2015
+    printf 'skip\n-\n%s\n%s\n' "$(changed_digest)" "$reason" >"$tmp" && mv -f "$tmp" "$MARKER" || rm -f "$tmp"
+    printf 'skip-recorded %s %s\n' "$(date +%s)" "$reason" >>"$LOG"
     echo "advisory skip recorded for the current change footprint"
     exit 0
 fi
 
 INPUT=$(cat)
 
-block() { printf '{"decision":"block","reason":"%s"}\n' "$1"; exit 0; }
+block() {
+    printf '{"decision":"block","reason":"%s"}\n' "$1"
+    exit 0
+}
 msg_has() { printf '%s' "$INPUT" | grep -qF "$1"; }
 
 # An empty return is not a completed dispatch, whatever the agent was.
@@ -61,15 +66,25 @@ add_kind() {
 }
 
 mint=0
-if msg_has "Antagonist: gst-shell-critic."; then check gst-shell-critic "critic-"; mint=1; add_kind "$(reviewer_kind gst-shell-critic)"; fi
-if msg_has "Antagonist: gst-leak-auditor."; then check gst-leak-auditor "leak-"; mint=1; add_kind "$(reviewer_kind gst-leak-auditor)"; fi
+if msg_has "Antagonist: gst-shell-critic."; then
+    check gst-shell-critic "critic-"
+    mint=1
+    add_kind "$(reviewer_kind gst-shell-critic)"
+fi
+if msg_has "Antagonist: gst-leak-auditor."; then
+    check gst-leak-auditor "leak-"
+    mint=1
+    add_kind "$(reviewer_kind gst-leak-auditor)"
+fi
 if msg_has "Reviewer: gst-shell-reviewer."; then check gst-shell-reviewer "shell-"; fi
 
 if [ "$mint" -eq 1 ]; then
     session=$(printf '%s' "$INPUT" | json_field session_id)
     # Still read-modify-write across two receipts racing the same digest: accepted, since a later receipt unions the kinds and the gate's block-limit override prevents a wedge.
     tmp="$MARKER.$$.tmp"
-    printf 'pass\n%s\n%s\n%s\n' "${session:--}" "$digest" "$kinds" > "$tmp" && mv -f "$tmp" "$MARKER" || rm -f "$tmp"
+    # rm only reaches here on a failed write or failed mv; a successful mv already made $tmp disappear.
+    # shellcheck disable=SC2015
+    printf 'pass\n%s\n%s\n%s\n' "${session:--}" "$digest" "$kinds" >"$tmp" && mv -f "$tmp" "$MARKER" || rm -f "$tmp"
     rm -f "$BLOCKS"
 fi
 exit 0

@@ -12,7 +12,10 @@ set -eu
 ROOT="$(git rev-parse --show-toplevel)"
 
 # A gate handed nothing has not passed, so an unreadable message is refused rather than skipped.
-[ "$#" -eq 1 ] || { echo "[commit-msg] git passed no message file, so nothing was scanned" >&2; exit 1; }
+[ "$#" -eq 1 ] || {
+    echo "[commit-msg] git passed no message file, so nothing was scanned" >&2
+    exit 1
+}
 # git hands this hook a path relative to wherever it ran it, and a gate below may run anywhere.
 case "$1" in /*) MSG="$1" ;; *) MSG="$PWD/$1" ;; esac
 
@@ -39,11 +42,20 @@ fi
 
 for gate in "$ROOT"/.githooks/commit-msg.d/*; do
     # A dangling symlink is neither -e nor an unmatched glob, and treating it as either is the silent skip rule 16 forbids.
-    [ -L "$gate" ] && [ ! -e "$gate" ] && { echo "[commit-msg] gate is a dangling symlink: $gate" >&2; exit 1; }
+    [ -L "$gate" ] && [ ! -e "$gate" ] && {
+        echo "[commit-msg] gate is a dangling symlink: $gate" >&2
+        exit 1
+    }
     [ -e "$gate" ] || continue
     # A gate that lost its exec bit must not look like one that passed.
-    [ -x "$gate" ] || { echo "[commit-msg] gate not executable: $gate" >&2; exit 1; }
-    "$gate" "$MSG" || { echo "[commit-msg] gate failed: $(basename "$gate")" >&2; exit 1; }
+    [ -x "$gate" ] || {
+        echo "[commit-msg] gate not executable: $gate" >&2
+        exit 1
+    }
+    "$gate" "$MSG" || {
+        echo "[commit-msg] gate failed: $(basename "$gate")" >&2
+        exit 1
+    }
 done
 
 exit 0

@@ -16,6 +16,8 @@ jobs:
   test:
     name: test (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
+    # The suite runs ~7 minutes locally; well past that means the run itself is stuck, not slow.
+    timeout-minutes: 30
     strategy:
       # Both platforms report, because "it broke on the other one" is the answer worth having.
       fail-fast: false
@@ -25,12 +27,14 @@ jobs:
         include:
           # /bin/sh is dash here, so run.sh and grubstake.sh both execute under it.
           - platform: linux
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           # /bin/sh is bash here, which is the other shell the script claims to support.
           - platform: macos
-            runner: macos-latest
+            runner: macos-26
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # The suite asserts the script parses under dash; macOS ships none, and without one that
       # assertion fails for a missing interpreter rather than for the thing it guards.

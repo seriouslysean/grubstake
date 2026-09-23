@@ -7,7 +7,7 @@
 set -eu
 
 GRUBSTAKE_VERSION="1.2.1"
-GRUBSTAKE_MIN_VERSION="0.3.0"   # every earlier release has a known blocking defect
+GRUBSTAKE_MIN_VERSION="0.3.0" # every earlier release has a known blocking defect
 # Named so cmd_update can tell an override apart from the default it is comparing against.
 GRUBSTAKE_REPO_DEFAULT="https://github.com/seriouslysean/grubstake"
 GRUBSTAKE_RAW_DEFAULT="https://raw.githubusercontent.com/seriouslysean/grubstake"
@@ -18,9 +18,12 @@ _gst_sentinel_warned=0
 
 # ---------------------------------------------------------------------------- output
 
-log()  { printf '[grubstake] %s\n' "$1"; }
+log() { printf '[grubstake] %s\n' "$1"; }
 warn() { printf '[grubstake] %s\n' "$1" >&2; }
-die()  { printf '[grubstake] %s\n' "$1" >&2; exit 1; }
+die() {
+    printf '[grubstake] %s\n' "$1" >&2
+    exit 1
+}
 
 # ---------------------------------------------------------------------------- quoting
 
@@ -63,37 +66,49 @@ USAGE
 platform() {
     case "$(uname -s)" in
         Darwin) echo darwin ;;
-        Linux)  [ "$(uname -m)" = x86_64 ] || die "unsupported arch: $(uname -m)"
-                echo linux ;;
-        *)      die "unsupported platform: $(uname -s)" ;;
+        Linux)
+            [ "$(uname -m)" = x86_64 ] || die "unsupported arch: $(uname -m)"
+            echo linux
+            ;;
+        *) die "unsupported platform: $(uname -s)" ;;
     esac
 }
 
 cache_root() {
     if [ -n "${GRUBSTAKE_CACHE:-}" ]; then
-        _cr_var=GRUBSTAKE_CACHE; _cr_val="$GRUBSTAKE_CACHE"
+        _cr_var=GRUBSTAKE_CACHE
+        _cr_val="$GRUBSTAKE_CACHE"
         _cr_root="$_cr_val"
     else
         # Checked, not tested directly: a die inside $( ) only kills that subshell, so comparing its
         # empty result against "darwin" would read as false and fall through to a Linux-shaped path.
         _cr_plat="$(platform)" || return 1
         if [ "$_cr_plat" = darwin ]; then
-            _cr_var=HOME; _cr_val="${HOME:-}"
+            _cr_var=HOME
+            _cr_val="${HOME:-}"
             _cr_root="$_cr_val/Library/Caches/grubstake"
         elif [ -n "${XDG_CACHE_HOME:-}" ]; then
-            _cr_var=XDG_CACHE_HOME; _cr_val="$XDG_CACHE_HOME"
+            _cr_var=XDG_CACHE_HOME
+            _cr_val="$XDG_CACHE_HOME"
             _cr_root="$_cr_val/grubstake"
         else
-            _cr_var=HOME; _cr_val="${HOME:-}"
+            _cr_var=HOME
+            _cr_val="${HOME:-}"
             _cr_root="$_cr_val/.cache/grubstake"
         fi
     fi
     # An empty HOME still shapes an absolute path, so the producing value is checked before its shape.
-    [ -n "$_cr_val" ] || { warn "$_cr_var is empty, so the cache root cannot be resolved"; return 1; }
+    [ -n "$_cr_val" ] || {
+        warn "$_cr_var is empty, so the cache root cannot be resolved"
+        return 1
+    }
     # STABILITY.md promises an absolute path, so a relative one is refused here for every command, not per caller.
     case "$_cr_root" in
         /*) : ;;
-        *)  warn "$_cr_var must be an absolute path, got: $_cr_root"; return 1 ;;
+        *)
+            warn "$_cr_var must be an absolute path, got: $_cr_root"
+            return 1
+            ;;
     esac
     echo "$_cr_root"
 }
@@ -118,31 +133,31 @@ repo_root() {
 tool_url() {
     _v="$2"
     case "$1:$3" in
-        swiftlint:darwin)    echo "https://github.com/realm/SwiftLint/releases/download/$_v/portable_swiftlint.zip" ;;
-        swiftlint:linux)     echo "https://github.com/realm/SwiftLint/releases/download/$_v/swiftlint_linux_amd64.zip" ;;
-        swiftformat:darwin)  echo "https://github.com/nicklockwood/SwiftFormat/releases/download/$_v/swiftformat.zip" ;;
-        swiftformat:linux)   echo "https://github.com/nicklockwood/SwiftFormat/releases/download/$_v/swiftformat_linux.zip" ;;
-        xcbeautify:darwin)   echo "https://github.com/cpisciotta/xcbeautify/releases/download/$_v/xcbeautify-$_v-universal-apple-macosx.zip" ;;
-        xcbeautify:linux)    echo "https://github.com/cpisciotta/xcbeautify/releases/download/$_v/xcbeautify-$_v-x86_64-linux-static.tar.xz" ;;
-        periphery:darwin)    echo "https://github.com/peripheryapp/periphery/releases/download/$_v/periphery-$_v.zip" ;;
-        periphery:linux)     echo "" ;;
-        *)                   die "unknown tool: $1" ;;
+        swiftlint:darwin) echo "https://github.com/realm/SwiftLint/releases/download/$_v/portable_swiftlint.zip" ;;
+        swiftlint:linux) echo "https://github.com/realm/SwiftLint/releases/download/$_v/swiftlint_linux_amd64.zip" ;;
+        swiftformat:darwin) echo "https://github.com/nicklockwood/SwiftFormat/releases/download/$_v/swiftformat.zip" ;;
+        swiftformat:linux) echo "https://github.com/nicklockwood/SwiftFormat/releases/download/$_v/swiftformat_linux.zip" ;;
+        xcbeautify:darwin) echo "https://github.com/cpisciotta/xcbeautify/releases/download/$_v/xcbeautify-$_v-universal-apple-macosx.zip" ;;
+        xcbeautify:linux) echo "https://github.com/cpisciotta/xcbeautify/releases/download/$_v/xcbeautify-$_v-x86_64-linux-static.tar.xz" ;;
+        periphery:darwin) echo "https://github.com/peripheryapp/periphery/releases/download/$_v/periphery-$_v.zip" ;;
+        periphery:linux) echo "" ;;
+        *) die "unknown tool: $1" ;;
     esac
 }
 
 # Name of the executable inside the archive, which is not always the tool's name.
 tool_member() {
     case "$1:$2" in
-        swiftlint:linux)    echo "swiftlint-static" ;;
-        swiftformat:linux)  echo "swiftformat_linux" ;;
-        *)                  echo "$1" ;;
+        swiftlint:linux) echo "swiftlint-static" ;;
+        swiftformat:linux) echo "swiftformat_linux" ;;
+        *) echo "$1" ;;
     esac
 }
 
 tool_version_args() {
     case "$1" in
-        swiftlint|periphery) echo "version" ;;
-        *)                   echo "--version" ;;
+        swiftlint | periphery) echo "version" ;;
+        *) echo "--version" ;;
     esac
 }
 
@@ -176,17 +191,20 @@ pin_field() {
     echo "$_line" | awk -v n="$2" '{print $n}'
 }
 
-pin_version() { pin_field "$1" 2 ; }
+pin_version() { pin_field "$1" 2; }
 
 # A "=" in field 3 marks the keyed form (key=sha256; unknown keys ignored, so a later platform is additive); add still only writes positional, forever -- see STABILITY.md.
 pin_sha() {
     _ps_tool="$1"
     _ps_plat="$2"
+    # The [[:space:]] here is a regex bracket expression, not array syntax.
+    # shellcheck disable=SC1087
     _ps_line=$(grep -E "^$_ps_tool[[:space:]]" "$(pins_file)" 2>/dev/null || true)
     [ -n "$_ps_line" ] || return 1
     # Unquoted on purpose to split the line into fields, but that also pathname-expands any field
     # shaped like a glob against cwd -- set -f/+f keeps a "?"-shaped sha from resolving to a decoy file.
     set -f
+    # shellcheck disable=SC2086
     set -- $_ps_line
     set +f
     case "${3:-}" in
@@ -194,7 +212,10 @@ pin_sha() {
             shift 2
             for _ps_kv in "$@"; do
                 case "$_ps_kv" in
-                    "$_ps_plat"=*) printf '%s\n' "${_ps_kv#*=}"; return 0 ;;
+                    "$_ps_plat"=*)
+                        printf '%s\n' "${_ps_kv#*=}"
+                        return 0
+                        ;;
                 esac
             done
             echo -
@@ -202,7 +223,7 @@ pin_sha() {
         *)
             case "$_ps_plat" in
                 darwin) printf '%s\n' "${3:-}" ;;
-                linux)  printf '%s\n' "${4:-}" ;;
+                linux) printf '%s\n' "${4:-}" ;;
             esac
             ;;
     esac
@@ -223,10 +244,11 @@ validate_pins() {
     _n=0
     while IFS= read -r _l || [ -n "$_l" ]; do
         _n=$((_n + 1))
-        case "$_l" in ''|\#*) continue ;; esac
+        case "$_l" in '' | \#*) continue ;; esac
         case "$_l" in [[:space:]]*) die "grubstake.tools:$_n line must not be indented" ;; esac
         # Same reason as pin_sha's own set -f: an unquoted split pathname-expands a glob-shaped field.
         set -f
+        # shellcheck disable=SC2086
         set -- $_l
         set +f
         is_known_tool "${1:-}" || die "grubstake.tools:$_n unknown tool: ${1:-}"
@@ -253,7 +275,7 @@ validate_pins() {
                 done
                 ;;
         esac
-    done < "$_f"
+    done <"$_f"
     _dupes="$(pinned_tools | LC_ALL=C sort | uniq -d)"
     [ -z "$_dupes" ] || die "grubstake.tools pins a tool more than once: $_dupes"
 }
@@ -262,8 +284,14 @@ validate_pins() {
 
 # Keyed by the pinned archive hash, not the version. The path identifies the bytes, so editing a
 # pin changes the path, which is a cache miss, which reinstalls. Nothing has to detect staleness.
-tool_dir()  { _tdr="$(cache_root)" || return 1; echo "$_tdr/$1/$2"; }   # $2 is the pinned sha256
-tool_bin()  { _tbd="$(tool_dir "$1" "$2")" || return 1; echo "$_tbd/$1"; }
+tool_dir() {
+    _tdr="$(cache_root)" || return 1
+    echo "$_tdr/$1/$2"
+} # $2 is the pinned sha256
+tool_bin() {
+    _tbd="$(tool_dir "$1" "$2")" || return 1
+    echo "$_tbd/$1"
+}
 
 receipt_file() {
     echo "$1/.grubstake-receipt"
@@ -299,7 +327,7 @@ ensure_cache_sentinel() {
         return 2
     fi
     _ecs_tmp="$_ecs_root/.grubstake-cache-root.tmp.$$"
-    printf 'cache-root 1\n' > "$_ecs_tmp" 2>/dev/null && mv "$_ecs_tmp" "$_ecs_file" 2>/dev/null && return 0
+    printf 'cache-root 1\n' >"$_ecs_tmp" 2>/dev/null && mv "$_ecs_tmp" "$_ecs_file" 2>/dev/null && return 0
     rm -f "$_ecs_tmp" 2>/dev/null || true
     return 1
 }
@@ -337,7 +365,7 @@ hashed_or_empty() {
 write_receipt() {
     _wr_tmp="$1/.grubstake-receipt.tmp.$$"
     chmod u+w "$1" 2>/dev/null || true
-    if printf 'receipt 1\nbinary-sha256 %s\nversion %s\n' "$2" "$3" > "$_wr_tmp" 2>/dev/null \
+    if printf 'receipt 1\nbinary-sha256 %s\nversion %s\n' "$2" "$3" >"$_wr_tmp" 2>/dev/null \
         && mv "$_wr_tmp" "$(receipt_file "$1")" 2>/dev/null; then
         chmod -R a-w "$1" 2>/dev/null || true
         return 0
@@ -363,7 +391,8 @@ entry_verified() {
 with_lock() {
     # A nested call would clobber this call's own _lk/_wl_saved globals (no `local` in POSIX sh); no caller nests today, so a re-entry dies loud rather than silently losing a saved trap.
     [ -z "${_wl_active:-}" ] || die "with_lock: called re-entrantly, nesting is not supported"
-    _lk="$1"; shift
+    _lk="$1"
+    shift
     _w=0
     while :; do
         # The cause comes from mkdir's own words, not a second [ -d ] test taken afterwards: that
@@ -404,7 +433,7 @@ with_lock() {
         return 1
     }
     # A redirect failure here is fatal to the whole process under dash (a special builtin's own redirection error is unconditionally fatal there), not something an if around it can catch.
-    trap > "$_wl_savefile" 2>/dev/null
+    trap >"$_wl_savefile" 2>/dev/null
     # A swallowed read failure here would read as "caller had no trap" and restore nothing.
     if ! _wl_saved="$(cat "$_wl_savefile" 2>/dev/null)"; then
         warn "$_lk: cannot read back the caller's trap state, refusing to hold this lock unsafely"
@@ -451,12 +480,21 @@ publish_dir() {
             rm -rf "$2"
             # rm -rf can no-op on an immutable file, and a die here would exit past with_lock's
             # rmdir and leak the lock, so both failures warn and return for the caller to fail on.
-            [ ! -e "$2" ] || { warn "$3: cannot clear partial $2 (remove it by hand and retry)"; return 1; }
-            mv "$1" "$2" || { warn "$3: cannot publish into $2"; return 1; }
+            [ ! -e "$2" ] || {
+                warn "$3: cannot clear partial $2 (remove it by hand and retry)"
+                return 1
+            }
+            mv "$1" "$2" || {
+                warn "$3: cannot publish into $2"
+                return 1
+            }
             chmod -R a-w "$2" 2>/dev/null || true
         fi
     else
-        mv "$1" "$2" || { warn "$3: cannot publish into $2"; return 1; }
+        mv "$1" "$2" || {
+            warn "$3: cannot publish into $2"
+            return 1
+        }
         chmod -R a-w "$2" 2>/dev/null || true
     fi
 }
@@ -571,7 +609,7 @@ install_tool() {
     mkdir -p "$_extract" || die "$_tool $_ver: could not create extraction directory"
     case "$_url" in
         *.tar.xz) tar -xJf "$_archive" -C "$_extract" || die "$_tool $_ver: extraction failed" ;;
-        *)        unzip -oq "$_archive" -d "$_extract" || die "$_tool $_ver: extraction failed" ;;
+        *) unzip -oq "$_archive" -d "$_extract" || die "$_tool $_ver: extraction failed" ;;
     esac
 
     _member="$(tool_member "$_tool" "$_plat")"
@@ -600,7 +638,7 @@ install_tool() {
     # tmp+mv needed here: staging rides one atomic rename into place, so this is never seen half-written.
     _bsha="$(hashed_or_empty "$_staging/$_tool")"
     if [ -n "$_bsha" ]; then
-        printf 'receipt 1\nbinary-sha256 %s\nversion %s\n' "$_bsha" "$_ver" > "$(receipt_file "$_staging")" \
+        printf 'receipt 1\nbinary-sha256 %s\nversion %s\n' "$_bsha" "$_ver" >"$(receipt_file "$_staging")" \
             || die "$_tool $_ver: cannot write the receipt"
     else
         # A hash that failed or came back empty must never be written: publishing receiptless is a
@@ -633,7 +671,8 @@ install_tool() {
 
 reported_version() {
     # A pipeline reports its last command's exit status (tr's), not the tool's; split it out to catch that.
-    _rv="$("$1" $(tool_version_args "$2") 2>/dev/null)" || return 1
+    # tool_version_args always returns exactly one word, so quoting it changes nothing it can hold today.
+    _rv="$("$1" "$(tool_version_args "$2")" 2>/dev/null)" || return 1
     printf '%s\n' "$_rv" | head -1 | sed 's|^[Vv]ersion:[[:space:]]*||' | tr -d '[:space:]'
 }
 
@@ -666,8 +705,8 @@ verify_tool() {
 
 embedded_hook() {
     case "$1" in
-        pre-commit|post-commit|commit-msg) : ;;
-        *)                                 die "unknown hook: $1" ;;
+        pre-commit | post-commit | commit-msg) : ;;
+        *) die "unknown hook: $1" ;;
     esac
     case "$1" in
         pre-commit)
@@ -701,11 +740,20 @@ STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
 # nothing below should spend a lint pass on an index a gate has already turned down.
 for gate in "$ROOT"/.githooks/pre-commit.d/*; do
     # A dangling symlink is neither -e nor an unmatched glob, and treating it as either is the silent skip rule 16 forbids.
-    [ -L "$gate" ] && [ ! -e "$gate" ] && { echo "[pre-commit] gate is a dangling symlink: $gate" >&2; exit 1; }
+    [ -L "$gate" ] && [ ! -e "$gate" ] && {
+        echo "[pre-commit] gate is a dangling symlink: $gate" >&2
+        exit 1
+    }
     [ -e "$gate" ] || continue
     # A gate that lost its exec bit must not look like one that passed.
-    [ -x "$gate" ] || { echo "[pre-commit] gate not executable: $gate" >&2; exit 1; }
-    "$gate" || { echo "[pre-commit] gate failed: $(basename "$gate")" >&2; exit 1; }
+    [ -x "$gate" ] || {
+        echo "[pre-commit] gate not executable: $gate" >&2
+        exit 1
+    }
+    "$gate" || {
+        echo "[pre-commit] gate failed: $(basename "$gate")" >&2
+        exit 1
+    }
 done
 
 # Re-read the index. A gate may have re-staged what it fixed, and may have staged Swift where none
@@ -779,7 +827,7 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 GRUBSTAKE="$ROOT/grubstake.sh"
 [ -x "$GRUBSTAKE" ] || exit 0
 
-CACHE="$(git rev-parse --git-dir)/grubstake-latest"   # inside .git, so it needs no gitignore entry
+CACHE="$(git rev-parse --git-dir)/grubstake-latest" # inside .git, so it needs no gitignore entry
 TTL=86400
 
 CURRENT="$("$GRUBSTAKE" version 2>/dev/null)" || exit 0
@@ -787,7 +835,7 @@ CURRENT="$("$GRUBSTAKE" version 2>/dev/null)" || exit 0
 now=$(date +%s)
 stamp=0
 [ -f "$CACHE" ] && stamp=$(sed -n 1p "$CACHE" 2>/dev/null || echo 0)
-case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
+case "$stamp" in '' | *[!0-9]*) stamp=0 ;; esac
 
 if [ $((now - stamp)) -gt "$TTL" ]; then
     # Backgrounded and detached: a slow or unreachable network must not extend a commit.
@@ -803,7 +851,9 @@ if [ $((now - stamp)) -gt "$TTL" ]; then
         # this lookup again on the very next commit, which is the network back on the commit path.
         # Renamed into place, because the read below runs while this is still in flight.
         tmp="$CACHE.$$.tmp"
-        printf '%s\n%s\n' "$now" "$latest" > "$tmp" && mv -f "$tmp" "$CACHE" || rm -f "$tmp"
+        # rm only reaches here on a failed write or failed mv; a successful mv already made $tmp disappear.
+        # shellcheck disable=SC2015
+        printf '%s\n%s\n' "$now" "$latest" >"$tmp" && mv -f "$tmp" "$CACHE" || rm -f "$tmp"
     ) >/dev/null 2>&1 &
 fi
 
@@ -841,7 +891,10 @@ set -eu
 ROOT="$(git rev-parse --show-toplevel)"
 
 # A gate handed nothing has not passed, so an unreadable message is refused rather than skipped.
-[ "$#" -eq 1 ] || { echo "[commit-msg] git passed no message file, so nothing was scanned" >&2; exit 1; }
+[ "$#" -eq 1 ] || {
+    echo "[commit-msg] git passed no message file, so nothing was scanned" >&2
+    exit 1
+}
 # git hands this hook a path relative to wherever it ran it, and a gate below may run anywhere.
 case "$1" in /*) MSG="$1" ;; *) MSG="$PWD/$1" ;; esac
 
@@ -868,11 +921,20 @@ fi
 
 for gate in "$ROOT"/.githooks/commit-msg.d/*; do
     # A dangling symlink is neither -e nor an unmatched glob, and treating it as either is the silent skip rule 16 forbids.
-    [ -L "$gate" ] && [ ! -e "$gate" ] && { echo "[commit-msg] gate is a dangling symlink: $gate" >&2; exit 1; }
+    [ -L "$gate" ] && [ ! -e "$gate" ] && {
+        echo "[commit-msg] gate is a dangling symlink: $gate" >&2
+        exit 1
+    }
     [ -e "$gate" ] || continue
     # A gate that lost its exec bit must not look like one that passed.
-    [ -x "$gate" ] || { echo "[commit-msg] gate not executable: $gate" >&2; exit 1; }
-    "$gate" "$MSG" || { echo "[commit-msg] gate failed: $(basename "$gate")" >&2; exit 1; }
+    [ -x "$gate" ] || {
+        echo "[commit-msg] gate not executable: $gate" >&2
+        exit 1
+    }
+    "$gate" "$MSG" || {
+        echo "[commit-msg] gate failed: $(basename "$gate")" >&2
+        exit 1
+    }
 done
 
 exit 0
@@ -881,7 +943,7 @@ GST_EMBED_COMMIT_MSG
             ;;
         # A pattern reaching here means the two case lists in this function have drifted: without
         # this arm the case falls through, the pipeline still exits 0, and install writes an empty hook.
-        *)  die "no embedded copy for hook: $1" ;;
+        *) die "no embedded copy for hook: $1" ;;
     esac
 }
 
@@ -890,17 +952,19 @@ resolve_hooks_path() {
     _rhp_root="$1"
     case "$2" in
         /*) _rhp_p="$2" ;;
-        *)  _rhp_p="$_rhp_root/$2" ;;
+        *) _rhp_p="$_rhp_root/$2" ;;
     esac
     # A trailing slash or /. would otherwise reach basename/dirname below as an empty or self-referential final component, resolving against a parent that may not exist yet instead of the real one.
     while :; do
         case "$_rhp_p" in
             */) _rhp_p="${_rhp_p%/}" ;;
             */.) _rhp_p="${_rhp_p%/.}" ;;
-            *)  break ;;
+            *) break ;;
         esac
     done
     if [ -d "$_rhp_p" ]; then
+        # CDPATH= scopes to this one cd; it is not a mistyped assignment.
+        # shellcheck disable=SC1007
         CDPATH= cd -P "$_rhp_p" && pwd -P && return 0
         warn "cannot resolve $_rhp_p"
         return 1
@@ -915,7 +979,12 @@ resolve_hooks_path() {
     fi
     _rhp_base="$(basename "$_rhp_p")"
     _rhp_dir="$(dirname "$_rhp_p")"
-    _rhp_pp="$(CDPATH= cd -P "$_rhp_dir" 2>/dev/null && pwd -P)" || { warn "cannot resolve $_rhp_dir"; return 1; }
+    # CDPATH= scopes to this one cd; it is not a mistyped assignment.
+    # shellcheck disable=SC1007
+    _rhp_pp="$(CDPATH= cd -P "$_rhp_dir" 2>/dev/null && pwd -P)" || {
+        warn "cannot resolve $_rhp_dir"
+        return 1
+    }
     printf '%s/%s\n' "$_rhp_pp" "$_rhp_base"
 }
 
@@ -970,13 +1039,13 @@ hook_has_marker() {
 known_hook_hashes() {
     case "$1" in
         pre-commit)
-            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 1f1a0953e8ebe4bba4331251ca7d6a3da9f0c3ead68ff9285056fb94505a773f"
+            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 1f1a0953e8ebe4bba4331251ca7d6a3da9f0c3ead68ff9285056fb94505a773f a1e18ebfe81064a0addf39ee74de7b477fc868d2c810679fdb486d27601a8c4b"
             ;;
         post-commit)
-            echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494"
+            echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494 3d5bdb2e6d05d6b4c5e4443f0e77788f71ba0d7e08e3c84935d7594e88af1660 3b8814f783d5bd3b16a61f3f944ff3e1ec783ec3873e3050fcd7c96e4d562029"
             ;;
         commit-msg)
-            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421 e2b2336f9737cc37cbd9930ac623cea7e997a58551450d684a181b5bc7861e93"
+            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421 e2b2336f9737cc37cbd9930ac623cea7e997a58551450d684a181b5bc7861e93 131bd0c2591df52a7d99ac7575c413a8b8b787d0a3991da41997aa4bea5df2d6"
             ;;
         *) die "unknown hook: $1" ;;
     esac
@@ -1045,19 +1114,21 @@ add_one() {
     # The fetch above can run for minutes with nothing holding the pins file, so its contents are
     # only known-good once the lock that guards the rewrite below is held.
     validate_pins
-    [ -f "$_pins" ] || printf '# grubstake pins: name version sha256-darwin sha256-linux\n' > "$_pins"
+    [ -f "$_pins" ] || printf '# grubstake pins: name version sha256-darwin sha256-linux\n' >"$_pins"
     # grep -v exits 1 when it selects nothing, the ordinary shape of the first pin in an empty or
     # tool-only file; anything else is a real read failure and must abort before the rename below.
     # A pipeline's own exit status is its last stage's, not grep's, so neither stage can run inside
     # one and still have its own failure seen.
-    if grep -v -E "^$_tool[[:space:]]" "$_pins" 2>/dev/null > "$_tmp/pins-sel"; then _selrc=0; else _selrc=$?; fi
+    # The [[:space:]] here is a regex bracket expression, not array syntax.
+    # shellcheck disable=SC1087
+    if grep -v -E "^$_tool[[:space:]]" "$_pins" 2>/dev/null >"$_tmp/pins-sel"; then _selrc=0; else _selrc=$?; fi
     case "$_selrc" in
-        0|1) : ;;
+        0 | 1) : ;;
         *) die "$_pins: cannot read pins file (grep exit $_selrc), $_tool@$_ver was not recorded" ;;
     esac
-    if grep -v '^$' "$_tmp/pins-sel" > "$_pt"; then _filtrc=0; else _filtrc=$?; fi
+    if grep -v '^$' "$_tmp/pins-sel" >"$_pt"; then _filtrc=0; else _filtrc=$?; fi
     case "$_filtrc" in
-        0|1) : ;;
+        0 | 1) : ;;
         *) die "$_pins: cannot read pins file (grep exit $_filtrc), $_tool@$_ver was not recorded" ;;
     esac
     # Counted, not just read: a rewrite that drops pins without erroring is indistinguishable from
@@ -1065,11 +1136,11 @@ add_one() {
     # pinned_tools uses, so the header comment and a blank line are never mistaken for a pin lost.
     if _before="$(grep -vcE '^[[:space:]]*(#|$)' "$_pins" 2>/dev/null)"; then _bnrc=0; else _bnrc=$?; fi
     case "$_bnrc" in
-        0|1) : ;;
+        0 | 1) : ;;
         *) die "$_pins: cannot read pins file (grep exit $_bnrc), $_tool@$_ver was not recorded" ;;
     esac
     # shellcheck disable=SC2086
-    printf '%s %s%s\n' "$_tool" "$_ver" "$_shas" >> "$_pt"
+    printf '%s %s%s\n' "$_tool" "$_ver" "$_shas" >>"$_pt"
     # sort's own failure here must not let a partial or unchanged $_pt reach the count check below
     # unnoticed, since that check is the one guard standing between a bad write and the rename.
     if LC_ALL=C sort -o "$_pt" "$_pt"; then _srtrc=0; else _srtrc=$?; fi
@@ -1204,8 +1275,10 @@ cmd_doctor() {
         0) : ;;
         1) _hookspath="" ;;
         # Stderr re-read separately rather than merged into the first capture, so a clean value on the success path can never carry git's own error text riding along with it; || true, since this second read failing the same way must still reach the report below rather than exit on git's own raw status.
-        *) _hp_err="$(git -C "$_root" config --path --get core.hooksPath 2>&1 >/dev/null)" || true
-           _hookspath_unreadable=1 ;;
+        *)
+            _hp_err="$(git -C "$_root" config --path --get core.hooksPath 2>&1 >/dev/null)" || true
+            _hookspath_unreadable=1
+            ;;
     esac
     if [ "${_hookspath_unreadable:-0}" = 1 ]; then
         printf 'hooksPath  cannot read core.hooksPath: %s\n' "$_hp_err"
@@ -1349,7 +1422,7 @@ clean_trash_teardown() {
 cmd_clean() {
     _root="$(cache_root)" || die "cannot determine the cache root"
     case "$_root" in
-        /|//|/.|/..) die "refusing to remove cache root: '$_root'" ;;
+        / | // | /. | /..) die "refusing to remove cache root: '$_root'" ;;
     esac
     # rm -rf on a symlink unlinks the link and leaves its target untouched while still reporting success.
     [ -L "$_root" ] && die "refusing to remove cache root, it is a symlink: '$_root' -> '$(readlink "$_root")'"
@@ -1450,8 +1523,10 @@ cmd_install() {
         0) : ;;
         1) _existing="" ;;
         # Stderr re-read separately rather than merged into the first capture, so a clean value on the success path can never carry git's own error text riding along with it; || true, since this second read failing the same way must still reach die below rather than exit on git's own raw status.
-        *) _gcerr="$(git -C "$_root" config --path --get core.hooksPath 2>&1 >/dev/null)" || true
-           die "cannot read core.hooksPath: $_gcerr" ;;
+        *)
+            _gcerr="$(git -C "$_root" config --path --get core.hooksPath 2>&1 >/dev/null)" || true
+            die "cannot read core.hooksPath: $_gcerr"
+            ;;
     esac
     if [ "$_gcrc" -eq 0 ]; then
         # Shared with cmd_doctor so neither call site reports whichever of the two resolves happened to fail first (#139 follow-up).
@@ -1465,7 +1540,7 @@ cmd_install() {
         _gh="$(git -C "$_root" rev-parse --git-path hooks)"
         case "$_gh" in
             /*) : ;;
-            *)  _gh="$_root/$_gh" ;;
+            *) _gh="$_root/$_gh" ;;
         esac
         # An unreadable directory leaves the glob below literal and the whole gate silently skipped.
         if [ -d "$_gh" ] && [ ! -r "$_gh" ]; then
@@ -1489,7 +1564,7 @@ cmd_install() {
             # mktemp beside $_dest, not in $TMPDIR: mv across filesystems can silently stop being atomic.
             _hooktmp="$(mktemp "$_root/.githooks/.$_hook.XXXXXX")" || die "cannot create a temp file to install $_hook"
             arm_cleanup "rm -f $(sq "$_hooktmp")"
-            embedded_hook "$_hook" > "$_hooktmp"
+            embedded_hook "$_hook" >"$_hooktmp"
             chmod +x "$_hooktmp"
             mv "$_hooktmp" "$_dest"
             disarm_cleanup
@@ -1526,7 +1601,7 @@ cmd_install() {
             # previous copy, even a deliberate revert; removing the marker line is how to opt out.
             _hooktmp="$(mktemp "$_root/.githooks/.$_hook.XXXXXX")" || die "cannot create a temp file to refresh $_hook"
             arm_cleanup "rm -f $(sq "$_hooktmp")"
-            embedded_hook "$_hook" > "$_hooktmp"
+            embedded_hook "$_hook" >"$_hooktmp"
             chmod +x "$_hooktmp"
             mv "$_hooktmp" "$_dest"
             disarm_cleanup
@@ -1567,7 +1642,7 @@ cmd_install() {
     fi
 
     [ -f "$(pins_file)" ] || {
-        printf '# grubstake pins: name version sha256-darwin sha256-linux\n' > "$(pins_file)"
+        printf '# grubstake pins: name version sha256-darwin sha256-linux\n' >"$(pins_file)"
         log "grubstake.tools: created (pin tools with: grubstake add swiftlint@x.y.z)"
     }
 
@@ -1622,7 +1697,10 @@ cmd_update() {
         _pinned="${_pinned#v}"
         echo "$_pinned" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || die "not a release version: $_pinned"
         below_floor "$_pinned" && die "$_pinned is below the supported floor $GRUBSTAKE_MIN_VERSION"
-        [ "$_pinned" = "$GRUBSTAKE_VERSION" ] && { log "already on $GRUBSTAKE_VERSION"; return 0; }
+        [ "$_pinned" = "$GRUBSTAKE_VERSION" ] && {
+            log "already on $GRUBSTAKE_VERSION"
+            return 0
+        }
         log "fetching $_pinned"
         fetch_release "$_pinned" "$_tmp" || die "v$_pinned is not a usable release"
         _target="$_pinned"
@@ -1631,11 +1709,20 @@ cmd_update() {
         [ -n "$_candidates" ] || die "cannot resolve a release tag from $GRUBSTAKE_REPO"
         _target=""
         for _c in $_candidates; do
-            [ "$_c" = "$GRUBSTAKE_VERSION" ] && { log "already on $GRUBSTAKE_VERSION"; return 0; }
+            [ "$_c" = "$GRUBSTAKE_VERSION" ] && {
+                log "already on $GRUBSTAKE_VERSION"
+                return 0
+            }
             # release_tags sorts newest first, so the first candidate that is not newer means none after it are either.
-            version_lt "$GRUBSTAKE_VERSION" "$_c" || { log "no usable release newer than $GRUBSTAKE_VERSION"; return 0; }
+            version_lt "$GRUBSTAKE_VERSION" "$_c" || {
+                log "no usable release newer than $GRUBSTAKE_VERSION"
+                return 0
+            }
             log "fetching $_c"
-            if fetch_release "$_c" "$_tmp"; then _target="$_c"; break; fi
+            if fetch_release "$_c" "$_tmp"; then
+                _target="$_c"
+                break
+            fi
             warn "v$_c is not a usable release, skipping"
         done
         [ -n "$_target" ] || die "no usable release found in $GRUBSTAKE_REPO"
@@ -1664,7 +1751,10 @@ cmd_update() {
 # ---------------------------------------------------------------------------- entry
 
 main() {
-    [ $# -ge 1 ] || { usage; exit 0; }
+    [ $# -ge 1 ] || {
+        usage
+        exit 0
+    }
     _cmd="$1"
     shift
 
@@ -1673,17 +1763,17 @@ main() {
         # script with this verb. Removing it stranded every existing adopter, because it is a
         # protocol only OLD clients speak and so is the one thing that cannot be fixed forward.
         __replace-self) cmd_legacy_replace "$@" ;;
-        install)        cmd_install "$@" ;;
-        update)         cmd_update "$@" ;;
-        ensure)         cmd_ensure "$@" ;;
-        check)          cmd_check "$@" ;;
-        add)            cmd_add "$@" ;;
-        path)           cmd_path "$@" ;;
-        doctor)         cmd_doctor "$@" ;;
-        clean)          cmd_clean "$@" ;;
-        version)        echo "$GRUBSTAKE_VERSION" ;;
-        -h|--help|help) usage ;;
-        *)              die "unknown command: $_cmd (try: grubstake help)" ;;
+        install) cmd_install "$@" ;;
+        update) cmd_update "$@" ;;
+        ensure) cmd_ensure "$@" ;;
+        check) cmd_check "$@" ;;
+        add) cmd_add "$@" ;;
+        path) cmd_path "$@" ;;
+        doctor) cmd_doctor "$@" ;;
+        clean) cmd_clean "$@" ;;
+        version) echo "$GRUBSTAKE_VERSION" ;;
+        -h | --help | help) usage ;;
+        *) die "unknown command: $_cmd (try: grubstake help)" ;;
     esac
 }
 

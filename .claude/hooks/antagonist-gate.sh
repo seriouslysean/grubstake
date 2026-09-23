@@ -43,7 +43,9 @@ digest=$(changed_digest)
 if [ -f "$MARKER" ]; then
     # One read: a receipt renamed into place between separate reads would pair one write's digest with another's kinds.
     marker=$(cat "$MARKER")
-    m_status=$(printf '%s\n' "$marker" | sed -n 1p); m_session=$(printf '%s\n' "$marker" | sed -n 2p); m_digest=$(printf '%s\n' "$marker" | sed -n 3p)
+    m_status=$(printf '%s\n' "$marker" | sed -n 1p)
+    m_session=$(printf '%s\n' "$marker" | sed -n 2p)
+    m_digest=$(printf '%s\n' "$marker" | sed -n 3p)
     if [ "$m_digest" = "$digest" ]; then
         case "$m_status" in
             pass)
@@ -58,23 +60,27 @@ if [ -f "$MARKER" ]; then
                         esac
                     done
                     [ -z "$missing" ] && exit 0
-                fi ;;
+                fi
+                ;;
             skip)
-                printf 'advisory-skip %s %s %s\n' "$(date +%s)" "$digest" "$(printf '%s\n' "$marker" | sed -n 4p)" >> "$LOG"
-                exit 0 ;;
+                printf 'advisory-skip %s %s %s\n' "$(date +%s)" "$digest" "$(printf '%s\n' "$marker" | sed -n 4p)" >>"$LOG"
+                exit 0
+                ;;
         esac
     fi
 fi
 
-b_session=""; b_digest=""; b_count=0
-[ -f "$BLOCKS" ] && read -r b_session b_digest b_count < "$BLOCKS" 2>/dev/null
-case "$b_count" in ''|*[!0-9]*) b_count=0 ;; esac
+b_session=""
+b_digest=""
+b_count=0
+[ -f "$BLOCKS" ] && read -r b_session b_digest b_count <"$BLOCKS" 2>/dev/null
+case "$b_count" in '' | *[!0-9]*) b_count=0 ;; esac
 count=1
 [ "$b_session" = "$session" ] && [ "$b_digest" = "$digest" ] && count=$((b_count + 1))
-printf '%s %s %s\n' "$session" "$digest" "$count" > "$BLOCKS"
+printf '%s %s %s\n' "$session" "$digest" "$count" >"$BLOCKS"
 
 if [ "$count" -gt "$LIMIT" ]; then
-    printf 'gate-override %s %s %s after-%s-blocks\n' "$(date +%s)" "$session" "$digest" "$LIMIT" >> "$LOG"
+    printf 'gate-override %s %s %s after-%s-blocks\n' "$(date +%s)" "$session" "$digest" "$LIMIT" >>"$LOG"
     exit 0
 fi
 

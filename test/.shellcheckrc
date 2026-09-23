@@ -1,0 +1,15 @@
+# Overrides the repo root for every script under test/, since ShellCheck reads only the nearest
+# .shellcheckrc (man shellcheck, RC FILES) -- the root file never applies here, so nothing merges.
+
+# The suite's pass/fail idiom is [ cond ] && pass || fail, where pass cannot itself fail in a way fail should also run for.
+disable=SC2015
+
+# Fixtures write scripts and gate bodies verbatim inside single quotes; a $ inside them must reach disk unexpanded.
+disable=SC2016
+
+# ls -i reads an inode; POSIX find has no -printf, so it is the only spelling that is portable across the BSD and GNU find this suite runs under.
+disable=SC2012
+
+# The suite backgrounds a shim-scoped PATH inside a subshell on purpose, to keep one fixture's git/curl stand-in from leaking into the next.
+disable=SC2030
+disable=SC2031

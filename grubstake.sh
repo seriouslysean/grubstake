@@ -851,6 +851,8 @@ if [ $((now - stamp)) -gt "$TTL" ]; then
         # this lookup again on the very next commit, which is the network back on the commit path.
         # Renamed into place, because the read below runs while this is still in flight.
         tmp="$CACHE.$$.tmp"
+        # rm only reaches here on a failed write or failed mv; a successful mv already made $tmp disappear.
+        # shellcheck disable=SC2015
         printf '%s\n%s\n' "$now" "$latest" >"$tmp" && mv -f "$tmp" "$CACHE" || rm -f "$tmp"
     ) >/dev/null 2>&1 &
 fi
@@ -1040,7 +1042,7 @@ known_hook_hashes() {
             echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 1f1a0953e8ebe4bba4331251ca7d6a3da9f0c3ead68ff9285056fb94505a773f a1e18ebfe81064a0addf39ee74de7b477fc868d2c810679fdb486d27601a8c4b"
             ;;
         post-commit)
-            echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494 3d5bdb2e6d05d6b4c5e4443f0e77788f71ba0d7e08e3c84935d7594e88af1660"
+            echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494 3d5bdb2e6d05d6b4c5e4443f0e77788f71ba0d7e08e3c84935d7594e88af1660 3b8814f783d5bd3b16a61f3f944ff3e1ec783ec3873e3050fcd7c96e4d562029"
             ;;
         commit-msg)
             echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421 e2b2336f9737cc37cbd9930ac623cea7e997a58551450d684a181b5bc7861e93 131bd0c2591df52a7d99ac7575c413a8b8b787d0a3991da41997aa4bea5df2d6"

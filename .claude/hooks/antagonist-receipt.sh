@@ -21,6 +21,8 @@ LOG="$GITDIR/grubstake-antagonist-log"
 if [ "${1:-}" = "--skip" ]; then
     reason="${2:-unspecified}"
     tmp="$MARKER.$$.tmp"
+    # rm only reaches here on a failed write or failed mv; a successful mv already made $tmp disappear.
+    # shellcheck disable=SC2015
     printf 'skip\n-\n%s\n%s\n' "$(changed_digest)" "$reason" >"$tmp" && mv -f "$tmp" "$MARKER" || rm -f "$tmp"
     printf 'skip-recorded %s %s\n' "$(date +%s)" "$reason" >>"$LOG"
     echo "advisory skip recorded for the current change footprint"
@@ -80,6 +82,8 @@ if [ "$mint" -eq 1 ]; then
     session=$(printf '%s' "$INPUT" | json_field session_id)
     # Still read-modify-write across two receipts racing the same digest: accepted, since a later receipt unions the kinds and the gate's block-limit override prevents a wedge.
     tmp="$MARKER.$$.tmp"
+    # rm only reaches here on a failed write or failed mv; a successful mv already made $tmp disappear.
+    # shellcheck disable=SC2015
     printf 'pass\n%s\n%s\n%s\n' "${session:--}" "$digest" "$kinds" >"$tmp" && mv -f "$tmp" "$MARKER" || rm -f "$tmp"
     rm -f "$BLOCKS"
 fi

@@ -34,6 +34,8 @@ if [ $((now - stamp)) -gt "$TTL" ]; then
         # this lookup again on the very next commit, which is the network back on the commit path.
         # Renamed into place, because the read below runs while this is still in flight.
         tmp="$CACHE.$$.tmp"
+        # rm only reaches here on a failed write or failed mv; a successful mv already made $tmp disappear.
+        # shellcheck disable=SC2015
         printf '%s\n%s\n' "$now" "$latest" >"$tmp" && mv -f "$tmp" "$CACHE" || rm -f "$tmp"
     ) >/dev/null 2>&1 &
 fi

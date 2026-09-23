@@ -234,6 +234,11 @@ pinned_tools() {
     grep -vE '^[[:space:]]*(#|$)' "$(pins_file)" | awk '{print $1}'
 }
 
+# Shared by validate_pins and add, so a version one refuses is a version the other never writes.
+valid_version() {
+    printf '%s\n' "$1" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'
+}
+
 # grubstake.tools is hand-editable and merge-conflict-prone. Reject a malformed file loudly
 # instead of letting a duplicate line, a CRLF, or a conflict marker fail somewhere downstream.
 validate_pins() {
@@ -252,7 +257,7 @@ validate_pins() {
         set -- $_l
         set +f
         is_known_tool "${1:-}" || die "grubstake.tools:$_n unknown tool: ${1:-}"
-        printf '%s\n' "${2:-}" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || die "grubstake.tools:$_n bad version: ${2:-}"
+        valid_version "${2:-}" || die "grubstake.tools:$_n bad version: ${2:-}"
         case "${3:-}" in
             *=*)
                 shift 2
@@ -513,10 +518,14 @@ assert_reported_version() {
 install_tool() {
     _tool="$1"
     _ver="$2"
-    # Checked, not assigned: errexit is suspended for this whole body under "install_tool ... || _bad=1",
-    # so a bare assignment would swallow platform()'s own die and fall through to a misleading empty-platform skip.
+    # Checked, not assigned: a bare assignment would swallow platform()'s own die under a guarded caller, where errexit is suspended for this whole body.
     _plat="$(platform)" || return 1
-    _want="$(pin_sha "$_tool" "$_plat" 2>/dev/null || echo '-')"
+    # $3, optional: install against this hash instead of reading grubstake.tools, for a caller whose pin is not written yet.
+    if [ -n "${3:-}" ]; then
+        _want="$3"
+    else
+        _want="$(pin_sha "$_tool" "$_plat" 2>/dev/null || echo '-')"
+    fi
     # Same shape as $_plat above: an unknown tool name reaching here must fail, not read as an empty, not-published URL and be skipped as if nothing were wrong.
     _url="$(tool_url "$_tool" "$_ver" "$_plat")" || return 1
 
@@ -647,7 +656,7 @@ install_tool() {
     fi
 
     mkdir -p "$(dirname "$_dest")"
-    # errexit is suspended for this function's whole body under cmd_ensure's "install_tool ... || _bad=1".
+    # Under a guarded caller, errexit is suspended for this whole body, so this failing without a die does not exit the caller too; unguarded, it would.
     with_lock "$_dest.lock" publish_dir "$_staging" "$_dest" "$_tool" || {
         rm -rf "$_tmp"
         chmod -R u+w "$_staging" 2>/dev/null || true
@@ -1065,12 +1074,16 @@ add_one() {
     _ver="${1#*@}"
     [ "$_tool" != "$1" ] || die "usage: grubstake add <tool>@<version>"
     is_known_tool "$_tool" || die "unknown tool: $_tool"
+    # Checked before anything is fetched: an unvalidated value would otherwise reach tool_url and every later reader of a recorded pin.
+    valid_version "$_ver" || die "$_tool@$_ver: bad version (want N.N or N.N.N)"
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     arm_cleanup "rm -rf $(sq "$_tmp")"
 
     # Hash every platform, so a macOS run still pins what Linux CI fetches.
+    _hostplat="$(platform)"
     _shas=""
+    _this_sha="-"
     for _plat in darwin linux; do
         _url="$(tool_url "$_tool" "$_ver" "$_plat")"
         if [ -z "$_url" ]; then
@@ -1079,12 +1092,22 @@ add_one() {
         fi
         log "$_tool $_ver: hashing $_plat artifact"
         curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$_url" -o "$_tmp/a" || die "$_tool $_ver: cannot fetch $_plat artifact"
-        _shas="$_shas $(sha256_file "$_tmp/a")"
+        _h="$(sha256_file "$_tmp/a")"
+        _shas="$_shas $_h"
+        [ "$_plat" != "$_hostplat" ] || _this_sha="$_h"
     done
+    rm -rf "$_tmp"
+    # Disarmed before install_tool arms its own trap, since a trap assignment replaces rather than stacks.
+    disarm_cleanup
+
+    # Installed, and its version asserted, against the hash just computed -- not yet read back from grubstake.tools -- before this spec is ever recorded.
+    install_tool "$_tool" "$_ver" "$_this_sha" || die "$_tool@$_ver: not recorded (install did not verify)"
 
     _pins="$(pins_file)"
     _lock="$_pins.lock"
     _pt="$_pins.$$.tmp"
+    # Empty on purpose: nothing here writes through it, but a hostile TMPDIR still has to reach this section's own trap safely.
+    _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     # mkdir is the portable atomic lock. Two agents adding pins otherwise write from stale reads.
     _waited=0
     while :; do
@@ -1111,42 +1134,50 @@ add_one() {
         sleep 0.1 2>/dev/null || sleep 1
     done
     arm_cleanup "rm -rf $(sq "$_tmp") $(sq "$_pt") $(sq "$_lock")"
-    # The fetch above can run for minutes with nothing holding the pins file, so its contents are
-    # only known-good once the lock that guards the rewrite below is held.
+    # grubstake.tools is only known-good once this lock is held, even though install_tool already proved this spec's own bytes.
     validate_pins
     [ -f "$_pins" ] || printf '# grubstake pins: name version sha256-darwin sha256-linux\n' >"$_pins"
-    # grep -v exits 1 when it selects nothing, the ordinary shape of the first pin in an empty or
-    # tool-only file; anything else is a real read failure and must abort before the rename below.
-    # A pipeline's own exit status is its last stage's, not grep's, so neither stage can run inside
-    # one and still have its own failure seen.
-    # The [[:space:]] here is a regex bracket expression, not array syntax.
-    # shellcheck disable=SC1087
-    if grep -v -E "^$_tool[[:space:]]" "$_pins" 2>/dev/null >"$_tmp/pins-sel"; then _selrc=0; else _selrc=$?; fi
-    case "$_selrc" in
-        0 | 1) : ;;
-        *) die "$_pins: cannot read pins file (grep exit $_selrc), $_tool@$_ver was not recorded" ;;
-    esac
-    if grep -v '^$' "$_tmp/pins-sel" >"$_pt"; then _filtrc=0; else _filtrc=$?; fi
-    case "$_filtrc" in
-        0 | 1) : ;;
-        *) die "$_pins: cannot read pins file (grep exit $_filtrc), $_tool@$_ver was not recorded" ;;
-    esac
-    # Counted, not just read: a rewrite that drops pins without erroring is indistinguishable from
-    # grep's own "selected nothing" by exit status alone, so only a pin count catches it. Same filter
-    # pinned_tools uses, so the header comment and a blank line are never mistaken for a pin lost.
+    # Counted before the rewrite, compared after: a rewrite that drops pins without erroring reads the same as an ordinary empty file otherwise.
     if _before="$(grep -vcE '^[[:space:]]*(#|$)' "$_pins" 2>/dev/null)"; then _bnrc=0; else _bnrc=$?; fi
     case "$_bnrc" in
         0 | 1) : ;;
         *) die "$_pins: cannot read pins file (grep exit $_bnrc), $_tool@$_ver was not recorded" ;;
     esac
-    # shellcheck disable=SC2086
-    printf '%s %s%s\n' "$_tool" "$_ver" "$_shas" >>"$_pt"
-    # sort's own failure here must not let a partial or unchanged $_pt reach the count check below
-    # unnoticed, since that check is the one guard standing between a bad write and the rename.
-    if LC_ALL=C sort -o "$_pt" "$_pt"; then _srtrc=0; else _srtrc=$?; fi
-    [ "$_srtrc" -eq 0 ] || die "$_pins: cannot sort pins file (sort exit $_srtrc), $_tool@$_ver was not recorded"
-    # The pin appended above guarantees this always matches; anything else is a real read failure on
-    # the file just written, not zero pins, and must not reach the comparison below.
+    # Sorts pin lines only, under LC_ALL=C to match the old whole-file sort's byte order: each comment travels with the pin line below it, so relocating a pin never strands its comment.
+    if LC_ALL=C awk -v tool="$_tool" -v newpin="$_tool $_ver$_shas" '
+BEGIN { hdr_done = 0; hdr = ""; n = 0; pend = "" }
+{
+    if (!hdr_done) {
+        if ($0 ~ /^#/ || $0 == "") { hdr = hdr $0 "\n"; next }
+        hdr_done = 1
+    }
+    if ($0 ~ /^#/ || $0 == "") { pend = pend $0 "\n"; next }
+    n++
+    key[n] = $1
+    cmt[n] = pend
+    pin[n] = $0
+    pend = ""
+}
+END {
+    found = 0
+    for (i = 1; i <= n; i++) if (key[i] == tool) { pin[i] = newpin; found = 1 }
+    if (!found) { n++; key[n] = tool; cmt[n] = ""; pin[n] = newpin }
+    printf "%s", hdr
+    for (c = 1; c <= n; c++) {
+        best = 0
+        for (i = 1; i <= n; i++) {
+            if (placed[i]) continue
+            if (best == 0 || key[i] < key[best]) best = i
+        }
+        placed[best] = 1
+        printf "%s", cmt[best]
+        print pin[best]
+    }
+    printf "%s", pend
+}
+' "$_pins" >"$_pt"; then _awkrc=0; else _awkrc=$?; fi
+    [ "$_awkrc" -eq 0 ] || die "$_pins: cannot rewrite pins file (awk exit $_awkrc), $_tool@$_ver was not recorded"
+    # The pin written above guarantees this always matches; anything else is a real read failure on the file just written, not zero pins.
     if _after="$(grep -vcE '^[[:space:]]*(#|$)' "$_pt")"; then _anrc=0; else _anrc=$?; fi
     [ "$_anrc" -eq 0 ] || die "$_pins: cannot verify the rewritten pins file (grep exit $_anrc), $_tool@$_ver was not recorded"
     [ "$_before" -eq 0 ] || [ "$_after" -ge "$_before" ] \
@@ -1158,7 +1189,6 @@ add_one() {
     rmdir "$_lock" 2>/dev/null || true
 
     log "pinned $_tool $_ver"
-    install_tool "$_tool" "$_ver"
 }
 
 # Every argument is pinned. Reading only $1 meant a batched call pinned one tool and exited 0.

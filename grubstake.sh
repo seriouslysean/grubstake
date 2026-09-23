@@ -182,11 +182,14 @@ pin_version() { pin_field "$1" 2 ; }
 pin_sha() {
     _ps_tool="$1"
     _ps_plat="$2"
+    # The [[:space:]] here is a regex bracket expression, not array syntax.
+    # shellcheck disable=SC1087
     _ps_line=$(grep -E "^$_ps_tool[[:space:]]" "$(pins_file)" 2>/dev/null || true)
     [ -n "$_ps_line" ] || return 1
     # Unquoted on purpose to split the line into fields, but that also pathname-expands any field
     # shaped like a glob against cwd -- set -f/+f keeps a "?"-shaped sha from resolving to a decoy file.
     set -f
+    # shellcheck disable=SC2086
     set -- $_ps_line
     set +f
     case "${3:-}" in
@@ -227,6 +230,7 @@ validate_pins() {
         case "$_l" in [[:space:]]*) die "grubstake.tools:$_n line must not be indented" ;; esac
         # Same reason as pin_sha's own set -f: an unquoted split pathname-expands a glob-shaped field.
         set -f
+        # shellcheck disable=SC2086
         set -- $_l
         set +f
         is_known_tool "${1:-}" || die "grubstake.tools:$_n unknown tool: ${1:-}"
@@ -633,7 +637,8 @@ install_tool() {
 
 reported_version() {
     # A pipeline reports its last command's exit status (tr's), not the tool's; split it out to catch that.
-    _rv="$("$1" $(tool_version_args "$2") 2>/dev/null)" || return 1
+    # tool_version_args always returns exactly one word, so quoting it changes nothing it can hold today.
+    _rv="$("$1" "$(tool_version_args "$2")" 2>/dev/null)" || return 1
     printf '%s\n' "$_rv" | head -1 | sed 's|^[Vv]ersion:[[:space:]]*||' | tr -d '[:space:]'
 }
 
@@ -901,6 +906,8 @@ resolve_hooks_path() {
         esac
     done
     if [ -d "$_rhp_p" ]; then
+        # CDPATH= scopes to this one cd; it is not a mistyped assignment.
+        # shellcheck disable=SC1007
         CDPATH= cd -P "$_rhp_p" && pwd -P && return 0
         warn "cannot resolve $_rhp_p"
         return 1
@@ -915,6 +922,8 @@ resolve_hooks_path() {
     fi
     _rhp_base="$(basename "$_rhp_p")"
     _rhp_dir="$(dirname "$_rhp_p")"
+    # CDPATH= scopes to this one cd; it is not a mistyped assignment.
+    # shellcheck disable=SC1007
     _rhp_pp="$(CDPATH= cd -P "$_rhp_dir" 2>/dev/null && pwd -P)" || { warn "cannot resolve $_rhp_dir"; return 1; }
     printf '%s/%s\n' "$_rhp_pp" "$_rhp_base"
 }
@@ -1050,6 +1059,8 @@ add_one() {
     # tool-only file; anything else is a real read failure and must abort before the rename below.
     # A pipeline's own exit status is its last stage's, not grep's, so neither stage can run inside
     # one and still have its own failure seen.
+    # The [[:space:]] here is a regex bracket expression, not array syntax.
+    # shellcheck disable=SC1087
     if grep -v -E "^$_tool[[:space:]]" "$_pins" 2>/dev/null > "$_tmp/pins-sel"; then _selrc=0; else _selrc=$?; fi
     case "$_selrc" in
         0|1) : ;;

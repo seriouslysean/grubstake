@@ -43,8 +43,6 @@ RE_TRAILER='Claude-Session:'
 RE_LINK='claude\.ai/code/session'
 RE_ANY="$RE_HOME|$RE_EMAIL|$RE_ISSUE|$RE_TRAILER|$RE_LINK"
 
-report() { FOUND=1; printf '  %s\n' "$1"; }
-
 # An unreported git failure and a real all-clear look identical at the caller, so this exits 2 here.
 git_op_failed() { printf '  %s: %s failed (exit %s)\n\nrefusing: git failed mid-scan, so the scan did not complete.\n' "$1" "$2" "$3" >&2; exit 2; }
 

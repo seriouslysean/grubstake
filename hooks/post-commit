@@ -29,12 +29,13 @@ if [ $((now - stamp)) -gt "$TTL" ]; then
     # rm only reaches here on a failed write or failed mv; a successful mv already made $_stamp_tmp disappear.
     # shellcheck disable=SC2015
     printf '%s\n%s\n' "$now" "$_prev_latest" >"$_stamp_tmp" && mv -f "$_stamp_tmp" "$CACHE" || rm -f "$_stamp_tmp"
-    # Backgrounded and detached: a slow or unreachable network must not extend a commit. Bounded so
-    # a dead link cannot pile up one hung process per commit made while it hangs, and silenced so a
-    # background prompt (a user's url.insteadOf rewrite to ssh, say) never surfaces at all.
+    # Backgrounded and detached, so a hung lookup strands a background process, never a commit.
+    # http.lowSpeedLimit/Time bounds a stalled https transfer once connected; ConnectTimeout and
+    # BatchMode bound and silence a url.insteadOf rewrite to ssh. Neither bounds a raw connect-phase
+    # hang over https itself, which stays a leaked but harmless, detached process.
     (
         GIT_TERMINAL_PROMPT=0
-        GIT_SSH_COMMAND='ssh -o BatchMode=yes'
+        GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=10'
         export GIT_TERMINAL_PROMPT GIT_SSH_COMMAND
         latest=$(git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 \
             ls-remote --tags --refs https://github.com/seriouslysean/grubstake 'v*' 2>/dev/null \

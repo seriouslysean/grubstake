@@ -1,11 +1,5 @@
 #!/bin/sh
-# grubstake commit-msg spine. Refuses a message that names an agent session, then runs repo-local
-# message gates. Repo-specific checks belong in .githooks/commit-msg.d/, not in this file, which
-# is overwritten whenever the hooks are reinstalled.
-#
-# The pre-commit scan reads tracked files, so a reference typed into a message never passes under
-# it. A session trailer or link names a transcript outside the repository, which no reader of the
-# published history can open.
+# grubstake commit-msg spine; repo-local checks belong in .githooks/commit-msg.d/, since this file is overwritten on reinstall, and this scan exists because pre-commit reads tracked files, never a typed message.
 
 set -eu
 
@@ -19,13 +13,10 @@ ROOT="$(git rev-parse --show-toplevel)"
 # git hands this hook a path relative to wherever it ran it, and a gate below may run anywhere.
 case "$1" in /*) MSG="$1" ;; *) MSG="$PWD/$1" ;; esac
 
-# Each literal is broken by a bracket, so a repo that scans its own tracked text for these shapes
-# does not report the hook that refuses them.
+# Each literal is broken by a bracket, so a repo that scans its own tracked text for these shapes does not report the hook that refuses them.
 RE_SESSION='Claude-[S]ession:|claude\.ai/code/[s]ession'
 
-# git only strips anything below its own scissors line when an editor actually ran (--verbose or
-# --cleanup=scissors); on -m/-F git sets GIT_EDITOR to the literal ":" and publishes the line and
-# everything below it verbatim, so trusting a cut line there let #134's exact repro through unread.
+# git only strips text below its scissors line when an editor actually ran; on -m/-F it sets GIT_EDITOR to the literal ":" and publishes everything verbatim (#134).
 SCISSORS='------------------------ >8 ------------------------'
 # core.commentString generalizes the older, single-character core.commentChar; the newer wins.
 CCHAR="$(git config --get core.commentString 2>/dev/null)" || CCHAR=""
@@ -38,9 +29,7 @@ if [ "${GIT_EDITOR:-}" = ':' ]; then
         exit 1
     }
 else
-    # Trusted only because an editor ran: scanning past a real cut line here would refuse this
-    # repo's own routine --verbose commits. A plain, non-verbose interactive edit that hand-types
-    # this exact line is the residual gap, since git cuts here under scissors cleanup, never strip.
+    # Trusted only because an editor ran, since scanning past a real cut line would refuse this repo's own routine --verbose commits; a hand-typed line in a plain, non-verbose edit is the residual gap.
     BODY="$(awk -v cchar="$CCHAR" -v scissors="$SCISSORS" '
         {
             # "auto" picks one character per message; any single non-space prefix stands in for it.
@@ -53,8 +42,7 @@ else
         exit 1
     }
 fi
-# -i, because the same reference in another casing is the same reference, and matching one
-# spelling made a gate that never fires look exactly like one that passes.
+# -i, because the same reference in another casing is the same reference.
 HITS="$(printf '%s\n' "$BODY" | grep -inE "$RE_SESSION")" || HITS=""
 if [ -n "$HITS" ]; then
     echo "[commit-msg] an agent-session reference would be published with this commit:" >&2

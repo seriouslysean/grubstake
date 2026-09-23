@@ -1,10 +1,5 @@
 #!/bin/sh
-# grubstake post-commit: report that a newer grubstake exists. Notify only. It never updates,
-# never blocks, and never fails a commit.
-#
-# post-commit rather than pre-commit on purpose: nothing here should sit in the path that gates a
-# commit. The synchronous cost is a file read, and on expiry a small write before the lookup
-# starts; the lookup itself is backgrounded, so an offline machine stays silent instead of stalling.
+# grubstake post-commit: notify only, never blocking, since nothing here may sit in the path that gates a commit; the lookup is backgrounded so an offline machine stays silent instead of stalling.
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 GRUBSTAKE="$ROOT/grubstake.sh"
@@ -21,18 +16,13 @@ stamp=0
 case "$stamp" in '' | *[!0-9]*) stamp=0 ;; esac
 
 if [ $((now - stamp)) -gt "$TTL" ]; then
-    # Stamped before the lookup starts, not just when it returns: a hung lookup (a dropped
-    # connection, not a refused one) left the TTL expired, so every commit made while it hung
-    # started another (#135). Line 2 (the cached answer) is carried over untouched.
+    # Stamped before the lookup starts, so a hung (not merely refused) lookup does not leave the TTL expired for every commit made while it hangs (#135); line 2 is preserved, not clobbered.
     _prev_latest=$(sed -n 2p "$CACHE" 2>/dev/null)
     _stamp_tmp="$CACHE.$$.stamp.tmp"
     # rm only reaches here on a failed write or failed mv; a successful mv already made $_stamp_tmp disappear.
     # shellcheck disable=SC2015
     printf '%s\n%s\n' "$now" "$_prev_latest" >"$_stamp_tmp" && mv -f "$_stamp_tmp" "$CACHE" || rm -f "$_stamp_tmp"
-    # Backgrounded and detached, so a hung lookup strands a background process, never a commit.
-    # http.lowSpeedLimit/Time bounds a stalled https transfer once connected; ConnectTimeout and
-    # BatchMode bound and silence a url.insteadOf rewrite to ssh. Neither bounds a raw connect-phase
-    # hang over https itself, which stays a leaked but harmless, detached process.
+    # Backgrounded and detached, so a hung lookup strands a process, never a commit; only a stalled transfer once connected or a url.insteadOf rewrite to ssh is actually bounded, not a raw https connect-phase hang.
     (
         GIT_TERMINAL_PROMPT=0
         GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=10'
@@ -42,8 +32,7 @@ if [ $((now - stamp)) -gt "$TTL" ]; then
             | awk '{print $2}' | sed 's|refs/tags/v||' \
             | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
             | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
-        # A lookup that answered nothing keeps whatever answer is already cached, so an offline
-        # week does not silence an advisory that was correct.
+        # A lookup that answered nothing keeps whatever answer is already cached, so an offline week does not silence an advisory that was correct.
         [ -n "$latest" ] || latest=$(sed -n 2p "$CACHE" 2>/dev/null)
         # Renamed into place, because the read below runs while this is still in flight.
         tmp="$CACHE.$$.tmp"
@@ -57,11 +46,10 @@ LATEST=$(sed -n 2p "$CACHE" 2>/dev/null) || exit 0
 [ -n "$LATEST" ] || exit 0
 [ "$LATEST" = "$CURRENT" ] && exit 0
 
-# CURRENT comes from the installed script's own report; LATEST is read raw from a writable cache
-# file. Neither has passed the fetch filter's grep, so an unvalidated one reaches the advisory line.
+# CURRENT comes from the script's own report and LATEST raw from a writable cache file; neither has passed the fetch filter's grep, so both reach the advisory line unvalidated.
 printf '%s\n%s\n' "$CURRENT" "$LATEST" | grep -qvE '^[0-9]+\.[0-9]+\.[0-9]+$' && exit 0
 
-# Only speak when the cached latest is genuinely newer than what is installed.
+# Guards against a well-formed LATEST that is not actually newer, since the checks above only ruled out malformed values, not older ones.
 newest=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
 [ "$newest" = "$LATEST" ] || exit 0
 

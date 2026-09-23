@@ -6003,12 +6003,26 @@ fi
 
 it "post-commit reports a release newer than the one running"
 r=$(new_hook_repo)
-latest_cache "$r" 99.9.9
+_v="$(gs "$r" version)"
+_fake="$(printf '%s' "$_v" | cut -d. -f1).$(($(printf '%s' "$_v" | cut -d. -f2) + 1)).0"
+latest_cache "$r" "$_fake"
 stage "$r" NOTES.md "notes"
 _out=$(hook_commit "$r")
 case "$_out" in
-    *"99.9.9 available"*) pass ;;
+    *"$_fake available"*) pass ;;
     *) fail "said nothing about a newer release: $_out" ;;
+esac
+
+it "post-commit stays quiet about a newer release in a different major"
+# A major bump is the signal that a plain in-place replace may not carry across cleanly.
+r=$(new_hook_repo)
+_major="$(gs "$r" version | cut -d. -f1)"
+latest_cache "$r" "$((_major + 1)).0.0"
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r")
+case "$_out" in
+    *"[grubstake]"*) fail "advertised a release outside the current major: $_out" ;;
+    *) pass ;;
 esac
 
 it "post-commit stays quiet when the cached latest is the version already running"
@@ -6126,7 +6140,9 @@ it "a lookup that answered nothing keeps the answer already cached"
 # was already correct. Two lines either way, so sed -n 1p and sed -n 2p keep their meaning and the
 # poisoned-LATEST and malformed-CURRENT guards above still read the file they were written for.
 r=$(new_hook_repo)
-printf '1\n99.9.9\n' >"$r/.git/grubstake-latest" || fixture_die "cannot seed a stale cache in $r"
+_v="$(gs "$r" version)"
+_fake="$(printf '%s' "$_v" | cut -d. -f1).$(($(printf '%s' "$_v" | cut -d. -f2) + 1)).0"
+printf '1\n%s\n' "$_fake" >"$r/.git/grubstake-latest" || fixture_die "cannot seed a stale cache in $r"
 stage "$r" NOTES.md "notes"
 _out=$(hook_commit "$r")
 _rc=$?
@@ -6134,11 +6150,11 @@ if [ "$_rc" -ne 0 ]; then
     fail "the commit was blocked (rc $_rc): $_out"
 elif ! wait_for_stamp "$r" 1; then
     fail "the stale stamp was never refreshed: $(tr '\n' ' ' <"$r/.git/grubstake-latest" 2>/dev/null)"
-elif [ "$(sed -n 2p "$r/.git/grubstake-latest")" != "99.9.9" ]; then
+elif [ "$(sed -n 2p "$r/.git/grubstake-latest")" != "$_fake" ]; then
     fail "the cached answer was discarded: $(tr '\n' ' ' <"$r/.git/grubstake-latest" 2>/dev/null)"
 else
     case "$_out" in
-        *"99.9.9 available"*) pass ;;
+        *"$_fake available"*) pass ;;
         *) fail "said nothing about the newer release it had cached: $_out" ;;
     esac
 fi

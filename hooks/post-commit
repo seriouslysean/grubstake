@@ -65,5 +65,8 @@ printf '%s\n%s\n' "$CURRENT" "$LATEST" | grep -qvE '^[0-9]+\.[0-9]+\.[0-9]+$' &&
 newest=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
 [ "$newest" = "$LATEST" ] || exit 0
 
+# A major bump is the signal that update's in-place replace may not carry across cleanly.
+[ "${CURRENT%%.*}" = "${LATEST%%.*}" ] || exit 0
+
 echo "[grubstake] $LATEST available (pinned $CURRENT) -- run: ./grubstake.sh update"
 exit 0

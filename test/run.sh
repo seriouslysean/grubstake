@@ -5897,6 +5897,31 @@ else
     pass
 fi
 
+it "a pre-commit.d gate's own cold-cache ensure call refuses offline instead of downloading mid-commit"
+# cmd_ensure called install_tool with no GRUBSTAKE_OFFLINE check of its own -- only cmd_path had
+# one, so a gate calling ensure instead of path on a cold cache still ran curl on the commit path.
+r=$(new_hook_repo)
+pins "$r" "periphery 1.0.0 $SHA_A $SHA_A"
+gate_script "$r" 05-cold-cache <<'GATE'
+ROOT="$(git rev-parse --show-toplevel)"
+"$ROOT/grubstake.sh" ensure >/dev/null 2>&1
+GATE
+_marker="$r/CURL-RAN"
+_shim="$r/curl-shim"
+mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+printf '#!/bin/sh\n: > "%s"\nexit 1\n' "$_marker" >"$_shim/curl" || fixture_die "cannot write the curl marker shim"
+chmod +x "$_shim/curl" || fixture_die "cannot make the curl marker shim executable"
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r" "$_shim")
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "the commit went through though the pinned tool was never installed: $_out"
+elif [ -f "$_marker" ]; then
+    fail "a pre-commit.d gate's cold-cache ensure call reached curl on the commit path: $_out"
+else
+    pass
+fi
+
 it "post-commit reports a release newer than the one running"
 r=$(new_hook_repo)
 latest_cache "$r" 99.9.9

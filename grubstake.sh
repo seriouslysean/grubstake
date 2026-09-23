@@ -592,6 +592,11 @@ install_tool() {
         fi
     fi
 
+    # Reached only when nothing usable is already on disk: GRUBSTAKE_OFFLINE refuses the download
+    # here, once, so every caller of install_tool inherits the same refusal instead of each needing
+    # its own copy of this check.
+    [ -z "${GRUBSTAKE_OFFLINE:-}" ] || die "$_tool $_ver: not installed (run: grubstake ensure)"
+
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     arm_cleanup "rm -rf $(sq "$_tmp")"
 
@@ -1272,8 +1277,6 @@ cmd_path() {
     # mismatch surfacing here would put a network-shaped check back in front of every commit. Catching
     # drift is ensure's job.
     if [ ! -x "$_bin" ]; then
-        # A clean racing this check can leave the binary missing right when a commit reaches for it; GRUBSTAKE_OFFLINE refuses instead of installing mid-commit.
-        [ -z "${GRUBSTAKE_OFFLINE:-}" ] || die "$1 $_ver: not installed (run: grubstake ensure)"
         install_tool "$1" "$_ver" >&2
     fi
     verify_tool "$1" "$_ver"

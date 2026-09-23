@@ -12,8 +12,13 @@
 # carry the names it protects. The semantic audit gates that shape in published bodies; in
 # tracked files it has no mechanical gate at all and rests on review of the diff.
 #
-# The message tier drops comment lines because git's default cleanup does. Under
-# --cleanup=verbatim they survive into the published message, and this scan will have missed them.
+# The message tier cuts everything from the scissors line on, since --cleanup=scissors never
+# publishes it. A comment line before that point is read only on the -m/-F path (GIT_EDITOR=:,
+# per githooks(5)), whose default cleanup keeps it; the editor path's default cleanup strips it,
+# so reading it there would refuse a comment git is about to remove, such as its own "# Author:"
+# line. An explicit --cleanup=whitespace/verbatim/commit.cleanup on the editor path still publishes
+# a comment this tier will not see; the shipped commit-msg spine's session-shape check has no such
+# gap, since it scans comments unconditionally.
 #
 #   test/scan-for-leaks.sh                  scan tracked files
 #   test/scan-for-leaks.sh --all            also scan every commit message in history
@@ -41,10 +46,15 @@ RE_HOME='/Users/[a-zA-Z0-9]|/home/[a-zA-Z]'
 RE_EMAIL='[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
 # owner/repo#123 pointing somewhere else is how one repo's issue history reaches a public commit.
 RE_ISSUE='[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+#[0-9]+'
+# The URL form of the same cross-repo reference; RE_ISSUE_URL_SELF below excludes this repo's own, since that one is public.
+RE_ISSUE_URL='github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[0-9]+'
+# BRE, not ERE, so sed needs no -E to use it as a strip pattern below.
+RE_ISSUE_URL_SELF='github\.com/seriouslysean/grubstake/issues/[0-9][0-9]*'
 # A session trailer or link names an agent transcript outside this repo, which no reader can open.
-RE_TRAILER='Claude-Session:'
-RE_LINK='claude\.ai/code/session'
-RE_ANY="$RE_HOME|$RE_EMAIL|$RE_ISSUE|$RE_TRAILER|$RE_LINK"
+# Bracket-classed rather than grep -i, so case-insensitivity holds in every tier without a second flag to remember.
+RE_TRAILER='[Cc][Ll][Aa][Uu][Dd][Ee]-[Ss][Ee][Ss][Ss][Ii][Oo][Nn]:'
+RE_LINK='[Cc][Ll][Aa][Uu][Dd][Ee]\.[Aa][Ii]/[Cc][Oo][Dd][Ee]/[Ss][Ee][Ss][Ss][Ii][Oo][Nn]'
+RE_ANY="$RE_HOME|$RE_EMAIL|$RE_ISSUE|$RE_ISSUE_URL|$RE_TRAILER|$RE_LINK"
 
 # An unreported git failure and a real all-clear look identical at the caller, so this exits 2 here.
 git_op_failed() {
@@ -55,11 +65,17 @@ git_op_failed() {
 scan() {
     _what="$1"
     _re="$2"
+    # Only the issue-URL scan passes a third argument; every other pattern has no self-referencing shape to strip.
+    _exclude="${3:-}"
     # --cached scans the index (what a commit publishes), excluding this file and the suite, which contain the patterns by definition.
     _hits="$(git grep --cached -nE "$_re" -- . ':!test/scan-for-leaks.sh' ':!test/run.sh' 2>/dev/null)"
     _rc=$?
     # git grep: 0 is a match, 1 is no match, anything else is an operational failure, not a clean scan.
     [ "$_rc" -gt 1 ] && git_op_failed "$_what" "git grep" "$_rc"
+    # Strip the self-reference and re-test, so a different match sharing the line still counts.
+    if [ -n "$_hits" ] && [ -n "$_exclude" ]; then
+        _hits="$(printf '%s\n' "$_hits" | sed "s#$_exclude##g" | grep -E "$_re")"
+    fi
     [ -n "$_hits" ] && printf '%s\n' "$_hits" | while IFS= read -r _l; do printf '  %s: %s\n' "$_what" "$_l"; done
     # A leak can live entirely in a tracked filename with clean content, invisible to git grep above.
     _names="$(git ls-files -- . ':!test/scan-for-leaks.sh' ':!test/run.sh' 2>/dev/null)"
@@ -67,13 +83,23 @@ scan() {
     # git ls-files has no "no match" case, so any nonzero exit here is an operational failure too.
     [ "$_rc" -ne 0 ] && git_op_failed "$_what" "git ls-files" "$_rc"
     _names="$(printf '%s\n' "$_names" | grep -E "$_re")"
+    if [ -n "$_names" ] && [ -n "$_exclude" ]; then
+        _names="$(printf '%s\n' "$_names" | sed "s#$_exclude##g" | grep -E "$_re")"
+    fi
     [ -n "$_names" ] && printf '%s\n' "$_names" | while IFS= read -r _n; do printf '  %s (filename): %s\n' "$_what" "$_n"; done
     [ -z "$_hits" ] && [ -z "$_names" ]
 }
 
-# git has not stripped comments or a --verbose diff yet, so read only what becomes the message.
+# git has not stripped a --verbose diff yet, so read only up to the scissors line.
 scan_message() {
-    _text="$(sed -e '/^#.*>8/,$d' -e '/^#/d' "$1")" || return 2
+    _text="$(sed -e '/^#.*>8/,$d' "$1")" || return 2
+    # Git sets GIT_EDITOR=: for every commit hook exactly when no editor will run (githooks(5)): the
+    # -m/-F path, whose default cleanup keeps "#" lines. Any other value means the editor path, whose
+    # default cleanup strips them before publishing, so reading them here would refuse a comment git
+    # is about to remove anyway (e.g. its own "# Author: ..." line on an amended commit).
+    [ "${GIT_EDITOR:-}" = ":" ] || _text="$(printf '%s\n' "$_text" | sed '/^#/d')"
+    # Strip this repo's own reference before matching, so a different leak sharing the line is still caught.
+    _text="$(printf '%s\n' "$_text" | sed "s#$RE_ISSUE_URL_SELF##g")"
     _hits="$(printf '%s\n' "$_text" | grep -nE "$RE_ANY")"
     [ -z "$_hits" ] && return 0
     printf '%s\n' "$_hits" | while IFS= read -r _l; do printf '  commit message: %s\n' "$_l"; done
@@ -100,6 +126,7 @@ printf 'scanning tracked files\n'
 scan "absolute home path" "$RE_HOME" || FOUND=1
 scan "email address" "$RE_EMAIL" || FOUND=1
 scan "cross-repo issue reference" "$RE_ISSUE" || FOUND=1
+scan "cross-repo issue URL" "$RE_ISSUE_URL" "$RE_ISSUE_URL_SELF" || FOUND=1
 scan "agent-session trailer" "$RE_TRAILER" || FOUND=1
 scan "agent-session link" "$RE_LINK" || FOUND=1
 
@@ -108,6 +135,8 @@ if [ "${1:-}" = "--all" ]; then
     _log="$(git log --all --format='%H %s%n%b')"
     _rc=$?
     [ "$_rc" -ne 0 ] && git_op_failed "commit history" "git log" "$_rc"
+    # Strip this repo's own reference before matching, so a different leak sharing the line is still caught.
+    _log="$(printf '%s\n' "$_log" | sed "s#$RE_ISSUE_URL_SELF##g")"
     _hits="$(printf '%s\n' "$_log" | grep -nE "$RE_ANY")"
     [ -n "$_hits" ] && {
         printf '%s\n' "$_hits" | head -20

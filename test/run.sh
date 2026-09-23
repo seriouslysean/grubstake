@@ -6841,12 +6841,87 @@ else
     pass
 fi
 
+it "scan-for-leaks flags a case-varied agent-session trailer in tracked text"
+# #133: RE_TRAILER reached grep -E with no -i, so only one spelling was ever refused.
+r=$(leaks_repo)
+printf 'CLAUDE-SESSION: a-transcript-identifier\n' >"$r/notes.txt" || fixture_die "cannot write the case-varied trailer fixture in $r"
+(cd "$r" && git add -A && git commit -q -m fixture) || fixture_die "cannot commit the case-varied trailer fixture in $r"
+if (cd "$r" && ./test/scan-for-leaks.sh) >/dev/null 2>&1; then
+    fail "a case-varied agent-session trailer was not flagged"
+else
+    pass
+fi
+
+it "scan-for-leaks flags a case-varied agent-session link in tracked text"
+r=$(leaks_repo)
+printf 'transcript: https://CLAUDE.AI/CODE/SESSION_0123456789\n' >"$r/notes.txt" || fixture_die "cannot write the case-varied link fixture in $r"
+(cd "$r" && git add -A && git commit -q -m fixture) || fixture_die "cannot commit the case-varied link fixture in $r"
+if (cd "$r" && ./test/scan-for-leaks.sh) >/dev/null 2>&1; then
+    fail "a case-varied agent-session link was not flagged"
+else
+    pass
+fi
+
+it "scan-for-leaks --all flags a case-varied agent-session trailer in commit message history"
+r=$(leaks_repo)
+(cd "$r" && git commit -q --allow-empty -m 'chore: fixture' -m 'CLAUDE-SESSION: a-transcript-identifier') \
+    || fixture_die "cannot commit the case-varied trailer fixture in $r"
+_out=$(cd "$r" && ./test/scan-for-leaks.sh --all 2>&1)
+case "$_out" in
+    *"CLAUDE-SESSION"*) pass ;;
+    *) fail "a case-varied agent-session trailer in commit history was not flagged: $_out" ;;
+esac
+
+it "scan-for-leaks flags the URL form of a cross-repo issue reference"
+r=$(leaks_repo)
+printf 'see https://github.com/otherowner/otherrepo/issues/45\n' >"$r/notes.txt" || fixture_die "cannot write the issue-URL fixture in $r"
+(cd "$r" && git add -A && git commit -q -m fixture) || fixture_die "cannot commit the issue-URL fixture in $r"
+if (cd "$r" && ./test/scan-for-leaks.sh) >/dev/null 2>&1; then
+    fail "a cross-repo issue URL was not flagged"
+else
+    pass
+fi
+
+it "scan-for-leaks does not flag this repo's own issue URL"
+# This repo's own issues are public; only another repo's issue history is a leak.
+r=$(leaks_repo)
+printf 'see https://github.com/seriouslysean/grubstake/issues/45\n' >"$r/notes.txt" || fixture_die "cannot write the self-issue-URL fixture in $r"
+(cd "$r" && git add -A && git commit -q -m fixture) || fixture_die "cannot commit the self-issue-URL fixture in $r"
+if (cd "$r" && ./test/scan-for-leaks.sh) >/dev/null 2>&1; then
+    pass
+else
+    fail "this repo's own issue URL was flagged as a leak"
+fi
+
+it "scan-for-leaks flags a foreign issue URL sharing a line with this repo's own"
+# The self-exclusion used to drop the whole matched line rather than just its own reference, which
+# would have hidden a second, genuinely foreign URL sharing that line.
+r=$(leaks_repo)
+printf 'see https://github.com/seriouslysean/grubstake/issues/1 and https://github.com/otherowner/otherrepo/issues/2\n' \
+    >"$r/notes.txt" || fixture_die "cannot write the combo issue-URL fixture in $r"
+(cd "$r" && git add -A && git commit -q -m fixture) || fixture_die "cannot commit the combo issue-URL fixture in $r"
+if (cd "$r" && ./test/scan-for-leaks.sh) >/dev/null 2>&1; then
+    fail "a foreign issue URL sharing a line with this repo's own was not flagged"
+else
+    pass
+fi
+
+it "scan-for-leaks --all flags a foreign issue URL sharing history text with this repo's own"
+r=$(leaks_repo)
+(cd "$r" && git commit -q --allow-empty -m 'chore: fixture' \
+    -m 'see https://github.com/seriouslysean/grubstake/issues/1 and https://github.com/otherowner/otherrepo/issues/2') \
+    || fixture_die "cannot commit the combo issue-URL fixture in $r"
+_out=$(cd "$r" && ./test/scan-for-leaks.sh --all 2>&1)
+case "$_out" in
+    *"otherowner/otherrepo"*) pass ;;
+    *) fail "a foreign issue URL sharing history text with this repo's own was not flagged: $_out" ;;
+esac
+
 it "the self-exclusion pathspec still names the scanner's own path"
 # The scanner excludes itself by a hardcoded pathspec, so a rename that misses it turns the scan on
-# the scanner. Three of the five patterns cannot match their own source (each is written with the
-# literal broken by a bracket), so that failure can be a silent no-op rather than a refusal. Plant
-# the same known-bad line in the scanner and in a sibling: the sibling must be reported, the
-# scanner must not.
+# the scanner. None of the patterns' own definitions match their own source, so relying on that
+# would make this failure a silent no-op rather than a refusal. Plant the same known-bad line in
+# the scanner and in a sibling: the sibling must be reported, the scanner must not.
 r=$(leaks_repo)
 printf '# Claude-Session: a-transcript-identifier\n' >>"$r/test/scan-for-leaks.sh" \
     || fixture_die "cannot plant the leak inside the scanner copy in $r"
@@ -6962,6 +7037,78 @@ else
     pass
 fi
 
+it "scan-for-leaks refuses a case-varied agent-session trailer typed into a commit message"
+_m="$ROOT/msg-case-trailer"
+printf 'fix: something\n\nclaude-session: a-transcript-identifier\n' >"$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+if "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "a case-varied agent-session trailer in a commit message was not refused"
+else
+    pass
+fi
+
+it "scan-for-leaks refuses the URL form of a cross-repo issue reference typed into a commit message"
+_m="$ROOT/msg-issue-url"
+printf 'fix: something\n\nSee https://github.com/otherowner/otherrepo/issues/45\n' >"$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+if "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "a cross-repo issue URL in a commit message was not refused"
+else
+    pass
+fi
+
+it "scan-for-leaks accepts this repo's own issue URL typed into a commit message"
+_m="$ROOT/msg-self-issue-url"
+printf 'fix: something\n\nSee https://github.com/seriouslysean/grubstake/issues/45\n' >"$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+_out="$("$REPO/test/scan-for-leaks.sh" --message "$_m" 2>&1)"
+_rc=$?
+case "$_out" in *'scanning the commit message'*) : ;; *) _rc=99 ;; esac
+if [ "$_rc" -eq 0 ]; then pass; else fail "this repo's own issue URL in a commit message was refused (rc $_rc): $_out"; fi
+
+it "scan-for-leaks refuses a home path sharing a line with this repo's own issue URL in a commit message"
+_m="$ROOT/msg-issue-url-combo"
+printf 'fix: something\n\nSee https://github.com/seriouslysean/grubstake/issues/1 from /Users/someone/checkout\n' \
+    >"$_m" || fixture_die "cannot write the message fixture at $_m"
+if GIT_EDITOR=: "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "a home path sharing a line with this repo's own issue URL was not refused"
+else
+    pass
+fi
+
+it "scan-for-leaks does not refuse git's own comment line on the editor path, where cleanup strips it anyway"
+# #133: git sets GIT_EDITOR=: for every commit hook exactly when no editor will run (githooks(5)).
+# Any other value is the editor path, whose default cleanup strips a "#" line before publishing, so
+# a template line git itself inserts (e.g. "# Author: ..." on an amended author) must not be refused.
+_m="$ROOT/msg-author-comment"
+printf 'fix: something\n#\n# Author:    Someone <someone@example.com>\n' >"$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+# vi is a value for GIT_EDITOR, not a command to run.
+# shellcheck disable=SC2209
+if GIT_EDITOR=vi "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    pass
+else
+    fail "a comment line git will strip on the editor path was refused anyway"
+fi
+
+it "scan-for-leaks refuses the same comment line on the -m/-F path, where cleanup keeps it"
+if GIT_EDITOR=: "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "a comment line git keeps on the -m/-F path was not refused"
+else
+    pass
+fi
+
+it "scan-for-leaks does not refuse git's own comment line when GIT_EDITOR is unset"
+# set -u must survive a completely absent GIT_EDITOR, which is the common case outside a git hook.
+if (
+    unset GIT_EDITOR
+    "$REPO/test/scan-for-leaks.sh" --message "$_m"
+) >/dev/null 2>&1; then
+    pass
+else
+    fail "an unset GIT_EDITOR was treated as the -m/-F path instead of the editor default"
+fi
+
 it "scan-for-leaks accepts a commit message carrying none of the refused shapes"
 # The banner is asserted, not just the exit status: an unrecognised flag falls through to the
 # tracked-file scan, which passes on this repo's own clean tree and looks exactly like a scanned
@@ -6974,19 +7121,33 @@ _rc=$?
 case "$_out" in *'scanning the commit message'*) : ;; *) _rc=99 ;; esac
 if [ "$_rc" -eq 0 ]; then pass; else fail "a clean commit message was not scanned clean (rc $_rc): $_out"; fi
 
-it "scan-for-leaks reads only what becomes the message, never git's comments or verbose diff"
-# git strips neither before commit-msg runs, and the verbose diff of a change to the scanner itself
-# carries every shape the scanner refuses, so an unstripped read would refuse its own commit.
+it "scan-for-leaks reads past a benign comment but stops at the scissors line before a verbose diff"
+# git strips neither before commit-msg runs. The verbose diff of a change to the scanner itself
+# carries every shape the scanner refuses, so an unstripped read past the scissors line would
+# refuse its own commit; a comment line above that point is not cut, so it must itself be benign.
 _m="$ROOT/msg-verbose"
 {
-    printf 'fix: something\n#\n# Claude-Session: a comment git will strip\n'
+    printf 'fix: something\n#\n# a benign comment, not a refused shape\n'
     printf '# ------------------------ >8 ------------------------\n'
     printf 'diff --git a/x b/x\n+Claude-Session: inside the verbose diff\n'
 } >"$_m" || fixture_die "cannot write the message fixture at $_m"
-_out="$("$REPO/test/scan-for-leaks.sh" --message "$_m" 2>&1)"
+_out="$(GIT_EDITOR=: "$REPO/test/scan-for-leaks.sh" --message "$_m" 2>&1)"
 _rc=$?
 case "$_out" in *'scanning the commit message'*) : ;; *) _rc=99 ;; esac
-if [ "$_rc" -eq 0 ]; then pass; else fail "the scan read a comment or past the scissors line (rc $_rc): $_out"; fi
+if [ "$_rc" -eq 0 ]; then pass; else fail "the scan read past the scissors line (rc $_rc): $_out"; fi
+
+it "scan-for-leaks refuses an agent-session trailer typed as a comment line on the -m/-F path"
+# #133: the message tier used to drop every "#"-prefixed line unconditionally, which is right only
+# for the editor path's default cleanup; on the -m/-F path (GIT_EDITOR=:, githooks(5)) the default
+# cleanup keeps a comment line, so a reference on one must still be refused there.
+_m="$ROOT/msg-commented-trailer"
+printf 'fix: something\n#\n# Claude-Session: a-transcript-identifier\n' >"$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+if GIT_EDITOR=: "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "an agent-session trailer typed as a comment line on the -m/-F path was not refused"
+else
+    pass
+fi
 
 it "scan-for-leaks refuses a commit message file it cannot read"
 # Rule 16: a gate handed nothing to scan has not passed, it has not run.

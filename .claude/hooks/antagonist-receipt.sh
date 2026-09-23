@@ -1,8 +1,10 @@
 #!/bin/sh
-# SubagentStop hook, and the only writer of the antagonist receipt. An antagonist names
-# itself on its first line, so the receipt can only come from a completed pass rather than
-# from prose claiming one happened. Also enforces output discipline: no empty returns, and
-# finding-producing agents return their rule ids or the exact string "No findings.".
+# PostToolUse hook on SubagentHandback, and the only writer of the antagonist receipt.
+# SubagentStop's last_assistant_message is the subagent's closing text, not its report -- the
+# report is the SubagentHandback call's own tool_input.message, which is what this reads. An
+# antagonist names itself on its first line there, so the receipt can only come from a completed
+# pass rather than from prose claiming one happened. Also enforces output discipline: no empty
+# returns, and finding-producing agents return their rule ids or the exact string "No findings.".
 #
 #   antagonist-receipt.sh --skip "reason"
 #
@@ -13,7 +15,8 @@ set -u
 
 . "$(dirname "$0")/gate-lib.sh"
 
-GITDIR=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+# --absolute-git-dir, not --git-dir: git -C prints the latter relative to the -C target, which is wrong once cwd differs from it.
+GITDIR=$(git_run rev-parse --absolute-git-dir 2>/dev/null) || exit 0
 MARKER="$GITDIR/grubstake-antagonist"
 BLOCKS="$GITDIR/grubstake-antagonist-blocks"
 LOG="$GITDIR/grubstake-antagonist-log"
@@ -35,16 +38,37 @@ block() {
     printf '{"decision":"block","reason":"%s"}\n' "$1"
     exit 0
 }
-msg_has() { printf '%s' "$INPUT" | grep -qF "$1"; }
 
-# An empty return is not a completed dispatch, whatever the agent was.
-if ! msg_has '"last_assistant_message"' \
-    || printf '%s' "$INPUT" | grep -qE '"last_assistant_message"[[:space:]]*:[[:space:]]*""'; then
-    block "Return the work product: the result was empty."
-fi
+# tool_response carries its own "message" key ("Report delivered..."), so a bare "message" search
+# would always be true; anchoring past tool_input's opening brace is what tells the two apart.
+TOOL_MSG='"tool_input"[[:space:]]*:[[:space:]]*{[[:space:]]*"message"[[:space:]]*:[[:space:]]*"'
+tool_msg() { printf '%s' "$INPUT" | sed -n "s/.*$TOOL_MSG\\([^\"]*\\).*/\\1/p"; }
+MSG="$(tool_msg)"
+
+msg_has() {
+    case "$MSG" in
+        *"$1"*) return 0 ;;
+    esac
+    return 1
+}
+
+# An empty return is not a completed dispatch, whatever the agent was; this also catches a
+# malformed payload carrying no tool_input.message at all, which reads the same as empty.
+[ -z "$MSG" ] && block "Return the work product: the result was empty."
 
 # The orchestrator deduplicates on rule ids, so output without them cannot be merged.
 check() { msg_has "$2" || msg_has "No findings." || block "$1 must return findings carrying its rule ids, or exactly: No findings."; }
+
+# The header must open the message: a name only present mid-prose is a mention, not a completed
+# pass. The trailing \n is the literal two-byte JSON escape for a newline, not a real one.
+first_line_header() {
+    case "$MSG" in
+        "Antagonist: $1." | "Antagonist: $1."\\n*) return 0 ;;
+    esac
+    return 1
+}
+
+agent_type=$(printf '%s' "$INPUT" | json_field agent_type)
 
 digest=$(changed_digest)
 
@@ -66,12 +90,12 @@ add_kind() {
 }
 
 mint=0
-if msg_has "Antagonist: gst-shell-critic."; then
+if [ "$agent_type" = gst-shell-critic ] && first_line_header gst-shell-critic; then
     check gst-shell-critic "critic-"
     mint=1
     add_kind "$(reviewer_kind gst-shell-critic)"
 fi
-if msg_has "Antagonist: gst-leak-auditor."; then
+if [ "$agent_type" = gst-leak-auditor ] && first_line_header gst-leak-auditor; then
     check gst-leak-auditor "leak-"
     mint=1
     add_kind "$(reviewer_kind gst-leak-auditor)"

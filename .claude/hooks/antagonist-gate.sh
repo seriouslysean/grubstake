@@ -25,7 +25,10 @@ LIMIT=3
 INPUT=$(cat)
 
 # A block already issued once; re-blocking here would just loop the turn instead of asking again.
-printf '%s' "$INPUT" | grep -qE '"stop_hook_active"[[:space:]]*:[[:space:]]*true' && exit 0
+if printf '%s' "$INPUT" | grep -qE '"stop_hook_active"[[:space:]]*:[[:space:]]*true'; then
+    printf 'stop-hook-active-pass %s\n' "$(date +%s)" >>"$LOG"
+    exit 0
+fi
 
 session=$(printf '%s' "$INPUT" | json_field session_id)
 transcript=$(printf '%s' "$INPUT" | json_field transcript_path)

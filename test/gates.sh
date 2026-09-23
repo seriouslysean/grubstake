@@ -1,6 +1,6 @@
 #!/bin/sh
 # Prove the development gates fail on known-bad input, per AGENTS.md 14: a gate that never
-# fires looks exactly like one that passes. Runs the Stop and SubagentStop hooks from
+# fires looks exactly like one that passes. Runs the Stop hook and the PostToolUse receipt from
 # .claude/hooks against a throwaway repo, so no marker or counter touches this one.
 #
 #   test/gates.sh    offline, seconds
@@ -49,8 +49,10 @@ gate() {
     printf '{"session_id":"s1","transcript_path":"%s","hook_event_name":"Stop"}' "${1:-/nonexistent}" \
         | (cd "$R" && "$GATE")
 }
+# SubagentStop's last_assistant_message is closing text, not the report; the report is the
+# SubagentHandback tool call's own tool_input.message, read here via PostToolUse's payload shape.
 receipt() {
-    printf '{"session_id":"s1","hook_event_name":"SubagentStop","agent_type":"%s","last_assistant_message":"%s"}' "$1" "$2" \
+    printf '{"session_id":"s1","hook_event_name":"PostToolUse","tool_name":"SubagentHandback","agent_type":"%s","tool_input":{"message":"%s"},"tool_response":{"success":true,"message":"Report delivered to your caller."}}' "$1" "$2" \
         | (cd "$R" && "$RCPT")
 }
 
@@ -187,14 +189,16 @@ case "$out" in
     *) fail "a bare first-line header did not reach the output-discipline check: out=$out" ;;
 esac
 
-it "stop_hook_active true exits quietly instead of re-blocking"
+it "stop_hook_active true exits quietly instead of re-blocking, and logs the pass"
 rm -f "$MARKER" "$BLOCKS" "$LOG"
 echo "# pokeStop" >>"$R/grubstake.sh"
 out=$(printf '{"session_id":"s1","transcript_path":"/nonexistent","hook_event_name":"Stop","stop_hook_active":true}' \
     | (cd "$R" && "$GATE"))
 rc=$?
 (cd "$R" && git checkout -q grubstake.sh)
-if [ "$rc" -eq 0 ] && [ -z "$out" ]; then pass; else fail "rc=$rc out=$out"; fi
+if [ "$rc" -eq 0 ] && [ -z "$out" ] && grep -q '^stop-hook-active-pass' "$LOG"; then
+    pass
+else fail "rc=$rc out=$out log=$(cat "$LOG" 2>/dev/null)"; fi
 
 it "an empty session_id does not desynchronize the block counter's fields"
 rm -f "$MARKER" "$BLOCKS" "$LOG"
@@ -311,6 +315,33 @@ out=$(gate)
 rc=$?
 rm -rf "$R/docs"
 if [ "$rc" -eq 0 ] && [ -z "$out" ]; then pass; else fail "rc=$rc out=$out"; fi
+
+it "settings.json wires the receipt to PostToolUse on SubagentHandback, not SubagentStop"
+# The receipt reads tool_input.message, which only PostToolUse on the handback call carries;
+# SubagentStop's payload has no tool_input, so wiring it there would block every subagent stop.
+SETTINGS="$SRC/.claude/settings.json"
+if grep -q '"SubagentStop"' "$SETTINGS"; then
+    fail "settings.json still wires SubagentStop, which the receipt no longer reads"
+elif ! grep -q '"PostToolUse"' "$SETTINGS"; then
+    fail "settings.json does not wire PostToolUse"
+elif ! grep -q '"SubagentHandback"' "$SETTINGS"; then
+    fail "settings.json's PostToolUse entry does not match SubagentHandback"
+elif ! grep -q 'antagonist-receipt.sh' "$SETTINGS"; then
+    fail "settings.json does not run antagonist-receipt.sh"
+else
+    pass
+fi
+
+it "settings.json is valid JSON"
+if command -v python3 >/dev/null 2>&1; then
+    if python3 -m json.tool <"$SRC/.claude/settings.json" >/dev/null 2>&1; then
+        pass
+    else
+        fail "settings.json failed to parse"
+    fi
+else
+    pass
+fi
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

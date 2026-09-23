@@ -6893,6 +6893,30 @@ else
     fail "this repo's own issue URL was flagged as a leak"
 fi
 
+it "scan-for-leaks flags a foreign issue URL sharing a line with this repo's own"
+# The self-exclusion used to drop the whole matched line rather than just its own reference, which
+# would have hidden a second, genuinely foreign URL sharing that line.
+r=$(leaks_repo)
+printf 'see https://github.com/seriouslysean/grubstake/issues/1 and https://github.com/otherowner/otherrepo/issues/2\n' \
+    >"$r/notes.txt" || fixture_die "cannot write the combo issue-URL fixture in $r"
+(cd "$r" && git add -A && git commit -q -m fixture) || fixture_die "cannot commit the combo issue-URL fixture in $r"
+if (cd "$r" && ./test/scan-for-leaks.sh) >/dev/null 2>&1; then
+    fail "a foreign issue URL sharing a line with this repo's own was not flagged"
+else
+    pass
+fi
+
+it "scan-for-leaks --all flags a foreign issue URL sharing history text with this repo's own"
+r=$(leaks_repo)
+(cd "$r" && git commit -q --allow-empty -m 'chore: fixture' \
+    -m 'see https://github.com/seriouslysean/grubstake/issues/1 and https://github.com/otherowner/otherrepo/issues/2') \
+    || fixture_die "cannot commit the combo issue-URL fixture in $r"
+_out=$(cd "$r" && ./test/scan-for-leaks.sh --all 2>&1)
+case "$_out" in
+    *"otherowner/otherrepo"*) pass ;;
+    *) fail "a foreign issue URL sharing history text with this repo's own was not flagged: $_out" ;;
+esac
+
 it "the self-exclusion pathspec still names the scanner's own path"
 # The scanner excludes itself by a hardcoded pathspec, so a rename that misses it turns the scan on
 # the scanner. None of the patterns' own definitions match their own source, so relying on that
@@ -7042,6 +7066,49 @@ _rc=$?
 case "$_out" in *'scanning the commit message'*) : ;; *) _rc=99 ;; esac
 if [ "$_rc" -eq 0 ]; then pass; else fail "this repo's own issue URL in a commit message was refused (rc $_rc): $_out"; fi
 
+it "scan-for-leaks refuses a home path sharing a line with this repo's own issue URL in a commit message"
+_m="$ROOT/msg-issue-url-combo"
+printf 'fix: something\n\nSee https://github.com/seriouslysean/grubstake/issues/1 from /Users/someone/checkout\n' \
+    >"$_m" || fixture_die "cannot write the message fixture at $_m"
+if GIT_EDITOR=: "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "a home path sharing a line with this repo's own issue URL was not refused"
+else
+    pass
+fi
+
+it "scan-for-leaks does not refuse git's own comment line on the editor path, where cleanup strips it anyway"
+# #133: git sets GIT_EDITOR=: for every commit hook exactly when no editor will run (githooks(5)).
+# Any other value is the editor path, whose default cleanup strips a "#" line before publishing, so
+# a template line git itself inserts (e.g. "# Author: ..." on an amended author) must not be refused.
+_m="$ROOT/msg-author-comment"
+printf 'fix: something\n#\n# Author:    Someone <someone@example.com>\n' >"$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+# vi is a value for GIT_EDITOR, not a command to run.
+# shellcheck disable=SC2209
+if GIT_EDITOR=vi "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    pass
+else
+    fail "a comment line git will strip on the editor path was refused anyway"
+fi
+
+it "scan-for-leaks refuses the same comment line on the -m/-F path, where cleanup keeps it"
+if GIT_EDITOR=: "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "a comment line git keeps on the -m/-F path was not refused"
+else
+    pass
+fi
+
+it "scan-for-leaks does not refuse git's own comment line when GIT_EDITOR is unset"
+# set -u must survive a completely absent GIT_EDITOR, which is the common case outside a git hook.
+if (
+    unset GIT_EDITOR
+    "$REPO/test/scan-for-leaks.sh" --message "$_m"
+) >/dev/null 2>&1; then
+    pass
+else
+    fail "an unset GIT_EDITOR was treated as the -m/-F path instead of the editor default"
+fi
+
 it "scan-for-leaks accepts a commit message carrying none of the refused shapes"
 # The banner is asserted, not just the exit status: an unrecognised flag falls through to the
 # tracked-file scan, which passes on this repo's own clean tree and looks exactly like a scanned
@@ -7064,20 +7131,20 @@ _m="$ROOT/msg-verbose"
     printf '# ------------------------ >8 ------------------------\n'
     printf 'diff --git a/x b/x\n+Claude-Session: inside the verbose diff\n'
 } >"$_m" || fixture_die "cannot write the message fixture at $_m"
-_out="$("$REPO/test/scan-for-leaks.sh" --message "$_m" 2>&1)"
+_out="$(GIT_EDITOR=: "$REPO/test/scan-for-leaks.sh" --message "$_m" 2>&1)"
 _rc=$?
 case "$_out" in *'scanning the commit message'*) : ;; *) _rc=99 ;; esac
 if [ "$_rc" -eq 0 ]; then pass; else fail "the scan read past the scissors line (rc $_rc): $_out"; fi
 
-it "scan-for-leaks refuses an agent-session trailer typed as a comment line in a commit message"
-# #133: the message tier used to drop every "#"-prefixed line, which is right only for the editor
-# path's default cleanup; --cleanup=verbatim publishes a comment line, so a reference on one must
-# still be refused rather than silently stripped before the scan ever sees it.
+it "scan-for-leaks refuses an agent-session trailer typed as a comment line on the -m/-F path"
+# #133: the message tier used to drop every "#"-prefixed line unconditionally, which is right only
+# for the editor path's default cleanup; on the -m/-F path (GIT_EDITOR=:, githooks(5)) the default
+# cleanup keeps a comment line, so a reference on one must still be refused there.
 _m="$ROOT/msg-commented-trailer"
 printf 'fix: something\n#\n# Claude-Session: a-transcript-identifier\n' >"$_m" \
     || fixture_die "cannot write the message fixture at $_m"
-if "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
-    fail "an agent-session trailer typed as a comment line was not refused"
+if GIT_EDITOR=: "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "an agent-session trailer typed as a comment line on the -m/-F path was not refused"
 else
     pass
 fi

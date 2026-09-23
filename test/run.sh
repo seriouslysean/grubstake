@@ -7318,21 +7318,45 @@ else
     fi
 fi
 
-it "GRUBSTAKE_VERSION matches the install snippets in README.md and ADOPTING.md"
+it "GRUBSTAKE_VERSION matches every install-snippet version in README.md and ADOPTING.md"
 # fetch_release skips a tag whose bytes disagree with its name (CONTRIBUTING's release step 3), so
 # a doc pinning the wrong version would not fail a release; it would just ship a bad instruction.
+# Every match is walked, not just the first: a doc carrying a second, stale snippet -- a leftover
+# pasted example, an unfinished bump -- must not pass on the strength of whichever occurrence a
+# head -1 happens to see first.
 _gv="$(sed -n 's/^GRUBSTAKE_VERSION="\(.*\)"$/\1/p' "$GS")"
 [ -n "$_gv" ] || fixture_die "cannot read GRUBSTAKE_VERSION from $GS"
 _bad=""
 for _doc in "$REPO/README.md" "$REPO/ADOPTING.md"; do
-    _dv="$(grep -oE 'grubstake/v[0-9]+\.[0-9]+\.[0-9]+/grubstake\.sh' "$_doc" | head -1 | sed -E 's#.*/v##; s#/grubstake\.sh##')"
-    [ "$_dv" = "$_gv" ] || _bad="$_bad
+    _dvs="$(grep -oE 'grubstake/v[0-9]+\.[0-9]+\.[0-9]+/grubstake\.sh' "$_doc" | sed -E 's#.*/v##; s#/grubstake\.sh##')"
+    [ -n "$_dvs" ] || fixture_die "no install snippet found in $_doc"
+    for _dv in $_dvs; do
+        [ "$_dv" = "$_gv" ] || _bad="$_bad
 $(basename "$_doc")'s install snippet pins v$_dv, grubstake.sh is $_gv"
+    done
 done
-_ev="$(grep -oE 'expect [0-9]+\.[0-9]+\.[0-9]+' "$REPO/README.md" | head -1 | awk '{print $2}')"
-[ "$_ev" = "$_gv" ] || _bad="$_bad
+_evs="$(grep -oE 'expect [0-9]+\.[0-9]+\.[0-9]+' "$REPO/README.md" | awk '{print $2}')"
+[ -n "$_evs" ] || fixture_die "no \`expect\` comment found in $REPO/README.md"
+for _ev in $_evs; do
+    [ "$_ev" = "$_gv" ] || _bad="$_bad
 README.md's \`expect\` comment says $_ev, grubstake.sh is $_gv"
+done
 [ -z "$_bad" ] && pass || fail "$_bad"
+
+it "the version-agreement check catches a second, disagreeing snippet appended to a doc"
+# Watches the every-match walk above actually walk: a fixture built by copying README.md and
+# appending a second install line at a version nobody bumped grubstake.sh to.
+_vfx="$(mktemp -d "${TMPDIR:-/tmp}/grubstake-version-fixture.XXXXXX")" || fixture_die "no scratch directory for the version-fixture test"
+cp "$REPO/README.md" "$_vfx/README.md" || fixture_die "cannot copy README.md into $_vfx"
+printf '\ncurl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v9.9.9/grubstake.sh -o grubstake.sh\n' >>"$_vfx/README.md"
+_gv="$(sed -n 's/^GRUBSTAKE_VERSION="\(.*\)"$/\1/p' "$GS")"
+_dvs="$(grep -oE 'grubstake/v[0-9]+\.[0-9]+\.[0-9]+/grubstake\.sh' "$_vfx/README.md" | sed -E 's#.*/v##; s#/grubstake\.sh##')"
+_mismatch=0
+for _dv in $_dvs; do
+    [ "$_dv" = "$_gv" ] || _mismatch=1
+done
+rm -rf "$_vfx"
+[ "$_mismatch" -eq 1 ] && pass || fail "appending a stale v9.9.9 install line to a copy of README.md did not trip the every-match check"
 
 # ---------------------------------------------------------------------------- result
 

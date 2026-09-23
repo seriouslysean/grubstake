@@ -7318,6 +7318,22 @@ else
     fi
 fi
 
+it "GRUBSTAKE_VERSION matches the install snippets in README.md and ADOPTING.md"
+# fetch_release skips a tag whose bytes disagree with its name (CONTRIBUTING's release step 3), so
+# a doc pinning the wrong version would not fail a release; it would just ship a bad instruction.
+_gv="$(sed -n 's/^GRUBSTAKE_VERSION="\(.*\)"$/\1/p' "$GS")"
+[ -n "$_gv" ] || fixture_die "cannot read GRUBSTAKE_VERSION from $GS"
+_bad=""
+for _doc in "$REPO/README.md" "$REPO/ADOPTING.md"; do
+    _dv="$(grep -oE 'grubstake/v[0-9]+\.[0-9]+\.[0-9]+/grubstake\.sh' "$_doc" | head -1 | sed -E 's#.*/v##; s#/grubstake\.sh##')"
+    [ "$_dv" = "$_gv" ] || _bad="$_bad
+$(basename "$_doc")'s install snippet pins v$_dv, grubstake.sh is $_gv"
+done
+_ev="$(grep -oE 'expect [0-9]+\.[0-9]+\.[0-9]+' "$REPO/README.md" | head -1 | awk '{print $2}')"
+[ "$_ev" = "$_gv" ] || _bad="$_bad
+README.md's \`expect\` comment says $_ev, grubstake.sh is $_gv"
+[ -z "$_bad" ] && pass || fail "$_bad"
+
 # ---------------------------------------------------------------------------- result
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"

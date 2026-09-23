@@ -7203,6 +7203,74 @@ else
     pass
 fi
 
+it "#134: a hand-typed scissors line on the -F path is scanned and refused, not trusted as a cut"
+# git only removes anything below its own scissors line when an editor actually ran; -F never
+# invokes one, so --cleanup=verbatim (and the default whitespace cleanup) publish the line and
+# everything below it verbatim. Trusting the line unconditionally let this exact shape through.
+r=$(adopted_repo)
+{
+    printf 'chore: x\n\nbody\n'
+    printf '# ------------------------ >8 ------------------------\n'
+    printf 'Claude-Session: a-transcript-identifier\n'
+} >"$r/scissors-Fmsg" || fixture_die "cannot write the #134 repro message in $r"
+_c0=$(commits "$r")
+if (cd "$r" && git commit -q --allow-empty --cleanup=verbatim -F "$r/scissors-Fmsg") >/dev/null 2>&1; then
+    fail "accepted an agent-session reference published verbatim below a hand-typed scissors line on the -F path"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+else
+    pass
+fi
+
+it "a comment merely mentioning '>8' is not mistaken for git's own scissors line"
+# The old pattern was "^#.*>8", so any "#" comment naming ">8" anywhere, not just git's own
+# untranslated literal, was read as the cut point and hid a trailer beneath it that git never
+# actually strips. Driven through a real editor commit, so the trust-the-cut-line branch is the
+# one under test, not the -F path's now-unconditional full scan.
+r=$(adopted_repo)
+cat >"$r/loose-scissors-editor" <<'EDITOR'
+#!/bin/sh
+printf 'chore: fixture\n\n# handles more than >8 items\nClaude-Session: a-transcript-identifier\n' > "$1"
+EDITOR
+chmod +x "$r/loose-scissors-editor" || fixture_die "cannot make the editor stub executable in $r"
+_c0=$(commits "$r")
+if (cd "$r" && GIT_EDITOR="$r/loose-scissors-editor" git commit -q --allow-empty) >/dev/null 2>&1; then
+    fail "a comment merely containing '>8' was treated as git's cut line, hiding the trailer below it"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+else
+    pass
+fi
+
+it "a real scissors line still cuts everything below it when core.commentChar is not the default '#'"
+# Same contract as the "--verbose diff" test above, with the comment prefix git itself uses moved
+# off the default, so the fix has to resolve the configured prefix rather than assume "#".
+r=$(adopted_repo)
+git -C "$r" config core.commentChar ';' || fixture_die "cannot set core.commentChar in $r"
+cat >"$r/subject-editor-scc" <<'EDITOR'
+#!/bin/sh
+printf 'chore: a change whose diff carries the shape\n\n' > "$1.new"
+cat "$1" >> "$1.new"
+mv "$1.new" "$1"
+EDITOR
+chmod +x "$r/subject-editor-scc" || fixture_die "cannot make the editor stub executable in $r"
+printf 'let a = 1\n' >"$r/Seed2.txt" || fixture_die "cannot write the seed file in $r"
+(cd "$r" && git add -- Seed2.txt && GIT_EDITOR="$r/subject-editor-scc" git commit -q -v) >/dev/null 2>&1 \
+    || fixture_die "cannot seed a baseline commit in $r"
+printf 'let a = 1\nClaude-Session: a-transcript-identifier\n' >"$r/Seed2.txt" \
+    || fixture_die "cannot write the refused shape into the seed file in $r"
+(cd "$r" && git add -- Seed2.txt) || fixture_die "cannot stage Seed2.txt in $r"
+_c0=$(commits "$r")
+if ! (cd "$r" && GIT_EDITOR="$r/subject-editor-scc" git commit -q -v) >/dev/null 2>&1; then
+    fail "read past a ';'-prefixed scissors line and refused a commit whose --verbose diff carries the shape"
+elif [ "$(commits "$r")" = "$_c0" ]; then
+    fail "exited 0 without committing"
+elif (cd "$r" && git log -1 --format=%B) | grep -q "Claude-[S]ession"; then
+    fail "the message git published carries the reference, so accepting it was the wrong verdict"
+else
+    pass
+fi
+
 it "the commit-msg spine runs a repo-local gate in commit-msg.d/ and hands it the message"
 # An extension point nothing dispatches from looks exactly like one that dispatches and passes.
 # The gate refuses on a shape the spine knows nothing about, so this cannot go green off the

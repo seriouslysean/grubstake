@@ -906,13 +906,36 @@ case "$1" in /*) MSG="$1" ;; *) MSG="$PWD/$1" ;; esac
 # does not report the hook that refuses them.
 RE_SESSION='Claude-[S]ession:|claude\.ai/code/[s]ession'
 
-# Only the --verbose diff below the scissors line is dropped, since it never becomes the message.
-# Comment lines are scanned: -m and -F default to the whitespace cleanup and --cleanup=verbatim to
-# none, and both publish them, so the spine cannot know that a "#" line will be stripped.
-BODY="$(sed -e '/^#.*>8/,$d' "$MSG")" || {
-    echo "[commit-msg] cannot read $MSG, so the message was not scanned" >&2
-    exit 1
-}
+# git only strips anything below its own scissors line when an editor actually ran (--verbose or
+# --cleanup=scissors); on -m/-F git sets GIT_EDITOR to the literal ":" and publishes the line and
+# everything below it verbatim, so trusting a cut line there let #134's exact repro through unread.
+SCISSORS='------------------------ >8 ------------------------'
+# core.commentString generalizes the older, single-character core.commentChar; the newer wins.
+CCHAR="$(git config --get core.commentString 2>/dev/null)" || CCHAR=""
+[ -n "$CCHAR" ] || CCHAR="$(git config --get core.commentChar 2>/dev/null)" || CCHAR=""
+[ -n "$CCHAR" ] || CCHAR='#'
+
+if [ "${GIT_EDITOR:-}" = ':' ]; then
+    BODY="$(cat "$MSG")" || {
+        echo "[commit-msg] cannot read $MSG, so the message was not scanned" >&2
+        exit 1
+    }
+else
+    # Trusted only because an editor ran: scanning past a real cut line here would refuse this
+    # repo's own routine --verbose commits. A plain, non-verbose interactive edit that hand-types
+    # this exact line is the residual gap, since git cuts here under scissors cleanup, never strip.
+    BODY="$(awk -v cchar="$CCHAR" -v scissors="$SCISSORS" '
+        {
+            # "auto" picks one character per message; any single non-space prefix stands in for it.
+            if (cchar == "auto") { if ($0 ~ ("^[^[:space:]] " scissors "$")) exit }
+            else if ($0 == cchar " " scissors) exit
+            print
+        }
+    ' "$MSG")" || {
+        echo "[commit-msg] cannot read $MSG, so the message was not scanned" >&2
+        exit 1
+    }
+fi
 # -i, because the same reference in another casing is the same reference, and matching one
 # spelling made a gate that never fires look exactly like one that passes.
 HITS="$(printf '%s\n' "$BODY" | grep -inE "$RE_SESSION")" || HITS=""
@@ -1049,7 +1072,7 @@ known_hook_hashes() {
             echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494 3d5bdb2e6d05d6b4c5e4443f0e77788f71ba0d7e08e3c84935d7594e88af1660 3b8814f783d5bd3b16a61f3f944ff3e1ec783ec3873e3050fcd7c96e4d562029"
             ;;
         commit-msg)
-            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421 e2b2336f9737cc37cbd9930ac623cea7e997a58551450d684a181b5bc7861e93 131bd0c2591df52a7d99ac7575c413a8b8b787d0a3991da41997aa4bea5df2d6"
+            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421 e2b2336f9737cc37cbd9930ac623cea7e997a58551450d684a181b5bc7861e93 131bd0c2591df52a7d99ac7575c413a8b8b787d0a3991da41997aa4bea5df2d6 b9b2182062a44aa0db4fe2b7997f1cb1fa594d6fa74fe231116db48487d02eab"
             ;;
         *) die "unknown hook: $1" ;;
     esac

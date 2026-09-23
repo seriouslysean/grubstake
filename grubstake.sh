@@ -784,7 +784,7 @@ if [ -n "$STAGED_SWIFT" ]; then
     OUT=$("$GRUBSTAKE" path swiftlint 2>&1) && RC=0 || RC=$?
     if [ "$RC" -eq 0 ]; then
         SWIFTLINT="$OUT"
-    elif [ "$OUT" != "[grubstake] swiftlint is not pinned" ]; then
+    elif [ "$RC" -ne 3 ]; then
         echo "$OUT" >&2
         exit 1
     fi
@@ -1100,7 +1100,7 @@ hook_has_marker() {
 known_hook_hashes() {
     case "$1" in
         pre-commit)
-            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 1f1a0953e8ebe4bba4331251ca7d6a3da9f0c3ead68ff9285056fb94505a773f a1e18ebfe81064a0addf39ee74de7b477fc868d2c810679fdb486d27601a8c4b 7bbd9b3c1678aa93e9556c31a5ba1c660c617a71046429d8d879175900acc9a1 1b3c8ce3cef18d31a3e799a59a231b7260a62d06c78e8c63e02822f4ab0fee1a f5e2035b76358ce6d62907ac8ddf1eb2795bbf64c302a3e0165f036e0a0711f8"
+            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 1f1a0953e8ebe4bba4331251ca7d6a3da9f0c3ead68ff9285056fb94505a773f a1e18ebfe81064a0addf39ee74de7b477fc868d2c810679fdb486d27601a8c4b 7bbd9b3c1678aa93e9556c31a5ba1c660c617a71046429d8d879175900acc9a1 1b3c8ce3cef18d31a3e799a59a231b7260a62d06c78e8c63e02822f4ab0fee1a f5e2035b76358ce6d62907ac8ddf1eb2795bbf64c302a3e0165f036e0a0711f8 183070c78350fac26f630a3c00e6441f817bf05a620921cc87f4bf01efa7bbab"
             ;;
         post-commit)
             echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494 3d5bdb2e6d05d6b4c5e4443f0e77788f71ba0d7e08e3c84935d7594e88af1660 3b8814f783d5bd3b16a61f3f944ff3e1ec783ec3873e3050fcd7c96e4d562029 1853474b3b0a7e201e1a9c4d401940d45ed22d61e4537e61a5fd05f7d69c3e2b 48acd0af42b634d7973a6122d44e07056a29c26183d4ecc88b196ad98aa7fc07"
@@ -1267,7 +1267,11 @@ cmd_path() {
     [ $# -ge 1 ] || die "usage: grubstake path <tool>"
     validate_pins
     is_known_tool "$1" || die "unknown tool: $1"
-    _ver="$(pin_version "$1")" || die "$1 is not pinned"
+    # Exit 3, not die's usual 1, so a caller reads this off status rather than this rewordable message.
+    _ver="$(pin_version "$1")" || {
+        warn "$1 is not pinned"
+        exit 3
+    }
     # Assigned on its own, not nested as an argument: a die inside $( ) only kills that subshell, so
     # embedding it in tool_url's own argument would let tool_url's unrelated death mask this one.
     _plat="$(platform)"

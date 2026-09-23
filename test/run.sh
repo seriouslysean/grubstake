@@ -5604,6 +5604,22 @@ elif [ "$(commits "$r")" != 2 ]; then
     fail "exited 0 without committing"
 else pass; fi
 
+it "pre-commit's not-pinned check survives a reworded not-pinned message from grubstake path"
+# cmd_path's contract is its exit status; matching this rewordable text instead would not honor it.
+r=$(new_hook_repo)
+sed -i.bak 's/is not pinned/has no pin on file/' "$r/grubstake.sh" && rm -f "$r/grubstake.sh.bak"
+grep -q "has no pin on file" "$r/grubstake.sh" || fixture_die "the not-pinned reword did not apply in $r"
+stage "$r" A.swift "struct A {}"
+_out=$(hook_commit "$r")
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "a reworded not-pinned message blocked a commit that should pass quietly: $_out"
+elif [ "$(commits "$r")" != 2 ]; then
+    fail "exited 0 without committing"
+else
+    pass
+fi
+
 it "pre-commit asks the script whether swiftlint is pinned, so a symlinked grubstake.sh still lints"
 # The spine grepped $ROOT/grubstake.tools directly; when grubstake.sh is a symlink, the pins file
 # lives beside its target, which that literal path misses and lint was silently skipped, error
@@ -5624,6 +5640,53 @@ elif [ "$_rc" -eq 0 ]; then
     fail "a violation was committed because lint was silently skipped through the symlink: $_out"
 elif [ "$(commits "$r")" != 1 ]; then
     fail "refused, and committed anyway"
+else
+    pass
+fi
+
+it "a decoy grubstake.tools beside a symlinked grubstake.sh is ignored, and the resolved pins win"
+# A decoy pins file at the symlink's own literal path must lose to the real one beside its target.
+r=$(new_hook_repo)
+_real="$(dirname "$r")/real-grubstake2.$$"
+mkdir -p "$_real" || fixture_die "cannot create $_real"
+mv "$r/grubstake.sh" "$_real/grubstake.sh" || fixture_die "cannot relocate grubstake.sh in $r"
+pins "$_real" "swiftlint 0.63.2 $SHA_A $SHA_A"
+ln -s "$_real/grubstake.sh" "$r/grubstake.sh" || fixture_die "cannot symlink grubstake.sh in $r"
+# No swiftlint line at all, so a hook that greps the root file directly would call it unpinned.
+pins "$r" "periphery 1.0.0 $SHA_B $SHA_B"
+stub_linter_mechanical "$r"
+stage "$r" A.swift 'let x = 1 // VIOLATION_MARKER'
+_out=$(hook_commit "$r")
+_rc=$?
+if [ ! -f "$r/lint.argv.1" ]; then
+    fail "the linter never ran, so the decoy at the literal path silently won: $_out"
+elif [ "$_rc" -eq 0 ]; then
+    fail "a violation was committed even though the resolved pins should have caught it: $_out"
+elif [ "$(commits "$r")" != 1 ]; then
+    fail "refused, and committed anyway"
+elif ! printf '%s' "$_out" | grep -q "Fake Violation"; then
+    fail "refused without the linter's own verdict, so this may not have used the resolved pins: $_out"
+else
+    pass
+fi
+
+it "pre-commit lets a clean Swift commit through when grubstake.sh symlinks to an in-repo nested/ target"
+# An in-repo symlink target (nested/grubstake.sh) must not leave a clean commit blocked by asking the wrong path for pins.
+r=$(new_hook_repo)
+mkdir -p "$r/nested" || fixture_die "cannot create $r/nested"
+mv "$r/grubstake.sh" "$r/nested/grubstake.sh" || fixture_die "cannot relocate grubstake.sh into $r/nested"
+pins "$r/nested" "swiftlint 0.63.2 $SHA_A $SHA_A"
+ln -s nested/grubstake.sh "$r/grubstake.sh" || fixture_die "cannot symlink grubstake.sh in $r"
+stub_linter_mechanical "$r"
+stage "$r" A.swift "struct A {}"
+_out=$(hook_commit "$r")
+_rc=$?
+if [ ! -f "$r/lint.argv.1" ]; then
+    fail "the linter never ran through the in-repo nested/ symlink target: $_out"
+elif [ "$_rc" -ne 0 ]; then
+    fail "a clean Swift commit was refused through the in-repo nested/ symlink target: $_out"
+elif [ "$(commits "$r")" != 2 ]; then
+    fail "exited 0 without committing"
 else
     pass
 fi

@@ -65,7 +65,7 @@ if [ -n "$STAGED_SWIFT" ]; then
     OUT=$("$GRUBSTAKE" path swiftlint 2>&1) && RC=0 || RC=$?
     if [ "$RC" -eq 0 ]; then
         SWIFTLINT="$OUT"
-    elif [ "$OUT" != "[grubstake] swiftlint is not pinned" ]; then
+    elif [ "$RC" -ne 3 ]; then
         echo "$OUT" >&2
         exit 1
     fi

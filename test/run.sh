@@ -5985,6 +5985,22 @@ else
     pass
 fi
 
+it "an offline ensure refusal names the real cause, not the command already running"
+# Telling a caller already running ensure to run ensure is circular.
+r=$(new_repo)
+pins "$r" "periphery 1.0.0 $SHA_A $SHA_A"
+_out=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_OFFLINE=1 ./grubstake.sh ensure 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 with a pinned tool never installed: $_out"
+elif printf '%s' "$_out" | grep -q "grubstake ensure"; then
+    fail "told a caller already running ensure to run ensure: $_out"
+elif ! printf '%s' "$_out" | grep -qi "offline"; then
+    fail "didn't name GRUBSTAKE_OFFLINE as the reason: $_out"
+else
+    pass
+fi
+
 it "post-commit reports a release newer than the one running"
 r=$(new_hook_repo)
 latest_cache "$r" 99.9.9

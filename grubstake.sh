@@ -592,10 +592,8 @@ install_tool() {
         fi
     fi
 
-    # Reached only when nothing usable is already on disk: GRUBSTAKE_OFFLINE refuses the download
-    # here, once, so every caller of install_tool inherits the same refusal instead of each needing
-    # its own copy of this check.
-    [ -z "${GRUBSTAKE_OFFLINE:-}" ] || die "$_tool $_ver: not installed (run: grubstake ensure)"
+    # Refused before any network call; $3 overrides the remedy for a caller that is itself ensure.
+    [ -z "${GRUBSTAKE_OFFLINE:-}" ] || die "$_tool $_ver: not installed (${3:-run: grubstake ensure})"
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     arm_cleanup "rm -rf $(sq "$_tmp")"
@@ -1237,7 +1235,7 @@ cmd_ensure() {
     _bad=0
     for _tool in $(pinned_tools); do
         _any=1
-        install_tool "$_tool" "$(pin_version "$_tool")" || _bad=1
+        install_tool "$_tool" "$(pin_version "$_tool")" "GRUBSTAKE_OFFLINE is set" || _bad=1
     done
     [ "$_any" = 1 ] || warn "no tools pinned yet (run: grubstake add swiftlint@x.y.z)"
     # Bare would let verify_pinned's own now-possible non-zero return trip set -e before the line below runs.

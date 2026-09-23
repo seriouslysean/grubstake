@@ -52,10 +52,21 @@ STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
 [ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
 
 # Only lint if the repo pinned swiftlint. A repo that does not use it should not be blocked by
-# the shared spine; its own gates in pre-commit.d decide. One line per tool, so grep is enough.
-if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.tools" 2>/dev/null; then
-    # GRUBSTAKE_OFFLINE (exported above, spine-wide) keeps curl off the commit path here too.
-    SWIFTLINT="$("$GRUBSTAKE" path swiftlint)" || exit 1
+# the shared spine; its own gates in pre-commit.d decide. Asked of the script rather than grepped
+# from grubstake.tools directly: grubstake.sh may be a symlink whose pins live beside its target,
+# which a literal path missed and left lint silently skipped.
+SWIFTLINT=""
+if [ -n "$STAGED_SWIFT" ]; then
+    OUT=$("$GRUBSTAKE" path swiftlint 2>&1) && RC=0 || RC=$?
+    if [ "$RC" -eq 0 ]; then
+        SWIFTLINT="$OUT"
+    elif [ "$OUT" != "[grubstake] swiftlint is not pinned" ]; then
+        echo "$OUT" >&2
+        exit 1
+    fi
+fi
+
+if [ -n "$SWIFTLINT" ]; then
     # Verify and refuse rather than format-and-restage: re-adding after a fix folds unrelated
     # hunks into a partial `git add -p` and re-stages a working-tree deletion of a file staged
     # as new. The developer fixes and re-stages; the hook never touches the index.

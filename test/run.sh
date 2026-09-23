@@ -5586,6 +5586,44 @@ elif [ "$(commits "$r")" != 2 ]; then
     fail "exited 0 without committing"
 else pass; fi
 
+it "a Swift commit with swiftlint unpinned still commits, without a binary to check against"
+# A repo that never pinned swiftlint must stay unblocked on a Swift commit; asking the script
+# whether swiftlint is pinned (rather than grepping the pins file) must still answer "no" quietly
+# for a repo that opted out, not refuse it the way a genuine tool failure would.
+r=$(new_hook_repo)
+stage "$r" A.swift "struct A {}"
+_out=$(hook_commit "$r")
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "a repo that never pinned swiftlint was blocked on a Swift commit (rc $_rc): $_out"
+elif [ "$(commits "$r")" != 2 ]; then
+    fail "exited 0 without committing"
+else pass; fi
+
+it "pre-commit asks the script whether swiftlint is pinned, so a symlinked grubstake.sh still lints"
+# The spine grepped $ROOT/grubstake.tools directly; when grubstake.sh is a symlink, the pins file
+# lives beside its target, which that literal path misses and lint was silently skipped, error
+# discarded. Asking the script resolves the symlink the same way every other command already does.
+r=$(new_hook_repo)
+_real="$(dirname "$r")/real-grubstake.$$"
+mkdir -p "$_real" || fixture_die "cannot create $_real"
+mv "$r/grubstake.sh" "$_real/grubstake.sh" || fixture_die "cannot relocate grubstake.sh in $r"
+pins "$_real" "swiftlint 0.63.2 $SHA_A $SHA_A"
+ln -s "$_real/grubstake.sh" "$r/grubstake.sh" || fixture_die "cannot symlink grubstake.sh in $r"
+stub_linter_mechanical "$r"
+stage "$r" A.swift 'let x = 1 // VIOLATION_MARKER'
+_out=$(hook_commit "$r")
+_rc=$?
+if [ ! -f "$r/lint.argv.1" ]; then
+    fail "the linter never ran through a symlinked grubstake.sh: $_out"
+elif [ "$_rc" -eq 0 ]; then
+    fail "a violation was committed because lint was silently skipped through the symlink: $_out"
+elif [ "$(commits "$r")" != 1 ]; then
+    fail "refused, and committed anyway"
+else
+    pass
+fi
+
 it "a cache entry that vanishes between the hook's check and its path call still refuses offline"
 # Landing the clean inside this window is not reproducible on demand, so the fixture makes check answer "passed" unconditionally and never installs the binary, then drives a real commit through the real hook to prove the guard.
 r=$(new_hook_repo)

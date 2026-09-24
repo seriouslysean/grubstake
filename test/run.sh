@@ -44,6 +44,45 @@ cleanup() {
 trap cleanup EXIT
 trap 'cleanup; exit 2' HUP INT TERM
 
+# ---------------------------------------------------------------------------- git isolation
+
+# #116: an isolated GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM keep every fixture's "git config --global" off the machine's real files.
+GIT_CONFIG_NOSYSTEM=1
+GIT_CONFIG_GLOBAL="$ROOT/gitconfig-global"
+export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
+# An inherited GIT_DIR (or its siblings) would redirect a fixture's own config write into a directory this suite does not own.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_CEILING_DIRECTORIES
+
+# A real, empty file, not /dev/null, so a fixture that writes global config (several already set their own GIT_CONFIG_GLOBAL, which must keep working) has somewhere to land.
+: >"$GIT_CONFIG_GLOBAL" || {
+    printf 'FATAL  cannot create %s\n' "$GIT_CONFIG_GLOBAL" >&2
+    exit 2
+}
+git config --file "$GIT_CONFIG_GLOBAL" user.name "grubstake suite" \
+    && git config --file "$GIT_CONFIG_GLOBAL" user.email test@example.invalid \
+    && git config --file "$GIT_CONFIG_GLOBAL" commit.gpgsign false \
+    && git config --file "$GIT_CONFIG_GLOBAL" init.defaultBranch main || {
+    printf 'FATAL  cannot seed the isolated global git identity\n' >&2
+    exit 2
+}
+# A silent no-op here (an old git ignoring GIT_CONFIG_GLOBAL) would isolate nothing while looking identical to success.
+[ "$(git config --global --get user.email)" = "test@example.invalid" ] || {
+    printf 'FATAL  the isolated GIT_CONFIG_GLOBAL was not honored by this git\n' >&2
+    exit 2
+}
+
+# #116: this repository's own local config must read back identical at exit, so a fixture that escapes into it fails the run loudly.
+_repo_gitcfg="$(git -C "$REPO" rev-parse --git-path config)" || {
+    printf 'FATAL  cannot resolve %s'"'"'s own git config path\n' "$REPO" >&2
+    exit 2
+}
+case "$_repo_gitcfg" in /*) : ;; *) _repo_gitcfg="$REPO/$_repo_gitcfg" ;; esac
+_repo_gitcfg_snapshot="$ROOT/repo-config-snapshot"
+cp "$_repo_gitcfg" "$_repo_gitcfg_snapshot" || {
+    printf 'FATAL  cannot snapshot %s\n' "$_repo_gitcfg" >&2
+    exit 2
+}
+
 # ---------------------------------------------------------------------------- harness
 
 it() { CURRENT="$1"; }
@@ -231,6 +270,27 @@ SHIM
     chmod +x "$_lpdir/mkdir" || fixture_die "cannot make the lock-pause mkdir shim executable"
 }
 
+# A deterministic stand-in for a wall-clock verdict: appends the matched call's own arguments to $2 instead of pausing, so a caller can assert how many times a lock was attempted rather than how long attempting it took; the plant hook and real-mkdir-baked-in resolution mirror lock_pause_shim's own.
+lock_count_shim() {
+    _lcdir="$1"
+    _lccounter="$2"
+    _lcpat="${3:-*.lock}"
+    mkdir -p "$_lcdir" || fixture_die "cannot create the lock-count shim dir $_lcdir"
+    : >"$_lccounter" || fixture_die "cannot create the lock-count counter file $_lccounter"
+    _lcreal="$(command -v mkdir)" || fixture_die "no real mkdir on PATH to wrap"
+    cat >"$_lcdir/mkdir" <<SHIM
+#!/bin/sh
+case "\$*" in
+    $_lcpat)
+        [ -x "$_lcdir/plant" ] && "$_lcdir/plant" "\$@"
+        printf '%s\n' "\$*" >>"$_lccounter"
+        ;;
+esac
+exec "$_lcreal" "\$@"
+SHIM
+    chmod +x "$_lcdir/mkdir" || fixture_die "cannot make the lock-count mkdir shim executable"
+}
+
 # Pauses "mv" only when its destination (mv's own last argument) exactly matches $4, so it does not
 # also catch an unrelated mv on the same run -- install_tool renames the archived member into place
 # inside staging before ever publishing, and on Linux (where swiftlint's member is named
@@ -294,6 +354,23 @@ SHIM
     chmod +x "$_gpdir/git" || fixture_die "cannot make the git-pause git shim executable"
 }
 
+# A deterministic stand-in for a wall-clock verdict: appends one line per real invocation of git's own hooksPath-write call (the same five-argument shape git_pause_shim matches) instead of timing it.
+git_count_shim() {
+    _gcdir="$1"
+    _gccounter="$2"
+    mkdir -p "$_gcdir" || fixture_die "cannot create the git-count shim dir $_gcdir"
+    : >"$_gccounter" || fixture_die "cannot create the git-count counter file $_gccounter"
+    _gcreal="$(command -v git)" || fixture_die "no real git on PATH to wrap"
+    cat >"$_gcdir/git" <<SHIM
+#!/bin/sh
+if [ "\$#" -eq 5 ] && [ "\$1" = "-C" ] && [ "\$3" = "config" ] && [ "\$4" = "core.hooksPath" ] && [ "\$5" = ".githooks" ]; then
+    printf '%s\n' "\$*" >>"$_gccounter"
+fi
+exec "$_gcreal" "\$@"
+SHIM
+    chmod +x "$_gcdir/git" || fixture_die "cannot make the git-count git shim executable"
+}
+
 # For tests that cannot pin the same hash in both columns because they read a hash `add` wrote
 # for real over the network: a hardcoded column asserts against a path only one platform installs to.
 sha_column() {
@@ -318,14 +395,34 @@ expect_fail() {
 expect_ok() {
     if gs_rc "$@"; then pass; else fail "expected exit 0, got non-zero"; fi
 }
-expect_says() {
+# Named by the status each expects, since a command that prints the right words while exiting wrong must still fail.
+expect_says_ok() {
     _want="$1"
     shift
     _out="$(gs "$@")"
-    case "$_out" in
-        *"$_want"*) pass ;;
-        *) fail "output did not contain '$_want'. Got: $_out" ;;
-    esac
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        fail "expected exit 0, got $_rc: $_out"
+    else
+        case "$_out" in
+            *"$_want"*) pass ;;
+            *) fail "output did not contain '$_want'. Got: $_out" ;;
+        esac
+    fi
+}
+expect_says_fail() {
+    _want="$1"
+    shift
+    _out="$(gs "$@")"
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+        fail "expected non-zero exit, got 0: $_out"
+    else
+        case "$_out" in
+            *"$_want"*) pass ;;
+            *) fail "output did not contain '$_want'. Got: $_out" ;;
+        esac
+    fi
 }
 
 # ---------------------------------------------------------------------------- basics
@@ -334,14 +431,23 @@ printf '\nbasics\n'
 
 it "version prints the embedded version"
 r=$(new_repo)
-v=$(gs "$r" version)
-case "$v" in [0-9]*.[0-9]*.[0-9]*) pass ;; *) fail "got '$v'" ;; esac
+_want=$(sed -n 's/^GRUBSTAKE_VERSION="\(.*\)"$/\1/p' "$GS")
+[ -n "$_want" ] || fixture_die "cannot read GRUBSTAKE_VERSION from $GS"
+_out=$(gs "$r" version)
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "version exited non-zero: $_out"
+elif [ "$_out" != "$_want" ]; then
+    fail "got '$_out', want '$_want'"
+else
+    pass
+fi
 
 it "no arguments prints usage and exits 0"
 expect_ok "$(new_repo)"
 
 it "an unknown verb fails"
-expect_fail "$(new_repo)" notaverb
+expect_says_fail "unknown command: notaverb" "$(new_repo)" notaverb
 
 it "runs under dash, not just bash"
 if dash -n "$GS" 2>/dev/null; then pass; else fail "dash -n rejected the script"; fi
@@ -727,22 +833,22 @@ it "a duplicate tool line fails"
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B
 swiftlint 0.65.0 $SHA_A $SHA_B"
-expect_fail "$r" check
+expect_says_fail "grubstake.tools pins a tool more than once: swiftlint" "$r" check
 
 it "a line with the wrong field count fails"
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A"
-expect_fail "$r" check
+expect_says_fail "grubstake.tools:2 expected 4 fields, got 3" "$r" check
 
 it "a sha that is not 64 hex characters fails"
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 nothex $SHA_B"
-expect_fail "$r" check
+expect_says_fail "grubstake.tools:2 sha256 must be 64 hex chars or -, got: nothex" "$r" check
 
 it "an unknown tool name fails"
 r=$(new_repo)
 pins "$r" "notatool 1.0.0 $SHA_A $SHA_B"
-expect_fail "$r" check
+expect_says_fail "grubstake.tools:2 unknown tool: notatool" "$r" check
 
 it "an option-shaped tool name in the pins file does not pass validation via grep's own flag parsing"
 # Without -e, grep reads "--version" as its own flag and reports a false match, so validate_pins never named the line.
@@ -763,34 +869,34 @@ it "an unresolved conflict marker fails"
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B
 <<<<<<< HEAD"
-expect_fail "$r" check
+expect_says_fail "grubstake.tools has unresolved conflict markers" "$r" check
 
 it "CRLF line endings fail"
 r=$(new_repo)
 printf '# h\r\nswiftlint 0.63.2 %s %s\r\n' "$SHA_A" "$SHA_B" >"$r/grubstake.tools"
-expect_fail "$r" check
+expect_says_fail "grubstake.tools has CRLF line endings" "$r" check
 
 it "an indented pin line fails"
 r=$(new_repo)
 pins "$r" "  swiftlint 0.63.2 $SHA_A $SHA_B"
-expect_fail "$r" check
+expect_says_fail "grubstake.tools:2 line must not be indented" "$r" check
 
 it "an unterminated final line is still validated"
 r=$(new_repo)
 printf '# h\nswiftlint 0.63.2 %s' "$SHA_A" >"$r/grubstake.tools"
-expect_fail "$r" check
+expect_says_fail "grubstake.tools:2 expected 4 fields, got 3" "$r" check
 
 it "a malformed pin fails check, not just ensure"
 # check is what the pre-commit hook calls. It once passed on a malformed file because a die
 # inside a command substitution killed only the subshell.
 r=$(new_repo)
 pins "$r" "garbage 1.0.0 $SHA_A $SHA_B"
-expect_fail "$r" check
+expect_says_fail "grubstake.tools:2 unknown tool: garbage" "$r" check
 
 it "a malformed pin fails doctor too"
 r=$(new_repo)
 pins "$r" "garbage 1.0.0 $SHA_A $SHA_B"
-expect_fail "$r" doctor
+expect_says_fail "grubstake.tools:2 unknown tool: garbage" "$r" doctor
 
 it "doctor exits non-zero when a pinned tool is missing"
 # #148: doctor printed every row, MISSING included, but always exited 0 -- a script or CI step
@@ -923,7 +1029,7 @@ fi
 it "a positional line missing both shas still dies under the keyed-aware parser"
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2"
-expect_fail "$r" check
+expect_says_fail "grubstake.tools:2 expected 4 fields, got 2" "$r" check
 
 it "a keyed line with a duplicate key is rejected as a duplicate, not merely non-zero"
 r=$(new_repo)
@@ -1730,16 +1836,17 @@ r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
 chmod 555 "$r/.cache/swiftlint" || fixture_die "cannot make $r/.cache/swiftlint read-only"
-_t0=$(date +%s)
-_out=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
+_shim="$(mktemp -d "$ROOT/lock-count.XXXXXX")" || fixture_die "cannot create the lock-count shim dir"
+_counter="$_shim/count"
+lock_count_shim "$_shim" "$_counter"
+_out=$(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
 _rc=$?
-_t1=$(date +%s)
 chmod 755 "$r/.cache/swiftlint" 2>/dev/null
-_elapsed=$((_t1 - _t0))
+_count=$(wc -l <"$_counter" | tr -d ' ')
 if [ "$_rc" -eq 0 ]; then
     fail "ensure exited 0 despite a permission-denied lock directory: $_out"
-elif [ "$_elapsed" -ge 3 ]; then
-    fail "ensure spun ${_elapsed}s instead of failing fast on a non-retryable permission denial: $_out"
+elif [ "$_count" -ne 1 ]; then
+    fail "with_lock attempted the lock $_count times instead of failing fast after one ($(cat "$_counter")): $_out"
 elif printf '%s' "$_out" | grep -qi "locked by another run"; then
     fail "blamed a lock nobody held instead of the real permission failure: $_out"
 elif ! printf '%s' "$_out" | grep -qi "permission denied"; then
@@ -1763,29 +1870,19 @@ it "ensure blames an unreadable ancestor honestly, not a cache that was never re
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
-_shim="$r/mkdir-shim"
-mkdir -p "$_shim" || fixture_die "cannot create $_shim"
-_realmkdir="$(command -v mkdir)" || fixture_die "no real mkdir on PATH to wrap"
-cat >"$_shim/mkdir" <<SHIM
-#!/bin/sh
-case "\$*" in
-    *.lock)
-        chmod 000 "$r/.cache"
-        ;;
-esac
-exec "$_realmkdir" "\$@"
-SHIM
-chmod +x "$_shim/mkdir" || fixture_die "cannot make the mkdir shim executable"
-_t0=$(date +%s)
+_shim="$(mktemp -d "$ROOT/lock-count.XXXXXX")" || fixture_die "cannot create the lock-count shim dir"
+_counter="$_shim/count"
+printf '#!/bin/sh\nchmod 000 "%s/.cache"\n' "$r" >"$_shim/plant" || fixture_die "cannot write the ancestor-chmod plant script"
+chmod +x "$_shim/plant" || fixture_die "cannot make the plant script executable"
+lock_count_shim "$_shim" "$_counter"
 _out=$(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
 _rc=$?
-_t1=$(date +%s)
 chmod 755 "$r/.cache" 2>/dev/null
-_elapsed=$((_t1 - _t0))
+_count=$(wc -l <"$_counter" | tr -d ' ')
 if [ "$_rc" -eq 0 ]; then
     fail "ensure exited 0 despite its own cache ancestor being unreadable: $_out"
-elif [ "$_elapsed" -ge 3 ]; then
-    fail "ensure spun ${_elapsed}s on an unreadable ancestor instead of failing fast: $_out"
+elif [ "$_count" -ne 1 ]; then
+    fail "with_lock attempted the lock $_count times instead of failing fast after one ($(cat "$_counter")): $_out"
 elif printf '%s' "$_out" | grep -qi "removed the cache mid-install"; then
     fail "claimed the cache was removed when only a permission bit changed: $_out"
 elif ! printf '%s' "$_out" | grep -Eqi "permission|denied|access|unreadable|cannot (read|search|traverse)"; then
@@ -1810,16 +1907,17 @@ printf '#!/bin/sh\necho 0.63.2\n' >"$_cache/swiftlint/$SHA_A/swiftlint" || fixtu
 chmod +x "$_cache/swiftlint/$SHA_A/swiftlint" || fixture_die "cannot make the fixture binary executable"
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 chmod 555 "$_cache/swiftlint" || fixture_die "cannot make $_cache/swiftlint read-only"
-_t0=$(date +%s)
-_out=$(cd "$r" && GRUBSTAKE_CACHE="$_cache" ./grubstake.sh ensure 2>&1)
+_shim="$(mktemp -d "$ROOT/lock-count.XXXXXX")" || fixture_die "cannot create the lock-count shim dir"
+_counter="$_shim/count"
+lock_count_shim "$_shim" "$_counter"
+_out=$(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$_cache" ./grubstake.sh ensure 2>&1)
 _rc=$?
-_t1=$(date +%s)
 chmod 755 "$_cache/swiftlint" 2>/dev/null
-_elapsed=$((_t1 - _t0))
+_count=$(wc -l <"$_counter" | tr -d ' ')
 if [ "$_rc" -eq 0 ]; then
     fail "ensure exited 0 despite a permission-denied lock directory: $_out"
-elif [ "$_elapsed" -ge 3 ]; then
-    fail "ensure spun ${_elapsed}s instead of failing fast on a non-retryable permission denial: $_out"
+elif [ "$_count" -ne 1 ]; then
+    fail "with_lock attempted the lock $_count times instead of failing fast after one ($(cat "$_counter")): $_out"
 elif printf '%s' "$_out" | grep -qi "locked by another run"; then
     fail "a cache path containing the discriminator's own text was misread as contention: $_out"
 elif ! printf '%s' "$_out" | grep -qi "permission denied"; then
@@ -1844,28 +1942,18 @@ mkdir -p "$_cache/swiftlint/$SHA_A" || fixture_die "cannot create $_cache/swiftl
 printf '#!/bin/sh\necho 0.63.2\n' >"$_cache/swiftlint/$SHA_A/swiftlint" || fixture_die "cannot write the fixture binary"
 chmod +x "$_cache/swiftlint/$SHA_A/swiftlint" || fixture_die "cannot make the fixture binary executable"
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
-_shim="$r/mkdir-shim"
-mkdir -p "$_shim" || fixture_die "cannot create $_shim"
-_realmkdir="$(command -v mkdir)" || fixture_die "no real mkdir on PATH to wrap"
-cat >"$_shim/mkdir" <<SHIM
-#!/bin/sh
-case "\$*" in
-    *.lock)
-        rm -rf "$_cache/swiftlint"
-        ;;
-esac
-exec "$_realmkdir" "\$@"
-SHIM
-chmod +x "$_shim/mkdir" || fixture_die "cannot make the mkdir shim executable"
-_t0=$(date +%s)
+_shim="$(mktemp -d "$ROOT/lock-count.XXXXXX")" || fixture_die "cannot create the lock-count shim dir"
+_counter="$_shim/count"
+printf '#!/bin/sh\nrm -rf "%s/swiftlint"\n' "$_cache" >"$_shim/plant" || fixture_die "cannot write the vanished-parent plant script"
+chmod +x "$_shim/plant" || fixture_die "cannot make the plant script executable"
+lock_count_shim "$_shim" "$_counter"
 _out=$(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$_cache" ./grubstake.sh ensure 2>&1)
 _rc=$?
-_t1=$(date +%s)
-_elapsed=$((_t1 - _t0))
+_count=$(wc -l <"$_counter" | tr -d ' ')
 if [ "$_rc" -eq 0 ]; then
     fail "ensure exited 0 despite its own cache parent being removed mid-lock: $_out"
-elif [ "$_elapsed" -ge 3 ]; then
-    fail "ensure spun ${_elapsed}s instead of failing fast when its cache parent vanished: $_out"
+elif [ "$_count" -ne 1 ]; then
+    fail "with_lock attempted the lock $_count times instead of failing fast after one ($(cat "$_counter")): $_out"
 elif printf '%s' "$_out" | grep -qi "locked by another run"; then
     fail "a genuinely vanished parent was misread as contention because the path also contains the discriminator's own text: $_out"
 elif ! printf '%s' "$_out" | grep -qi "removed the cache mid-install"; then
@@ -2694,7 +2782,7 @@ fi
 it "path fails for a tool that is not pinned"
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
-expect_fail "$r" path periphery
+expect_says_fail "periphery is not pinned" "$r" path periphery
 
 it "GRUBSTAKE_OFFLINE refuses to install a missing pinned tool instead of reaching for curl"
 # A clean racing the spine's own check can leave the binary missing right when a commit reaches for it, so the commit path must refuse rather than put curl on it.
@@ -2737,12 +2825,12 @@ r=$(new_repo)
 sed 's/        Darwin) echo darwin ;;/        Darwin) echo linux ;;/' "$GS" >"$r/grubstake.sh"
 chmod +x "$r/grubstake.sh"
 pins "$r" "periphery 3.7.4 $SHA_A -"
-expect_fail "$r" path periphery
+expect_says_fail "periphery is not published for linux" "$r" path periphery
 
 it "path rejects a tool name that is not a known tool"
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
-expect_fail "$r" path 'swiftlint|x'
+expect_says_fail "unknown tool: swiftlint|x" "$r" path 'swiftlint|x'
 
 it "path rejects a tool name that known_tools' regex check would silently let through"
 # known_tools | grep -qw "$1" treats the name as a basic regular expression, so a "." in
@@ -2797,7 +2885,9 @@ printf '\nupdate\n'
 
 it "a release below the supported floor is refused"
 r=$(new_repo)
-expect_fail "$r" update 0.1.4
+_floor=$(sed -n 's/^GRUBSTAKE_MIN_VERSION="\([^"]*\)".*/\1/p' "$GS")
+[ -n "$_floor" ] || fixture_die "cannot read GRUBSTAKE_MIN_VERSION from $GS"
+expect_says_fail "0.1.4 is below the supported floor $_floor" "$r" update 0.1.4
 
 it "a hostile TMPDIR cannot inject commands into update's cleanup trap"
 # cmd_update's only trap wraps $_tmp, sourced from mktemp under TMPDIR. Refusing a release below the
@@ -2942,12 +3032,12 @@ fi
 
 it "a target that is not a release version is rejected"
 r=$(new_repo)
-expect_fail "$r" update ../main
+expect_says_fail "not a release version: ../main" "$r" update ../main
 
 it "an already-current version is a no-op"
 r=$(new_repo)
 v=$(gs "$r" version)
-expect_says "already on $v" "$r" update "$v"
+expect_says_ok "already on $v" "$r" update "$v"
 
 it "update renames over the script rather than handing off to a temp copy"
 # The handoff avoided a hazard rename never had, and cost a $0 that lied about which repo it was
@@ -3279,17 +3369,18 @@ fi
 if [ -d "$_lockdir" ]; then
     fail "the lock directory was stranded after the run was killed mid-write_receipt"
 else
-    _t0=$(date +%s)
-    _out2=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
+    _cshim="$(mktemp -d "$ROOT/lock-count.XXXXXX")" || fixture_die "cannot create the lock-count shim dir"
+    _counter="$_cshim/count"
+    lock_count_shim "$_cshim" "$_counter"
+    _out2=$(cd "$r" && PATH="$_cshim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
     _rc2=$?
-    _t1=$(date +%s)
-    _elapsed=$((_t1 - _t0))
+    _count=$(wc -l <"$_counter" | tr -d ' ')
     if [ "$_rc2" -ne 0 ]; then
         fail "the follow-up ensure failed against a lock that should have been released by the trap: $_out2"
     elif printf '%s' "$_out2" | grep -q "cache entry locked by another run"; then
         fail "the follow-up ensure spun the retry budget and warned about a stale lock nobody holds: $_out2"
-    elif [ "$_elapsed" -ge 3 ]; then
-        fail "the follow-up ensure took ${_elapsed}s instead of acquiring the lock immediately: $_out2"
+    elif [ "$_count" -ne 1 ]; then
+        fail "the follow-up ensure attempted the lock $_count times instead of acquiring it on the first try ($(cat "$_counter")): $_out2"
     else
         pass
     fi
@@ -4445,17 +4536,17 @@ r=$(new_repo)
 _shims="$(mktemp -d "$ROOT/no-net-readonly-git.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
 printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' >"$_shims/curl"
 chmod +x "$_shims/curl"
+_counter="$_shims/git-count"
+git_count_shim "$_shims" "$_counter"
 chmod 555 "$r/.git" || fixture_die "cannot make $r/.git read-only"
-_t0=$(date +%s)
 _out=$(cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1)
 _rc=$?
-_t1=$(date +%s)
 chmod 755 "$r/.git" 2>/dev/null
-_elapsed=$((_t1 - _t0))
+_count=$(wc -l <"$_counter" | tr -d ' ')
 if [ "$_rc" -eq 0 ]; then
     fail "install exited 0 with .git itself read-only: $_out"
-elif [ "$_elapsed" -ge 3 ]; then
-    fail "install spun ${_elapsed}s instead of failing fast on a non-retryable git error: $_out"
+elif [ "$_count" -ne 1 ]; then
+    fail "the hooksPath write was attempted $_count times instead of failing fast after one ($(cat "$_counter")): $_out"
 elif printf '%s' "$_out" | grep -qi "kept losing the lock"; then
     fail "blamed a lock nobody held instead of the real permission failure: $_out"
 elif ! printf '%s' "$_out" | grep -qi "permission denied"; then
@@ -4507,32 +4598,22 @@ it "install exhausting a genuinely stale git-config lock still blames the lock, 
 # contention is real and simply never clears (its holder crashed, say) -- the die still has to name
 # the lock, not go silent or say something fabricated, once the budget genuinely runs out.
 #
-# A lower bound alone ("some time passed") does not prove the loop ran to its real end rather than
-# a shortened one -- a budget quietly gutted from 50 iterations to a handful would still clear a
-# loose floor on the whole-second sleep fallback (5 iterations * 1s = 5s already clears a flat "3").
-# The floor is derived from the same 0.1-or-1 fallback the loop itself falls back to, so it tracks
-# whichever this machine actually has: a few seconds short of the true ~5s/~50s total, comfortably
-# above what a materially smaller budget would produce on either path, without hardcoding a bound
-# that assumes fractional sleep works everywhere. This is the honest cost of proving exhaustion
-# rather than any death: on a fractional-sleep machine this test alone costs ~5s; on one that falls
-# back to whole-second sleeps, up to ~50s. Not flaky -- the lock never clears here, so every attempt
-# fails the same deterministic way -- just genuinely slow on the fallback path.
+# A count proves the loop ran to its real end (51 attempts, the same -gt 50 budget with_lock uses) rather than a shortened one, without depending on how long any one attempt's sleep actually took.
 r=$(new_repo)
 _shims="$(mktemp -d "$ROOT/no-net-lock-stale.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
 printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' >"$_shims/curl"
 chmod +x "$_shims/curl"
-if sleep 0.1 2>/dev/null; then _min_elapsed=4; else _min_elapsed=45; fi
+_counter="$_shims/git-count"
+git_count_shim "$_shims" "$_counter"
 : >"$r/.git/config.lock" || fixture_die "cannot plant a genuine git-config lock in $r"
-_t0=$(date +%s)
 _out=$(cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1)
 _rc=$?
-_t1=$(date +%s)
 rm -f "$r/.git/config.lock" 2>/dev/null
-_elapsed=$((_t1 - _t0))
+_count=$(wc -l <"$_counter" | tr -d ' ')
 if [ "$_rc" -eq 0 ]; then
     fail "install exited 0 despite a git-config lock that was never released: $_out"
-elif [ "$_elapsed" -lt "$_min_elapsed" ]; then
-    fail "gave up on the lock after only ${_elapsed}s (expected at least ${_min_elapsed}s) -- the retry budget was not honestly exhausted: $_out"
+elif [ "$_count" -ne 51 ]; then
+    fail "the hooksPath write was attempted $_count times instead of exhausting the full 51-attempt budget: $_out"
 elif ! printf '%s' "$_out" | grep -qi "lock"; then
     fail "exhausted the retry budget without naming the lock as the cause: $_out"
 else
@@ -4613,17 +4694,17 @@ chmod +x "$r/grubstake.sh" || fixture_die "cannot make grubstake.sh executable i
 _shims="$(mktemp -d "$ROOT/no-net-gitdir-collision.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
 printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' >"$_shims/curl"
 chmod +x "$_shims/curl"
+_counter="$_shims/git-count"
+git_count_shim "$_shims" "$_counter"
 chmod 555 "$r/.git" || fixture_die "cannot make $r/.git read-only"
-_t0=$(date +%s)
 _out=$(cd "$r" && GIT_DIR="$r/.git" PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1)
 _rc=$?
-_t1=$(date +%s)
 chmod 755 "$r/.git" 2>/dev/null
-_elapsed=$((_t1 - _t0))
+_count=$(wc -l <"$_counter" | tr -d ' ')
 if [ "$_rc" -eq 0 ]; then
     fail "install exited 0 with .git itself read-only: $_out"
-elif [ "$_elapsed" -ge 3 ]; then
-    fail "install spun ${_elapsed}s instead of failing fast on a non-retryable git error: $_out"
+elif [ "$_count" -ne 1 ]; then
+    fail "the hooksPath write was attempted $_count times instead of failing fast after one ($(cat "$_counter")): $_out"
 elif printf '%s' "$_out" | grep -qi "kept losing the lock"; then
     fail "a repository path containing the discriminator's own text was misread as contention: $_out"
 elif ! printf '%s' "$_out" | grep -qi "permission denied"; then
@@ -5059,8 +5140,9 @@ elif [ "$(commits "$r")" != "$_c0" ]; then
     fail "refused, and committed anyway"
 elif ! printf '%s' "$_out" | grep -q "Tracked.swift"; then
     fail "blocked without naming the path: $_out"
-elif ! printf '%s' "$_out" | grep -q "stash"; then
-    fail "blocked without saying what to do about it: $_out"
+elif ! printf '%s' "$_out" | grep -q "keep-index"; then
+    # #136: a bare "stash" matches both the wrong wording (loses the staged hunk) and the right one, so this guards the remedy being correct, not its exact prose.
+    fail "blocked without naming the remedy that actually works: $_out"
 else
     pass
 fi
@@ -6001,11 +6083,11 @@ printf '\nadd\n'
 
 it "add rejects an unknown tool"
 r=$(new_repo)
-expect_fail "$r" add notatool@1.0.0
+expect_says_fail "unknown tool: notatool" "$r" add notatool@1.0.0
 
 it "add rejects a spec with no version"
 r=$(new_repo)
-expect_fail "$r" add swiftlint
+expect_says_fail "usage: ./grubstake.sh add <tool>@<version>" "$r" add swiftlint
 
 it "add refuses to write over a pins file with unresolved conflict markers"
 # add is the only command that writes grubstake.tools and, pre-fix, the only one that never calls
@@ -6137,10 +6219,18 @@ it "add's pins lock fails fast naming the vanished directory, not a phantom hold
 # under this test.
 r=$(new_repo)
 _sha=$(fake_release "$r" 1.0.0)
-_shim="$r/mkdir-shim"
+# Under $ROOT, not $r: $r is renamed away below, and a shim (or counter) that moved with it would go unresolvable via PATH, silently hiding a retry instead of counting it.
+_shim="$ROOT/add-mkdir-shim.$$"
 _reached="$ROOT/add-reached.$$"
 _go="$ROOT/add-go.$$"
+_counter="$ROOT/add-count.$$"
+: >"$_counter" || fixture_die "cannot create the lock-count counter file $_counter"
 lock_pause_shim "$_shim" "$_reached" "$_go" '*grubstake.tools.lock'
+cat >"$_shim/plant" <<PLANT
+#!/bin/sh
+printf '%s\n' "\$*" >>"$_counter"
+PLANT
+chmod +x "$_shim/plant" || fixture_die "cannot make the lock-count plant script executable"
 (
     cd "$r" || exit 1
     PATH="$r/curl-shim:$_shim:$PATH"
@@ -6158,17 +6248,15 @@ while [ ! -f "$_reached" ]; do
 done
 _trash="$ROOT/add-vanished-repo.$$"
 mv "$r" "$_trash" || fixture_die "cannot rename the repo directory away while add is paused at its lock"
-_t0=$(date +%s)
 : >"$_go"
 wait "$_bgpid" 2>/dev/null
 _rc=$?
-_t1=$(date +%s)
-_elapsed=$((_t1 - _t0))
+_count=$(wc -l <"$_counter" | tr -d ' ')
 _out="$(cat "$_trash/out" 2>/dev/null)"
 if [ "$_rc" -eq 0 ]; then
     fail "add exited 0 despite its own repo directory vanishing mid-run: $_out"
-elif [ "$_elapsed" -ge 3 ]; then
-    fail "add spun ${_elapsed}s instead of failing fast when its own directory vanished mid-lock: $_out"
+elif [ "$_count" -ne 1 ]; then
+    fail "add attempted the pins lock $_count times instead of failing fast after one ($(cat "$_counter")): $_out"
 elif printf '%s' "$_out" | grep -q "locked by another run"; then
     fail "misdiagnosed a vanished directory as another run holding the pins lock: $_out"
 elif ! printf '%s' "$_out" | grep -Eqi "gone|removed|disappear|vanish|no longer|does not exist"; then
@@ -6176,7 +6264,7 @@ elif ! printf '%s' "$_out" | grep -Eqi "gone|removed|disappear|vanish|no longer|
 else
     pass
 fi
-rm -f "$_reached" "$_go" 2>/dev/null
+rm -f "$_reached" "$_go" "$_counter" 2>/dev/null
 chmod -R u+w "$_trash" 2>/dev/null
 rm -rf "$_trash" 2>/dev/null
 
@@ -6188,24 +6276,24 @@ it "add's pins lock still reports a genuine holder when the directory is intact"
 # needed, the same static-plant technique #67's sibling lock test used. Exit and message alone do
 # not prove the retry budget was honestly exhausted rather than skipped (a "> 0" in place of the
 # real "> 50" would still exit non-zero and still say "locked by another run" on its very first
-# retry) -- the elapsed time, timed the same way the vanished-directory test above times its fast
-# path, is what actually distinguishes a real ~5s budget from a gutted one.
+# retry) -- a count of every real attempt is what actually distinguishes a full 51-attempt budget from a gutted one.
 r=$(new_repo)
 fake_release "$r" 1.0.0 >/dev/null
 _lockdir="$r/grubstake.tools.lock"
 mkdir -p "$_lockdir" || fixture_die "cannot plant the stale pins lock"
-_t0=$(date +%s)
-_out=$(cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
+_shim="$(mktemp -d "$ROOT/lock-count.XXXXXX")" || fixture_die "cannot create the lock-count shim dir"
+_counter="$_shim/count"
+lock_count_shim "$_shim" "$_counter" '*grubstake.tools.lock'
+_out=$(cd "$r" && PATH="$_shim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
 _rc=$?
-_t1=$(date +%s)
-_elapsed=$((_t1 - _t0))
+_count=$(wc -l <"$_counter" | tr -d ' ')
 rm -rf "$_lockdir" 2>/dev/null
 if [ "$_rc" -eq 0 ]; then
     fail "add exited 0 despite a pins lock genuinely held by another run: $_out"
 elif ! printf '%s' "$_out" | grep -q "locked by another run"; then
     fail "genuine contention was not reported as locked by another run: $_out"
-elif [ "$_elapsed" -lt 3 ]; then
-    fail "reported contention after only ${_elapsed}s -- the retry budget was not honestly exhausted: $_out"
+elif [ "$_count" -ne 51 ]; then
+    fail "add attempted the pins lock $_count times instead of exhausting the full 51-attempt budget: $_out"
 else
     pass
 fi
@@ -6220,17 +6308,18 @@ it "add fails fast on a permission-denied pins lock, not a five-second contentio
 # lock, so nothing short of a real (if fixture-served) fetch reaches the mkdir under test.
 r=$(new_repo)
 fake_release "$r" 1.0.0 >/dev/null
+_shim="$(mktemp -d "$ROOT/lock-count.XXXXXX")" || fixture_die "cannot create the lock-count shim dir"
+_counter="$_shim/count"
+lock_count_shim "$_shim" "$_counter" '*grubstake.tools.lock'
 chmod 555 "$r" || fixture_die "cannot make $r read-only"
-_t0=$(date +%s)
-_out=$(cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
+_out=$(cd "$r" && PATH="$_shim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
 _rc=$?
-_t1=$(date +%s)
 chmod 755 "$r" 2>/dev/null
-_elapsed=$((_t1 - _t0))
+_count=$(wc -l <"$_counter" | tr -d ' ')
 if [ "$_rc" -eq 0 ]; then
     fail "add exited 0 despite a permission-denied pins lock: $_out"
-elif [ "$_elapsed" -ge 3 ]; then
-    fail "add spun ${_elapsed}s instead of failing fast on a non-retryable permission denial: $_out"
+elif [ "$_count" -ne 1 ]; then
+    fail "add attempted the pins lock $_count times instead of failing fast after one ($(cat "$_counter")): $_out"
 elif printf '%s' "$_out" | grep -qi "locked by another run"; then
     fail "blamed a lock nobody held instead of the real permission failure: $_out"
 elif ! printf '%s' "$_out" | grep -qi "permission denied"; then
@@ -6261,29 +6350,20 @@ it "add blames an unreadable ancestor honestly, not a repository that was never 
 r=$(new_gated_repo)
 _gate="$(dirname "$r")"
 fake_release "$r" 1.0.0 >/dev/null
-_shim="$r/mkdir-shim"
-mkdir -p "$_shim" || fixture_die "cannot create $_shim"
-_realmkdir="$(command -v mkdir)" || fixture_die "no real mkdir on PATH to wrap"
-cat >"$_shim/mkdir" <<SHIM
-#!/bin/sh
-case "\$*" in
-    *grubstake.tools.lock)
-        chmod 000 "$_gate"
-        ;;
-esac
-exec "$_realmkdir" "\$@"
-SHIM
-chmod +x "$_shim/mkdir" || fixture_die "cannot make the mkdir shim executable"
-_t0=$(date +%s)
+# Under $ROOT, not $r: the plant below makes $r unreachable, so a shim (or counter) living under it could neither be written to nor found again by a retry.
+_shim="$(mktemp -d "$ROOT/lock-count.XXXXXX")" || fixture_die "cannot create the lock-count shim dir"
+_counter="$_shim/count"
+printf '#!/bin/sh\nchmod 000 "%s"\n' "$_gate" >"$_shim/plant" || fixture_die "cannot write the gated-ancestor plant script"
+chmod +x "$_shim/plant" || fixture_die "cannot make the plant script executable"
+lock_count_shim "$_shim" "$_counter" '*grubstake.tools.lock'
 _out=$(cd "$r" && PATH="$_shim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
 _rc=$?
-_t1=$(date +%s)
 chmod 755 "$_gate" 2>/dev/null
-_elapsed=$((_t1 - _t0))
+_count=$(wc -l <"$_counter" | tr -d ' ')
 if [ "$_rc" -eq 0 ]; then
     fail "add exited 0 despite its own repository ancestor being unreadable: $_out"
-elif [ "$_elapsed" -ge 3 ]; then
-    fail "add spun ${_elapsed}s on an unreadable ancestor instead of failing fast: $_out"
+elif [ "$_count" -ne 1 ]; then
+    fail "add attempted the pins lock $_count times instead of failing fast after one ($(cat "$_counter")): $_out"
 elif printf '%s' "$_out" | grep -qi "removed mid-add"; then
     fail "claimed the repository was removed when only a permission bit changed: $_out"
 elif ! printf '%s' "$_out" | grep -Eqi "permission|denied|access|unreadable|cannot (read|search|traverse)"; then
@@ -6307,17 +6387,18 @@ cp "$GS" "$r/grubstake.sh" || fixture_die "cannot copy grubstake.sh into $r"
 chmod +x "$r/grubstake.sh" || fixture_die "cannot make grubstake.sh executable in $r"
 mkdir -p "$r/.cache" || fixture_die "cannot create $r/.cache"
 fake_release "$r" 1.0.0 >/dev/null
+_shim="$(mktemp -d "$ROOT/lock-count.XXXXXX")" || fixture_die "cannot create the lock-count shim dir"
+_counter="$_shim/count"
+lock_count_shim "$_shim" "$_counter" '*grubstake.tools.lock'
 chmod 555 "$r" || fixture_die "cannot make $r read-only"
-_t0=$(date +%s)
-_out=$(cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
+_out=$(cd "$r" && PATH="$_shim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
 _rc=$?
-_t1=$(date +%s)
 chmod 755 "$r" 2>/dev/null
-_elapsed=$((_t1 - _t0))
+_count=$(wc -l <"$_counter" | tr -d ' ')
 if [ "$_rc" -eq 0 ]; then
     fail "add exited 0 despite a permission-denied pins lock: $_out"
-elif [ "$_elapsed" -ge 3 ]; then
-    fail "add spun ${_elapsed}s instead of failing fast on a non-retryable permission denial: $_out"
+elif [ "$_count" -ne 1 ]; then
+    fail "add attempted the pins lock $_count times instead of failing fast after one ($(cat "$_counter")): $_out"
 elif printf '%s' "$_out" | grep -qi "locked by another run"; then
     fail "a repository path containing the discriminator's own text was misread as contention: $_out"
 elif ! printf '%s' "$_out" | grep -qi "permission denied"; then
@@ -7715,6 +7796,17 @@ for _dv in $_dvs; do
     [ "$_dv" = "$_gv" ] || _mismatch=1
 done
 [ "$_mismatch" -eq 1 ] && pass || fail "appending a stale v9.9.9 install line to a copy of README.md did not trip the every-match check"
+
+# ---------------------------------------------------------------------------- suite integrity
+
+it "the invoking repository's own git config is unchanged after the run"
+# #116: a fixture's config write once landed here silently; this turns the next one into a loud failure instead.
+if cmp -s "$_repo_gitcfg_snapshot" "$_repo_gitcfg" 2>/dev/null; then
+    pass
+else
+    fail "$REPO's own git config changed during this run:
+$(diff -u "$_repo_gitcfg_snapshot" "$_repo_gitcfg" 2>&1)"
+fi
 
 # ---------------------------------------------------------------------------- result
 

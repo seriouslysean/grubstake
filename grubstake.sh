@@ -601,6 +601,9 @@ install_tool() {
         fi
     fi
 
+    # Refused before any network call; $4 overrides the remedy for a caller that is itself ensure.
+    [ -z "${GRUBSTAKE_OFFLINE:-}" ] || die "$_tool $_ver: not installed (${4:-run: grubstake ensure})"
+
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     arm_cleanup "rm -rf $(sq "$_tmp")"
 
@@ -722,9 +725,7 @@ embedded_hook() {
             cat <<'GST_EMBED_PRE_COMMIT' | sed -e '1d' -e '$d'
 # gst-embedded-hook-begin: pre-commit
 #!/bin/sh
-# grubstake pre-commit spine. Verifies pinned tools, runs repo-local gates, then lints staged
-# Swift. Repo-specific checks belong in .githooks/pre-commit.d/, not in this file, which is
-# overwritten whenever the hooks are reinstalled.
+# grubstake pre-commit spine; repo-local checks belong in .githooks/pre-commit.d/, since this file is overwritten on reinstall.
 
 set -eu
 
@@ -736,17 +737,18 @@ GRUBSTAKE="$ROOT/grubstake.sh"
     exit 1
 }
 
-# Only verify tools when something this spine gates is staged. A cold cache should not refuse a
-# docs-only commit, and a repo with no pins has nothing to verify. Verified before the gates run,
-# so a gate reaching for a pinned tool finds one rather than downloading mid-commit.
-STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
-[ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
+# Exported for the whole spine, gates included, so a gate reaching for a pinned tool refuses a cold cache instead of downloading mid-commit (rule 17).
+export GRUBSTAKE_OFFLINE=1
 
-# Gates before the lint below, in glob order. A gate that formats staged Swift and re-stages it is
-# the whole reason this extension point exists, and linting first refuses exactly what such a gate
-# was about to fix -- so it never runs, and whether it runs at all comes down to whether the linter
-# happens to have an opinion about the same file. A gate's own refusal is also the whole answer:
-# nothing below should spend a lint pass on an index a gate has already turned down.
+# Checked only when Swift is staged, and before the gates run, so a docs-only commit is never refused by a check nothing here needed.
+STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
+CHECKED=0
+if [ -n "$STAGED_SWIFT" ]; then
+    "$GRUBSTAKE" check >/dev/null
+    CHECKED=1
+fi
+
+# Gates run before the lint below, so a gate that reformats and re-stages Swift is linted on what it produced, not refused for what it was about to fix.
 for gate in "$ROOT"/.githooks/pre-commit.d/*; do
     # A dangling symlink is neither -e nor an unmatched glob, and treating it as either is the silent skip rule 16 forbids.
     [ -L "$gate" ] && [ ! -e "$gate" ] && {
@@ -765,24 +767,24 @@ for gate in "$ROOT"/.githooks/pre-commit.d/*; do
     }
 done
 
-# Re-read the index. A gate may have re-staged what it fixed, and may have staged Swift where none
-# was staged at all, which the read above would leave linted by nobody.
+# Re-read since a gate may have staged Swift where none was staged before; runs again only if the first read skipped it, so an unchanged commit is not checked twice.
 STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
-[ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
+[ "$CHECKED" -eq 0 ] && [ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
 
-# Only lint if the repo pinned swiftlint. A repo that does not use it should not be blocked by
-# the shared spine; its own gates in pre-commit.d decide. One line per tool, so grep is enough.
-if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.tools" 2>/dev/null; then
-    # GRUBSTAKE_OFFLINE keeps curl off the commit path: a clean racing this check must refuse, not download.
-    SWIFTLINT="$(GRUBSTAKE_OFFLINE=1 "$GRUBSTAKE" path swiftlint)" || exit 1
-    # Verify and refuse rather than format-and-restage: re-adding after a fix folds unrelated
-    # hunks into a partial `git add -p` and re-stages a working-tree deletion of a file staged
-    # as new. The developer fixes and re-stages; the hook never touches the index.
-    #
-    # Known limitation: SwiftLint reads the working tree, so this checks the current contents of
-    # files whose paths are staged, not the staged blobs. Linting a temp copy would break config
-    # resolution, and stashing the remainder to lint the index is what strands work in the tools
-    # that do it. Both shapes it can detect are refused below -- a second status column of D, where there is nothing to read, and M or T, where what was read is not what is staged -- and CI lints the committed tree.
+# Asked of the script, since grubstake.sh may be a symlink whose pins live beside its target; its own exit 3 is reserved to mean not pinned.
+SWIFTLINT=""
+if [ -n "$STAGED_SWIFT" ]; then
+    OUT=$("$GRUBSTAKE" path swiftlint 2>&1) && RC=0 || RC=$?
+    if [ "$RC" -eq 0 ]; then
+        SWIFTLINT="$OUT"
+    elif [ "$RC" -ne 3 ]; then
+        echo "$OUT" >&2
+        exit 1
+    fi
+fi
+
+if [ -n "$SWIFTLINT" ]; then
+    # Refuses rather than reformats-and-restages, since re-adding after a fix folds unrelated hunks in from a partial `git add -p`.
     STATUS=$(git status --porcelain -- '*.swift')
     # Second column D means the worktree copy is gone, decided here rather than trusted to the linter's exit status, which a batched run can mask.
     GONE=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMRT]D //p')
@@ -790,8 +792,7 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     OUT=$(git diff --cached --name-only -z --diff-filter=ACMRT -- '*.swift' \
         | xargs -0 "$SWIFTLINT" lint --strict --quiet -- 2>&1) && RC=0 || RC=$?
     if [ -n "$GONE" ]; then
-        # Print first: a real violation in a co-staged file the linter did read must not be
-        # swallowed by this refusal, or the developer only learns about it on a second retry.
+        # Printed first, so a real violation in a co-staged file is not swallowed by this refusal and only surfaces on a second retry.
         [ -n "$OUT" ] && echo "$OUT" >&2
         echo "[pre-commit] staged Swift file(s) missing from the working tree, so nothing was linted:" >&2
         printf '%s\n' "$GONE" | sed 's/^/[pre-commit]   /' >&2
@@ -805,13 +806,12 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     fi
     [ -n "$OUT" ] && echo "$OUT"
 
-    # Second column M or T means the worktree differs from what's staged; sed, not grep, since a match-nothing grep would exit 1 and end a clean commit under set -e.
+    # SwiftLint reads the working tree, not the staged blobs, so second column M or T is refused below rather than trusted; sed, not grep, since a match-nothing grep would exit 1 and end a clean commit under set -e.
     PARTIAL=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMRT][MT] //p')
     if [ -n "$PARTIAL" ]; then
         echo "[pre-commit] staged Swift file(s) have unstaged edits, so the lint read bytes that are not being committed:" >&2
         printf '%s\n' "$PARTIAL" | sed 's/^/[pre-commit]   /' >&2
-        # --keep-index by name: a plain `git stash` takes the staged hunk with it and the retry
-        # then commits nothing, so naming the bare command would destroy what this is protecting.
+        # Named with --keep-index, since a bare `git stash` would take the staged hunk with it and the retry would commit nothing.
         echo "[pre-commit] stage the rest, or: git stash push --keep-index; commit; git stash pop" >&2
         exit 1
     fi
@@ -825,12 +825,7 @@ GST_EMBED_PRE_COMMIT
             cat <<'GST_EMBED_POST_COMMIT' | sed -e '1d' -e '$d'
 # gst-embedded-hook-begin: post-commit
 #!/bin/sh
-# grubstake post-commit: report that a newer grubstake exists. Notify only. It never updates,
-# never blocks, and never fails a commit.
-#
-# post-commit rather than pre-commit on purpose: nothing here should sit in the path that gates a
-# commit. The synchronous cost is one file read; the network refresh is backgrounded and only
-# runs once per TTL, so an offline machine stays silent instead of stalling.
+# grubstake post-commit: notify only, never blocking, since nothing here may sit in the path that gates a commit; the lookup is backgrounded so an offline machine stays silent instead of stalling.
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 GRUBSTAKE="$ROOT/grubstake.sh"
@@ -847,17 +842,24 @@ stamp=0
 case "$stamp" in '' | *[!0-9]*) stamp=0 ;; esac
 
 if [ $((now - stamp)) -gt "$TTL" ]; then
-    # Backgrounded and detached: a slow or unreachable network must not extend a commit.
+    # Stamped before the lookup starts, so a hung (not merely refused) lookup does not leave the TTL expired for every commit made while it hangs (#135); line 2 is preserved, not clobbered.
+    _prev_latest=$(sed -n 2p "$CACHE" 2>/dev/null)
+    _stamp_tmp="$CACHE.$$.stamp.tmp"
+    # rm only reaches here on a failed write or failed mv; a successful mv already made $_stamp_tmp disappear.
+    # shellcheck disable=SC2015
+    printf '%s\n%s\n' "$now" "$_prev_latest" >"$_stamp_tmp" && mv -f "$_stamp_tmp" "$CACHE" || rm -f "$_stamp_tmp"
+    # Backgrounded and detached, so a hung lookup strands a process, never a commit; only a stalled transfer once connected or a url.insteadOf rewrite to ssh is actually bounded, not a raw https connect-phase hang.
     (
-        latest=$(git ls-remote --tags --refs https://github.com/seriouslysean/grubstake 'v*' 2>/dev/null \
+        GIT_TERMINAL_PROMPT=0
+        GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=10'
+        export GIT_TERMINAL_PROMPT GIT_SSH_COMMAND
+        latest=$(git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 \
+            ls-remote --tags --refs https://github.com/seriouslysean/grubstake 'v*' 2>/dev/null \
             | awk '{print $2}' | sed 's|refs/tags/v||' \
             | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
             | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
-        # A lookup that answered nothing keeps whatever answer is already cached, so an offline
-        # week does not silence an advisory that was correct.
+        # A lookup that answered nothing keeps whatever answer is already cached, so an offline week does not silence an advisory that was correct.
         [ -n "$latest" ] || latest=$(sed -n 2p "$CACHE" 2>/dev/null)
-        # Stamped whether or not it answered: an unwritten stamp leaves the TTL expired and fires
-        # this lookup again on the very next commit, which is the network back on the commit path.
         # Renamed into place, because the read below runs while this is still in flight.
         tmp="$CACHE.$$.tmp"
         # rm only reaches here on a failed write or failed mv; a successful mv already made $tmp disappear.
@@ -870,13 +872,15 @@ LATEST=$(sed -n 2p "$CACHE" 2>/dev/null) || exit 0
 [ -n "$LATEST" ] || exit 0
 [ "$LATEST" = "$CURRENT" ] && exit 0
 
-# CURRENT comes from the installed script's own report; LATEST is read raw from a writable cache
-# file. Neither has passed the fetch filter's grep, so an unvalidated one reaches the advisory line.
+# CURRENT comes from the script's own report and LATEST raw from a writable cache file; neither has passed the fetch filter's grep, so both reach the advisory line unvalidated.
 printf '%s\n%s\n' "$CURRENT" "$LATEST" | grep -qvE '^[0-9]+\.[0-9]+\.[0-9]+$' && exit 0
 
-# Only speak when the cached latest is genuinely newer than what is installed.
+# Guards against a well-formed LATEST that is not actually newer, since the checks above only ruled out malformed values, not older ones.
 newest=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
 [ "$newest" = "$LATEST" ] || exit 0
+
+# A major bump is the signal that update's in-place replace may not carry across cleanly.
+[ "${CURRENT%%.*}" = "${LATEST%%.*}" ] || exit 0
 
 echo "[grubstake] $LATEST available (pinned $CURRENT) -- run: ./grubstake.sh update"
 exit 0
@@ -887,13 +891,7 @@ GST_EMBED_POST_COMMIT
             cat <<'GST_EMBED_COMMIT_MSG' | sed -e '1d' -e '$d'
 # gst-embedded-hook-begin: commit-msg
 #!/bin/sh
-# grubstake commit-msg spine. Refuses a message that names an agent session, then runs repo-local
-# message gates. Repo-specific checks belong in .githooks/commit-msg.d/, not in this file, which
-# is overwritten whenever the hooks are reinstalled.
-#
-# The pre-commit scan reads tracked files, so a reference typed into a message never passes under
-# it. A session trailer or link names a transcript outside the repository, which no reader of the
-# published history can open.
+# grubstake commit-msg spine; repo-local checks belong in .githooks/commit-msg.d/, since this file is overwritten on reinstall, and this scan exists because pre-commit reads tracked files, never a typed message.
 
 set -eu
 
@@ -907,19 +905,36 @@ ROOT="$(git rev-parse --show-toplevel)"
 # git hands this hook a path relative to wherever it ran it, and a gate below may run anywhere.
 case "$1" in /*) MSG="$1" ;; *) MSG="$PWD/$1" ;; esac
 
-# Each literal is broken by a bracket, so a repo that scans its own tracked text for these shapes
-# does not report the hook that refuses them.
+# Each literal is broken by a bracket, so a repo that scans its own tracked text for these shapes does not report the hook that refuses them.
 RE_SESSION='Claude-[S]ession:|claude\.ai/code/[s]ession'
 
-# Only the --verbose diff below the scissors line is dropped, since it never becomes the message.
-# Comment lines are scanned: -m and -F default to the whitespace cleanup and --cleanup=verbatim to
-# none, and both publish them, so the spine cannot know that a "#" line will be stripped.
-BODY="$(sed -e '/^#.*>8/,$d' "$MSG")" || {
-    echo "[commit-msg] cannot read $MSG, so the message was not scanned" >&2
-    exit 1
-}
-# -i, because the same reference in another casing is the same reference, and matching one
-# spelling made a gate that never fires look exactly like one that passes.
+# git only strips text below its scissors line when an editor actually ran; on -m/-F it sets GIT_EDITOR to the literal ":" and publishes everything verbatim (#134).
+SCISSORS='------------------------ >8 ------------------------'
+# core.commentString generalizes the older, single-character core.commentChar; the newer wins.
+CCHAR="$(git config --get core.commentString 2>/dev/null)" || CCHAR=""
+[ -n "$CCHAR" ] || CCHAR="$(git config --get core.commentChar 2>/dev/null)" || CCHAR=""
+[ -n "$CCHAR" ] || CCHAR='#'
+
+if [ "${GIT_EDITOR:-}" = ':' ]; then
+    BODY="$(cat "$MSG")" || {
+        echo "[commit-msg] cannot read $MSG, so the message was not scanned" >&2
+        exit 1
+    }
+else
+    # Trusted only because an editor ran, since scanning past a real cut line would refuse this repo's own routine --verbose commits; a hand-typed line in a plain, non-verbose edit is the residual gap.
+    BODY="$(awk -v cchar="$CCHAR" -v scissors="$SCISSORS" '
+        {
+            # "auto" picks one character per message; any single non-space prefix stands in for it.
+            if (cchar == "auto") { if ($0 ~ ("^[^[:space:]] " scissors "$")) exit }
+            else if ($0 == cchar " " scissors) exit
+            print
+        }
+    ' "$MSG")" || {
+        echo "[commit-msg] cannot read $MSG, so the message was not scanned" >&2
+        exit 1
+    }
+fi
+# -i, because the same reference in another casing is the same reference.
 HITS="$(printf '%s\n' "$BODY" | grep -inE "$RE_SESSION")" || HITS=""
 if [ -n "$HITS" ]; then
     echo "[commit-msg] an agent-session reference would be published with this commit:" >&2
@@ -1048,13 +1063,13 @@ hook_has_marker() {
 known_hook_hashes() {
     case "$1" in
         pre-commit)
-            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 1f1a0953e8ebe4bba4331251ca7d6a3da9f0c3ead68ff9285056fb94505a773f a1e18ebfe81064a0addf39ee74de7b477fc868d2c810679fdb486d27601a8c4b"
+            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 1f1a0953e8ebe4bba4331251ca7d6a3da9f0c3ead68ff9285056fb94505a773f a1e18ebfe81064a0addf39ee74de7b477fc868d2c810679fdb486d27601a8c4b 7bbd9b3c1678aa93e9556c31a5ba1c660c617a71046429d8d879175900acc9a1 1b3c8ce3cef18d31a3e799a59a231b7260a62d06c78e8c63e02822f4ab0fee1a f5e2035b76358ce6d62907ac8ddf1eb2795bbf64c302a3e0165f036e0a0711f8 31a9331197189857d6d080cdb1d091b21b730838bb27b92cddc664b7a7c9336f"
             ;;
         post-commit)
-            echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494 3d5bdb2e6d05d6b4c5e4443f0e77788f71ba0d7e08e3c84935d7594e88af1660 3b8814f783d5bd3b16a61f3f944ff3e1ec783ec3873e3050fcd7c96e4d562029"
+            echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494 3d5bdb2e6d05d6b4c5e4443f0e77788f71ba0d7e08e3c84935d7594e88af1660 3b8814f783d5bd3b16a61f3f944ff3e1ec783ec3873e3050fcd7c96e4d562029 1853474b3b0a7e201e1a9c4d401940d45ed22d61e4537e61a5fd05f7d69c3e2b 48acd0af42b634d7973a6122d44e07056a29c26183d4ecc88b196ad98aa7fc07 7a06a96c59e5dcb055f87bb83f0c8da7c956375e98ec4a337eb66a7b520f47e5"
             ;;
         commit-msg)
-            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421 e2b2336f9737cc37cbd9930ac623cea7e997a58551450d684a181b5bc7861e93 131bd0c2591df52a7d99ac7575c413a8b8b787d0a3991da41997aa4bea5df2d6"
+            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421 e2b2336f9737cc37cbd9930ac623cea7e997a58551450d684a181b5bc7861e93 131bd0c2591df52a7d99ac7575c413a8b8b787d0a3991da41997aa4bea5df2d6 b9b2182062a44aa0db4fe2b7997f1cb1fa594d6fa74fe231116db48487d02eab 9bd927ffe89693c9f51e81da826604164ae972eb61dcfaa7876cfbef27be46f6"
             ;;
         *) die "unknown hook: $1" ;;
     esac
@@ -1206,7 +1221,7 @@ cmd_ensure() {
     _bad=0
     for _tool in $(pinned_tools); do
         _any=1
-        install_tool "$_tool" "$(pin_version "$_tool")" || _bad=1
+        install_tool "$_tool" "$(pin_version "$_tool")" "" "GRUBSTAKE_OFFLINE is set" || _bad=1
     done
     [ "$_any" = 1 ] || warn "no tools pinned yet (run: grubstake add swiftlint@x.y.z)"
     # Bare would let verify_pinned's own now-possible non-zero return trip set -e before the line below runs.
@@ -1236,7 +1251,11 @@ cmd_path() {
     [ $# -ge 1 ] || die "usage: grubstake path <tool>"
     validate_pins
     is_known_tool "$1" || die "unknown tool: $1"
-    _ver="$(pin_version "$1")" || die "$1 is not pinned"
+    # Exit 3, not die's usual 1, so a caller reads this off status rather than this rewordable message.
+    _ver="$(pin_version "$1")" || {
+        warn "$1 is not pinned"
+        exit 3
+    }
     # Assigned on its own, not nested as an argument: a die inside $( ) only kills that subshell, so
     # embedding it in tool_url's own argument would let tool_url's unrelated death mask this one.
     _plat="$(platform)"
@@ -1247,8 +1266,6 @@ cmd_path() {
     # mismatch surfacing here would put a network-shaped check back in front of every commit. Catching
     # drift is ensure's job.
     if [ ! -x "$_bin" ]; then
-        # A clean racing this check can leave the binary missing right when a commit reaches for it; GRUBSTAKE_OFFLINE refuses instead of installing mid-commit.
-        [ -z "${GRUBSTAKE_OFFLINE:-}" ] || die "$1 $_ver: not installed (run: grubstake ensure)"
         install_tool "$1" "$_ver" >&2
     fi
     verify_tool "$1" "$_ver"

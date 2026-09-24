@@ -3976,10 +3976,14 @@ git_tags_shim() {
     _refs="${_refs:-aaa 0.2.0 bbb 0.10.0 ccc 0.9.9 ddd 1.2.3-beta eee 1.2 fff v1.2.3 ggg abc}"
     cat >"$1/git" <<SHIM
 #!/bin/sh
-if [ "\$1" = "ls-remote" ]; then
-    printf '%s\trefs/tags/v%s\n' $_refs
-    exit 0
-fi
+# "ls-remote" is checked anywhere in argv, not just \$1: post-commit's own pipeline calls it as
+# "git -c http.lowSpeedLimit=... -c http.lowSpeedTime=... ls-remote ...".
+case " \$* " in
+    *" ls-remote "*)
+        printf '%s\trefs/tags/v%s\n' $_refs
+        exit 0
+        ;;
+esac
 exit 1
 SHIM
     chmod +x "$1/git" || fixture_die "cannot make the git shim executable"
@@ -4032,7 +4036,7 @@ it "post-commit's own tag comparison excludes the same malformed shapes, not jus
 r=$(new_repo)
 _shim="$r/git-shim"
 git_tags_shim "$_shim"
-_snippet="$(sed -n '/^        latest=$(git ls-remote/,/head -1)$/p' "$HOOKS/post-commit")"
+_snippet="$(sed -n '/^        latest=$(git -c http.lowSpeedLimit/,/head -1)$/p' "$HOOKS/post-commit")"
 [ -n "$_snippet" ] || fixture_die "extract post-commit's latest= pipeline: nothing matched (reformatted?)"
 printf '%s\n' "$_snippet" | grep -qF "grep -E '^[0-9]+\\.[0-9]+\\.[0-9]+\$'" \
     || fixture_die "extract post-commit's latest= pipeline: the version filter is missing from the extraction (reformatted?)"
@@ -5589,6 +5593,107 @@ elif [ "$(commits "$r")" != 2 ]; then
     fail "exited 0 without committing"
 else pass; fi
 
+it "a Swift commit with swiftlint unpinned still commits, without a binary to check against"
+# A repo that never pinned swiftlint must stay unblocked on a Swift commit; asking the script
+# whether swiftlint is pinned (rather than grepping the pins file) must still answer "no" quietly
+# for a repo that opted out, not refuse it the way a genuine tool failure would.
+r=$(new_hook_repo)
+stage "$r" A.swift "struct A {}"
+_out=$(hook_commit "$r")
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "a repo that never pinned swiftlint was blocked on a Swift commit (rc $_rc): $_out"
+elif [ "$(commits "$r")" != 2 ]; then
+    fail "exited 0 without committing"
+else pass; fi
+
+it "pre-commit's not-pinned check survives a reworded not-pinned message from grubstake path"
+# cmd_path's contract is its exit status; matching this rewordable text instead would not honor it.
+r=$(new_hook_repo)
+sed -i.bak 's/is not pinned/has no pin on file/' "$r/grubstake.sh" && rm -f "$r/grubstake.sh.bak"
+grep -q "has no pin on file" "$r/grubstake.sh" || fixture_die "the not-pinned reword did not apply in $r"
+stage "$r" A.swift "struct A {}"
+_out=$(hook_commit "$r")
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "a reworded not-pinned message blocked a commit that should pass quietly: $_out"
+elif [ "$(commits "$r")" != 2 ]; then
+    fail "exited 0 without committing"
+else
+    pass
+fi
+
+it "pre-commit asks the script whether swiftlint is pinned, so a symlinked grubstake.sh still lints"
+# The spine grepped $ROOT/grubstake.tools directly; when grubstake.sh is a symlink, the pins file
+# lives beside its target, which that literal path misses and lint was silently skipped, error
+# discarded. Asking the script resolves the symlink the same way every other command already does.
+r=$(new_hook_repo)
+_real="$(dirname "$r")/real-grubstake.$$"
+mkdir -p "$_real" || fixture_die "cannot create $_real"
+mv "$r/grubstake.sh" "$_real/grubstake.sh" || fixture_die "cannot relocate grubstake.sh in $r"
+pins "$_real" "swiftlint 0.63.2 $SHA_A $SHA_A"
+ln -s "$_real/grubstake.sh" "$r/grubstake.sh" || fixture_die "cannot symlink grubstake.sh in $r"
+stub_linter_mechanical "$r"
+stage "$r" A.swift 'let x = 1 // VIOLATION_MARKER'
+_out=$(hook_commit "$r")
+_rc=$?
+if [ ! -f "$r/lint.argv.1" ]; then
+    fail "the linter never ran through a symlinked grubstake.sh: $_out"
+elif [ "$_rc" -eq 0 ]; then
+    fail "a violation was committed because lint was silently skipped through the symlink: $_out"
+elif [ "$(commits "$r")" != 1 ]; then
+    fail "refused, and committed anyway"
+else
+    pass
+fi
+
+it "a decoy grubstake.tools beside a symlinked grubstake.sh is ignored, and the resolved pins win"
+# A decoy pins file at the symlink's own literal path must lose to the real one beside its target.
+r=$(new_hook_repo)
+_real="$(dirname "$r")/real-grubstake2.$$"
+mkdir -p "$_real" || fixture_die "cannot create $_real"
+mv "$r/grubstake.sh" "$_real/grubstake.sh" || fixture_die "cannot relocate grubstake.sh in $r"
+pins "$_real" "swiftlint 0.63.2 $SHA_A $SHA_A"
+ln -s "$_real/grubstake.sh" "$r/grubstake.sh" || fixture_die "cannot symlink grubstake.sh in $r"
+# No swiftlint line at all, so a hook that greps the root file directly would call it unpinned.
+pins "$r" "periphery 1.0.0 $SHA_B $SHA_B"
+stub_linter_mechanical "$r"
+stage "$r" A.swift 'let x = 1 // VIOLATION_MARKER'
+_out=$(hook_commit "$r")
+_rc=$?
+if [ ! -f "$r/lint.argv.1" ]; then
+    fail "the linter never ran, so the decoy at the literal path silently won: $_out"
+elif [ "$_rc" -eq 0 ]; then
+    fail "a violation was committed even though the resolved pins should have caught it: $_out"
+elif [ "$(commits "$r")" != 1 ]; then
+    fail "refused, and committed anyway"
+elif ! printf '%s' "$_out" | grep -q "Fake Violation"; then
+    fail "refused without the linter's own verdict, so this may not have used the resolved pins: $_out"
+else
+    pass
+fi
+
+it "pre-commit lets a clean Swift commit through when grubstake.sh symlinks to an in-repo nested/ target"
+# An in-repo symlink target (nested/grubstake.sh) must not leave a clean commit blocked by asking the wrong path for pins.
+r=$(new_hook_repo)
+mkdir -p "$r/nested" || fixture_die "cannot create $r/nested"
+mv "$r/grubstake.sh" "$r/nested/grubstake.sh" || fixture_die "cannot relocate grubstake.sh into $r/nested"
+pins "$r/nested" "swiftlint 0.63.2 $SHA_A $SHA_A"
+ln -s nested/grubstake.sh "$r/grubstake.sh" || fixture_die "cannot symlink grubstake.sh in $r"
+stub_linter_mechanical "$r"
+stage "$r" A.swift "struct A {}"
+_out=$(hook_commit "$r")
+_rc=$?
+if [ ! -f "$r/lint.argv.1" ]; then
+    fail "the linter never ran through the in-repo nested/ symlink target: $_out"
+elif [ "$_rc" -ne 0 ]; then
+    fail "a clean Swift commit was refused through the in-repo nested/ symlink target: $_out"
+elif [ "$(commits "$r")" != 2 ]; then
+    fail "exited 0 without committing"
+else
+    pass
+fi
+
 it "a cache entry that vanishes between the hook's check and its path call still refuses offline"
 # Landing the clean inside this window is not reproducible on demand, so the fixture makes check answer "passed" unconditionally and never installs the binary, then drives a real commit through the real hook to prove the guard.
 r=$(new_hook_repo)
@@ -5685,6 +5790,58 @@ r=$(new_hook_repo)
 stage "$r" NOTES.md "notes"
 assert_dangling_gate_refuses "$r" pre-commit.d 10-gate hook_commit "$r"
 
+it "check runs once for a Swift commit, not twice"
+# The spine re-read the staged Swift list after gates ran and called check again unconditionally,
+# even when the first read had already found Swift staged and already run it. A counting shim
+# proves the second call only fires when the first one was skipped.
+r=$(new_hook_repo)
+mv "$r/grubstake.sh" "$r/grubstake-real.sh" || fixture_die "cannot move grubstake.sh aside in $r"
+cat >"$r/grubstake.sh" <<WRAP || fixture_die "cannot write the counting check wrapper in $r"
+#!/bin/sh
+case "\$1" in
+    check)
+        n=\$(cat "$r/check.runs" 2>/dev/null || echo 0)
+        n=\$((n + 1))
+        echo "\$n" > "$r/check.runs"
+        exit 0
+        ;;
+    *) exec "$r/grubstake-real.sh" "\$@" ;;
+esac
+WRAP
+chmod +x "$r/grubstake.sh" || fixture_die "cannot make the counting check wrapper executable in $r"
+stage "$r" A.swift "struct A {}"
+hook_commit "$r" >/dev/null 2>&1
+_n=$(cat "$r/check.runs" 2>/dev/null || echo 0)
+[ "$_n" = 1 ] && pass || fail "check ran $_n time(s) for one staged Swift file, want 1"
+
+it "check still runs once when a gate is the one that stages Swift"
+# The other leg: deleting the second check call outright (rather than making it conditional) would
+# also read as 1 above but leaves this case at 0, which is wrong -- the first read found no Swift,
+# so check never ran, and the gate's own new Swift file needs it to run exactly once, not zero.
+r=$(new_hook_repo)
+mv "$r/grubstake.sh" "$r/grubstake-real.sh" || fixture_die "cannot move grubstake.sh aside in $r"
+cat >"$r/grubstake.sh" <<WRAP || fixture_die "cannot write the counting check wrapper in $r"
+#!/bin/sh
+case "\$1" in
+    check)
+        n=\$(cat "$r/check.runs" 2>/dev/null || echo 0)
+        n=\$((n + 1))
+        echo "\$n" > "$r/check.runs"
+        exit 0
+        ;;
+    *) exec "$r/grubstake-real.sh" "\$@" ;;
+esac
+WRAP
+chmod +x "$r/grubstake.sh" || fixture_die "cannot make the counting check wrapper executable in $r"
+gate_script "$r" 10-generate <<'GATE'
+printf 'let g = 1\n' > Generated.swift || exit 1
+git add -- Generated.swift || exit 1
+GATE
+stage "$r" NOTES.md "notes"
+hook_commit "$r" >/dev/null 2>&1
+_n=$(cat "$r/check.runs" 2>/dev/null || echo 0)
+[ "$_n" = 1 ] && pass || fail "check ran $_n time(s) when a gate staged Swift where none was staged first, want 1"
+
 it "a gate that fixes staged Swift runs before the lint that would have refused it"
 # #126: the spine linted first and dispatched the repo's gates afterwards, so the gate an adopter
 # writes to format staged Swift and re-stage it never ran on the commits that needed it most. The
@@ -5779,14 +5936,96 @@ elif [ "$(commits "$r")" != 2 ]; then
     fail "exited 0 without committing"
 else pass; fi
 
+it "a pre-commit.d gate's own cold-cache path call refuses offline instead of downloading mid-commit"
+# The spine only exported GRUBSTAKE_OFFLINE around its own swiftlint path call; a gate reaching for
+# any other pinned tool inherited nothing, and a docs-only commit never runs check at all, so a
+# gate calling path on a cold cache ran curl on the commit path (AGENTS rule 17). A curl shim that
+# records its own invocation catches a download rather than trusting the refusal message alone.
+r=$(new_hook_repo)
+pins "$r" "swiftformat 1.0.0 $SHA_A $SHA_A"
+gate_script "$r" 05-cold-cache <<'GATE'
+ROOT="$(git rev-parse --show-toplevel)"
+"$ROOT/grubstake.sh" path swiftformat >/dev/null
+GATE
+_marker="$r/CURL-RAN"
+_shim="$r/curl-shim"
+mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+printf '#!/bin/sh\n: > "%s"\nexit 1\n' "$_marker" >"$_shim/curl" || fixture_die "cannot write the curl marker shim"
+chmod +x "$_shim/curl" || fixture_die "cannot make the curl marker shim executable"
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r" "$_shim")
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "the commit went through though the pinned tool was never installed: $_out"
+elif [ -f "$_marker" ]; then
+    fail "a pre-commit.d gate's cold-cache path call reached curl on the commit path: $_out"
+else
+    pass
+fi
+
+it "a pre-commit.d gate's own cold-cache ensure call refuses offline instead of downloading mid-commit"
+# cmd_ensure called install_tool with no GRUBSTAKE_OFFLINE check of its own -- only cmd_path had
+# one, so a gate calling ensure instead of path on a cold cache still ran curl on the commit path.
+r=$(new_hook_repo)
+pins "$r" "swiftformat 1.0.0 $SHA_A $SHA_A"
+gate_script "$r" 05-cold-cache <<'GATE'
+ROOT="$(git rev-parse --show-toplevel)"
+"$ROOT/grubstake.sh" ensure >/dev/null 2>&1
+GATE
+_marker="$r/CURL-RAN"
+_shim="$r/curl-shim"
+mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+printf '#!/bin/sh\n: > "%s"\nexit 1\n' "$_marker" >"$_shim/curl" || fixture_die "cannot write the curl marker shim"
+chmod +x "$_shim/curl" || fixture_die "cannot make the curl marker shim executable"
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r" "$_shim")
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "the commit went through though the pinned tool was never installed: $_out"
+elif [ -f "$_marker" ]; then
+    fail "a pre-commit.d gate's cold-cache ensure call reached curl on the commit path: $_out"
+else
+    pass
+fi
+
+it "an offline ensure refusal names the real cause, not the command already running"
+# Telling a caller already running ensure to run ensure is circular.
+r=$(new_repo)
+pins "$r" "swiftformat 1.0.0 $SHA_A $SHA_A"
+_out=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_OFFLINE=1 ./grubstake.sh ensure 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 with a pinned tool never installed: $_out"
+elif printf '%s' "$_out" | grep -q "grubstake ensure"; then
+    fail "told a caller already running ensure to run ensure: $_out"
+elif ! printf '%s' "$_out" | grep -qi "offline"; then
+    fail "didn't name GRUBSTAKE_OFFLINE as the reason: $_out"
+else
+    pass
+fi
+
 it "post-commit reports a release newer than the one running"
 r=$(new_hook_repo)
-latest_cache "$r" 99.9.9
+_v="$(gs "$r" version)"
+_fake="$(printf '%s' "$_v" | cut -d. -f1).$(($(printf '%s' "$_v" | cut -d. -f2) + 1)).0"
+latest_cache "$r" "$_fake"
 stage "$r" NOTES.md "notes"
 _out=$(hook_commit "$r")
 case "$_out" in
-    *"99.9.9 available"*) pass ;;
+    *"$_fake available"*) pass ;;
     *) fail "said nothing about a newer release: $_out" ;;
+esac
+
+it "post-commit stays quiet about a newer release in a different major"
+# A major bump is the signal that a plain in-place replace may not carry across cleanly.
+r=$(new_hook_repo)
+_major="$(gs "$r" version | cut -d. -f1)"
+latest_cache "$r" "$((_major + 1)).0.0"
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r")
+case "$_out" in
+    *"[grubstake]"*) fail "advertised a release outside the current major: $_out" ;;
+    *) pass ;;
 esac
 
 it "post-commit stays quiet when the cached latest is the version already running"
@@ -5904,7 +6143,9 @@ it "a lookup that answered nothing keeps the answer already cached"
 # was already correct. Two lines either way, so sed -n 1p and sed -n 2p keep their meaning and the
 # poisoned-LATEST and malformed-CURRENT guards above still read the file they were written for.
 r=$(new_hook_repo)
-printf '1\n99.9.9\n' >"$r/.git/grubstake-latest" || fixture_die "cannot seed a stale cache in $r"
+_v="$(gs "$r" version)"
+_fake="$(printf '%s' "$_v" | cut -d. -f1).$(($(printf '%s' "$_v" | cut -d. -f2) + 1)).0"
+printf '1\n%s\n' "$_fake" >"$r/.git/grubstake-latest" || fixture_die "cannot seed a stale cache in $r"
 stage "$r" NOTES.md "notes"
 _out=$(hook_commit "$r")
 _rc=$?
@@ -5912,13 +6153,57 @@ if [ "$_rc" -ne 0 ]; then
     fail "the commit was blocked (rc $_rc): $_out"
 elif ! wait_for_stamp "$r" 1; then
     fail "the stale stamp was never refreshed: $(tr '\n' ' ' <"$r/.git/grubstake-latest" 2>/dev/null)"
-elif [ "$(sed -n 2p "$r/.git/grubstake-latest")" != "99.9.9" ]; then
+elif [ "$(sed -n 2p "$r/.git/grubstake-latest")" != "$_fake" ]; then
     fail "the cached answer was discarded: $(tr '\n' ' ' <"$r/.git/grubstake-latest" 2>/dev/null)"
 else
     case "$_out" in
-        *"99.9.9 available"*) pass ;;
+        *"$_fake available"*) pass ;;
         *) fail "said nothing about the newer release it had cached: $_out" ;;
     esac
+fi
+
+it "two rapid post-commit invocations start only one ls-remote lookup"
+# #135: the stamp was written only once the lookup returned, so two commits made back to back both
+# saw the same stale (or absent) stamp and both started their own lookup. git prepends its own
+# exec-path to a hook's PATH, so a shim aimed at a real `git commit` cannot be trusted to win over
+# it; invoking the hook directly sidesteps that entirely. The shim appends one line per call before
+# sleeping, so two invocations racing a naive read-then-write counter cannot both observe 0 and hide
+# a real double-fire; it prints a real ls-remote answer after waking, which doubles as the signal
+# this test polls for -- proving the answer still lands even though the stamp moved before it did.
+r=$(new_hook_repo)
+_calls="$r/lsremote.calls"
+_shim="$(mktemp -d "$ROOT/sleepy-git-shim.XXXXXX")" || fixture_die "cannot create a scratch dir for the sleepy git shim"
+_realgit="$(command -v git)" || fixture_die "no real git on PATH to wrap"
+cat >"$_shim/git" <<SHIM
+#!/bin/sh
+case "\$*" in
+    *ls-remote*)
+        echo x >> "$_calls"
+        sleep 3
+        printf 'abc123def456\trefs/tags/v99.9.9\n'
+        exit 0
+        ;;
+esac
+exec "$_realgit" "\$@"
+SHIM
+chmod +x "$_shim/git" || fixture_die "cannot make the sleepy git shim executable"
+(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" sh "$r/.githooks/post-commit") >/dev/null 2>&1
+(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" sh "$r/.githooks/post-commit") >/dev/null 2>&1
+_wfa=0
+while :; do
+    [ "$(sed -n 2p "$r/.git/grubstake-latest" 2>/dev/null)" = "99.9.9" ] && break
+    _wfa=$((_wfa + 1))
+    [ "$_wfa" -ge 8 ] && break
+    sleep 1
+done
+_n=$(wc -l <"$_calls" 2>/dev/null || echo 0)
+_n=$(printf '%s' "$_n" | tr -d ' ')
+if [ "$(sed -n 2p "$r/.git/grubstake-latest" 2>/dev/null)" != "99.9.9" ]; then
+    fail "the lookup's own answer never landed in the cache, so this proves nothing"
+elif [ "$_n" != 1 ]; then
+    fail "$_n lookup(s) started for two invocations made back to back, want 1"
+else
+    pass
 fi
 
 it "doctor reports a hook that has drifted from grubstake's copy"
@@ -7020,12 +7305,87 @@ else
     pass
 fi
 
+it "scan-for-leaks flags a case-varied agent-session trailer in tracked text"
+# #133: RE_TRAILER reached grep -E with no -i, so only one spelling was ever refused.
+r=$(leaks_repo)
+printf 'CLAUDE-SESSION: a-transcript-identifier\n' >"$r/notes.txt" || fixture_die "cannot write the case-varied trailer fixture in $r"
+(cd "$r" && git add -A && git commit -q -m fixture) || fixture_die "cannot commit the case-varied trailer fixture in $r"
+if (cd "$r" && ./test/scan-for-leaks.sh) >/dev/null 2>&1; then
+    fail "a case-varied agent-session trailer was not flagged"
+else
+    pass
+fi
+
+it "scan-for-leaks flags a case-varied agent-session link in tracked text"
+r=$(leaks_repo)
+printf 'transcript: https://CLAUDE.AI/CODE/SESSION_0123456789\n' >"$r/notes.txt" || fixture_die "cannot write the case-varied link fixture in $r"
+(cd "$r" && git add -A && git commit -q -m fixture) || fixture_die "cannot commit the case-varied link fixture in $r"
+if (cd "$r" && ./test/scan-for-leaks.sh) >/dev/null 2>&1; then
+    fail "a case-varied agent-session link was not flagged"
+else
+    pass
+fi
+
+it "scan-for-leaks --all flags a case-varied agent-session trailer in commit message history"
+r=$(leaks_repo)
+(cd "$r" && git commit -q --allow-empty -m 'chore: fixture' -m 'CLAUDE-SESSION: a-transcript-identifier') \
+    || fixture_die "cannot commit the case-varied trailer fixture in $r"
+_out=$(cd "$r" && ./test/scan-for-leaks.sh --all 2>&1)
+case "$_out" in
+    *"CLAUDE-SESSION"*) pass ;;
+    *) fail "a case-varied agent-session trailer in commit history was not flagged: $_out" ;;
+esac
+
+it "scan-for-leaks flags the URL form of a cross-repo issue reference"
+r=$(leaks_repo)
+printf 'see https://github.com/otherowner/otherrepo/issues/45\n' >"$r/notes.txt" || fixture_die "cannot write the issue-URL fixture in $r"
+(cd "$r" && git add -A && git commit -q -m fixture) || fixture_die "cannot commit the issue-URL fixture in $r"
+if (cd "$r" && ./test/scan-for-leaks.sh) >/dev/null 2>&1; then
+    fail "a cross-repo issue URL was not flagged"
+else
+    pass
+fi
+
+it "scan-for-leaks does not flag this repo's own issue URL"
+# This repo's own issues are public; only another repo's issue history is a leak.
+r=$(leaks_repo)
+printf 'see https://github.com/seriouslysean/grubstake/issues/45\n' >"$r/notes.txt" || fixture_die "cannot write the self-issue-URL fixture in $r"
+(cd "$r" && git add -A && git commit -q -m fixture) || fixture_die "cannot commit the self-issue-URL fixture in $r"
+if (cd "$r" && ./test/scan-for-leaks.sh) >/dev/null 2>&1; then
+    pass
+else
+    fail "this repo's own issue URL was flagged as a leak"
+fi
+
+it "scan-for-leaks flags a foreign issue URL sharing a line with this repo's own"
+# The self-exclusion used to drop the whole matched line rather than just its own reference, which
+# would have hidden a second, genuinely foreign URL sharing that line.
+r=$(leaks_repo)
+printf 'see https://github.com/seriouslysean/grubstake/issues/1 and https://github.com/otherowner/otherrepo/issues/2\n' \
+    >"$r/notes.txt" || fixture_die "cannot write the combo issue-URL fixture in $r"
+(cd "$r" && git add -A && git commit -q -m fixture) || fixture_die "cannot commit the combo issue-URL fixture in $r"
+if (cd "$r" && ./test/scan-for-leaks.sh) >/dev/null 2>&1; then
+    fail "a foreign issue URL sharing a line with this repo's own was not flagged"
+else
+    pass
+fi
+
+it "scan-for-leaks --all flags a foreign issue URL sharing history text with this repo's own"
+r=$(leaks_repo)
+(cd "$r" && git commit -q --allow-empty -m 'chore: fixture' \
+    -m 'see https://github.com/seriouslysean/grubstake/issues/1 and https://github.com/otherowner/otherrepo/issues/2') \
+    || fixture_die "cannot commit the combo issue-URL fixture in $r"
+_out=$(cd "$r" && ./test/scan-for-leaks.sh --all 2>&1)
+case "$_out" in
+    *"otherowner/otherrepo"*) pass ;;
+    *) fail "a foreign issue URL sharing history text with this repo's own was not flagged: $_out" ;;
+esac
+
 it "the self-exclusion pathspec still names the scanner's own path"
 # The scanner excludes itself by a hardcoded pathspec, so a rename that misses it turns the scan on
-# the scanner. Three of the five patterns cannot match their own source (each is written with the
-# literal broken by a bracket), so that failure can be a silent no-op rather than a refusal. Plant
-# the same known-bad line in the scanner and in a sibling: the sibling must be reported, the
-# scanner must not.
+# the scanner. None of the patterns' own definitions match their own source, so relying on that
+# would make this failure a silent no-op rather than a refusal. Plant the same known-bad line in
+# the scanner and in a sibling: the sibling must be reported, the scanner must not.
 r=$(leaks_repo)
 printf '# Claude-Session: a-transcript-identifier\n' >>"$r/test/scan-for-leaks.sh" \
     || fixture_die "cannot plant the leak inside the scanner copy in $r"
@@ -7141,6 +7501,78 @@ else
     pass
 fi
 
+it "scan-for-leaks refuses a case-varied agent-session trailer typed into a commit message"
+_m="$ROOT/msg-case-trailer"
+printf 'fix: something\n\nclaude-session: a-transcript-identifier\n' >"$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+if "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "a case-varied agent-session trailer in a commit message was not refused"
+else
+    pass
+fi
+
+it "scan-for-leaks refuses the URL form of a cross-repo issue reference typed into a commit message"
+_m="$ROOT/msg-issue-url"
+printf 'fix: something\n\nSee https://github.com/otherowner/otherrepo/issues/45\n' >"$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+if "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "a cross-repo issue URL in a commit message was not refused"
+else
+    pass
+fi
+
+it "scan-for-leaks accepts this repo's own issue URL typed into a commit message"
+_m="$ROOT/msg-self-issue-url"
+printf 'fix: something\n\nSee https://github.com/seriouslysean/grubstake/issues/45\n' >"$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+_out="$("$REPO/test/scan-for-leaks.sh" --message "$_m" 2>&1)"
+_rc=$?
+case "$_out" in *'scanning the commit message'*) : ;; *) _rc=99 ;; esac
+if [ "$_rc" -eq 0 ]; then pass; else fail "this repo's own issue URL in a commit message was refused (rc $_rc): $_out"; fi
+
+it "scan-for-leaks refuses a home path sharing a line with this repo's own issue URL in a commit message"
+_m="$ROOT/msg-issue-url-combo"
+printf 'fix: something\n\nSee https://github.com/seriouslysean/grubstake/issues/1 from /Users/someone/checkout\n' \
+    >"$_m" || fixture_die "cannot write the message fixture at $_m"
+if GIT_EDITOR=: "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "a home path sharing a line with this repo's own issue URL was not refused"
+else
+    pass
+fi
+
+it "scan-for-leaks does not refuse git's own comment line on the editor path, where cleanup strips it anyway"
+# #133: git sets GIT_EDITOR=: for every commit hook exactly when no editor will run (githooks(5)).
+# Any other value is the editor path, whose default cleanup strips a "#" line before publishing, so
+# a template line git itself inserts (e.g. "# Author: ..." on an amended author) must not be refused.
+_m="$ROOT/msg-author-comment"
+printf 'fix: something\n#\n# Author:    Someone <someone@example.com>\n' >"$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+# vi is a value for GIT_EDITOR, not a command to run.
+# shellcheck disable=SC2209
+if GIT_EDITOR=vi "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    pass
+else
+    fail "a comment line git will strip on the editor path was refused anyway"
+fi
+
+it "scan-for-leaks refuses the same comment line on the -m/-F path, where cleanup keeps it"
+if GIT_EDITOR=: "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "a comment line git keeps on the -m/-F path was not refused"
+else
+    pass
+fi
+
+it "scan-for-leaks does not refuse git's own comment line when GIT_EDITOR is unset"
+# set -u must survive a completely absent GIT_EDITOR, which is the common case outside a git hook.
+if (
+    unset GIT_EDITOR
+    "$REPO/test/scan-for-leaks.sh" --message "$_m"
+) >/dev/null 2>&1; then
+    pass
+else
+    fail "an unset GIT_EDITOR was treated as the -m/-F path instead of the editor default"
+fi
+
 it "scan-for-leaks accepts a commit message carrying none of the refused shapes"
 # The banner is asserted, not just the exit status: an unrecognised flag falls through to the
 # tracked-file scan, which passes on this repo's own clean tree and looks exactly like a scanned
@@ -7153,19 +7585,33 @@ _rc=$?
 case "$_out" in *'scanning the commit message'*) : ;; *) _rc=99 ;; esac
 if [ "$_rc" -eq 0 ]; then pass; else fail "a clean commit message was not scanned clean (rc $_rc): $_out"; fi
 
-it "scan-for-leaks reads only what becomes the message, never git's comments or verbose diff"
-# git strips neither before commit-msg runs, and the verbose diff of a change to the scanner itself
-# carries every shape the scanner refuses, so an unstripped read would refuse its own commit.
+it "scan-for-leaks reads past a benign comment but stops at the scissors line before a verbose diff"
+# git strips neither before commit-msg runs. The verbose diff of a change to the scanner itself
+# carries every shape the scanner refuses, so an unstripped read past the scissors line would
+# refuse its own commit; a comment line above that point is not cut, so it must itself be benign.
 _m="$ROOT/msg-verbose"
 {
-    printf 'fix: something\n#\n# Claude-Session: a comment git will strip\n'
+    printf 'fix: something\n#\n# a benign comment, not a refused shape\n'
     printf '# ------------------------ >8 ------------------------\n'
     printf 'diff --git a/x b/x\n+Claude-Session: inside the verbose diff\n'
 } >"$_m" || fixture_die "cannot write the message fixture at $_m"
-_out="$("$REPO/test/scan-for-leaks.sh" --message "$_m" 2>&1)"
+_out="$(GIT_EDITOR=: "$REPO/test/scan-for-leaks.sh" --message "$_m" 2>&1)"
 _rc=$?
 case "$_out" in *'scanning the commit message'*) : ;; *) _rc=99 ;; esac
-if [ "$_rc" -eq 0 ]; then pass; else fail "the scan read a comment or past the scissors line (rc $_rc): $_out"; fi
+if [ "$_rc" -eq 0 ]; then pass; else fail "the scan read past the scissors line (rc $_rc): $_out"; fi
+
+it "scan-for-leaks refuses an agent-session trailer typed as a comment line on the -m/-F path"
+# #133: the message tier used to drop every "#"-prefixed line unconditionally, which is right only
+# for the editor path's default cleanup; on the -m/-F path (GIT_EDITOR=:, githooks(5)) the default
+# cleanup keeps a comment line, so a reference on one must still be refused there.
+_m="$ROOT/msg-commented-trailer"
+printf 'fix: something\n#\n# Claude-Session: a-transcript-identifier\n' >"$_m" \
+    || fixture_die "cannot write the message fixture at $_m"
+if GIT_EDITOR=: "$REPO/test/scan-for-leaks.sh" --message "$_m" >/dev/null 2>&1; then
+    fail "an agent-session trailer typed as a comment line on the -m/-F path was not refused"
+else
+    pass
+fi
 
 it "scan-for-leaks refuses a commit message file it cannot read"
 # Rule 16: a gate handed nothing to scan has not passed, it has not run.
@@ -7227,14 +7673,52 @@ remote_helper_shim() {
     echo "$_rhs"
 }
 
+# The stamp is now written before the lookup even starts, so wait_for_stamp above returns on that
+# write, before a detached job has had any time to run at all -- checking a marker's absence right
+# after would prove nothing either way. This shim wraps the real git the background subshell calls
+# and marks its own return, so a wait on that marker is a wait for the subshell itself to finish,
+# not a guess at how long that takes.
+lookup_shim() {
+    _ls="$(mktemp -d "$ROOT/lookup-shim.XXXXXX")" || fixture_die "cannot create a scratch dir for the lookup-completion shim"
+    _lsreal="$(command -v git)" || fixture_die "no real git on PATH to wrap"
+    cat >"$_ls/git" <<SHIM
+#!/bin/sh
+case " \$* " in
+    *" ls-remote "*)
+        "$_lsreal" "\$@"
+        _rc=\$?
+        : > "$_ls/finished"
+        exit "\$_rc"
+        ;;
+esac
+exec "$_lsreal" "\$@"
+SHIM
+    chmod +x "$_ls/git" || fixture_die "cannot make the lookup-completion shim executable"
+    echo "$_ls"
+}
+
+# Bounded only as a safety net against a genuinely hung lookup, never as the pass condition:
+# returning 1 here is a fixture failure (nothing to conclude from), not a passing test.
+wait_for_marker() {
+    _wfm=0
+    while [ ! -e "$1" ] && [ "$_wfm" -lt 10 ]; do
+        sleep 1
+        _wfm=$((_wfm + 1))
+    done
+    [ -e "$1" ]
+}
+
 it "a plain commit in an adopted repo never reaches the network for the post-commit refresh"
 # F16/#137: asserting only that the stamp's second line came back empty proved nothing answered, which an offline machine also produces unfixed; the shim below proves no dial-out was even attempted.
 r=$(adopted_repo)
 _shim=$(remote_helper_shim)
-(cd "$r" && GIT_EXEC_PATH="$_shim" git commit -q --allow-empty -m 'chore: fixture') >/dev/null 2>&1 \
+_lookup=$(lookup_shim)
+(cd "$r" && PATH="$_lookup:$PATH" GIT_EXEC_PATH="$_shim" git commit -q --allow-empty -m 'chore: fixture') >/dev/null 2>&1 \
     || fixture_die "cannot commit in $r"
 if ! wait_for_stamp "$r" 0; then
     fail "a lookup that answered nothing left no stamp, so the next commit fires it again"
+elif ! wait_for_marker "$_lookup/finished"; then
+    fail "the backgrounded lookup never finished, so this proves nothing about whether it dialed out"
 elif [ -f "$_shim/dialed" ]; then
     fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
 else
@@ -7245,11 +7729,14 @@ it "a plain commit in a hook-installed repo never reaches the network for the po
 # new_hook_repo installs the same post-commit hook adopted_repo does; every other test here commits through hook_commit, so only deny_transports (not this test) closes this fixture's own gap.
 r=$(new_hook_repo)
 _shim=$(remote_helper_shim)
+_lookup=$(lookup_shim)
 stage "$r" NOTES.md "notes"
-(cd "$r" && GIT_EXEC_PATH="$_shim" git commit -q -m fixture) >/dev/null 2>&1 \
+(cd "$r" && PATH="$_lookup:$PATH" GIT_EXEC_PATH="$_shim" git commit -q -m fixture) >/dev/null 2>&1 \
     || fixture_die "cannot commit in $r"
 if ! wait_for_stamp "$r" 0; then
     fail "a lookup that answered nothing left no stamp, so the next commit fires it again"
+elif ! wait_for_marker "$_lookup/finished"; then
+    fail "the backgrounded lookup never finished, so this proves nothing about whether it dialed out"
 elif [ -f "$_shim/dialed" ]; then
     fail "the post-commit refresh reached for git-remote-https despite protocol.allow=never"
 else
@@ -7347,6 +7834,74 @@ printf 'let a = 1\nClaude-Session: a-transcript-identifier\n' >"$r/Seed.txt" \
 _c0=$(commits "$r")
 if ! (cd "$r" && GIT_EDITOR="$r/subject-editor" git commit -q -v) >/dev/null 2>&1; then
     fail "read past the scissors line and refused a commit whose --verbose diff carries the shape"
+elif [ "$(commits "$r")" = "$_c0" ]; then
+    fail "exited 0 without committing"
+elif (cd "$r" && git log -1 --format=%B) | grep -q "Claude-[S]ession"; then
+    fail "the message git published carries the reference, so accepting it was the wrong verdict"
+else
+    pass
+fi
+
+it "#134: a hand-typed scissors line on the -F path is scanned and refused, not trusted as a cut"
+# git only removes anything below its own scissors line when an editor actually ran; -F never
+# invokes one, so --cleanup=verbatim (and the default whitespace cleanup) publish the line and
+# everything below it verbatim. Trusting the line unconditionally let this exact shape through.
+r=$(adopted_repo)
+{
+    printf 'chore: x\n\nbody\n'
+    printf '# ------------------------ >8 ------------------------\n'
+    printf 'Claude-Session: a-transcript-identifier\n'
+} >"$r/scissors-Fmsg" || fixture_die "cannot write the #134 repro message in $r"
+_c0=$(commits "$r")
+if (cd "$r" && git commit -q --allow-empty --cleanup=verbatim -F "$r/scissors-Fmsg") >/dev/null 2>&1; then
+    fail "accepted an agent-session reference published verbatim below a hand-typed scissors line on the -F path"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+else
+    pass
+fi
+
+it "a comment merely mentioning '>8' is not mistaken for git's own scissors line"
+# The old pattern was "^#.*>8", so any "#" comment naming ">8" anywhere, not just git's own
+# untranslated literal, was read as the cut point and hid a trailer beneath it that git never
+# actually strips. Driven through a real editor commit, so the trust-the-cut-line branch is the
+# one under test, not the -F path's now-unconditional full scan.
+r=$(adopted_repo)
+cat >"$r/loose-scissors-editor" <<'EDITOR'
+#!/bin/sh
+printf 'chore: fixture\n\n# handles more than >8 items\nClaude-Session: a-transcript-identifier\n' > "$1"
+EDITOR
+chmod +x "$r/loose-scissors-editor" || fixture_die "cannot make the editor stub executable in $r"
+_c0=$(commits "$r")
+if (cd "$r" && GIT_EDITOR="$r/loose-scissors-editor" git commit -q --allow-empty) >/dev/null 2>&1; then
+    fail "a comment merely containing '>8' was treated as git's cut line, hiding the trailer below it"
+elif [ "$(commits "$r")" != "$_c0" ]; then
+    fail "refused, and committed anyway"
+else
+    pass
+fi
+
+it "a real scissors line still cuts everything below it when core.commentChar is not the default '#'"
+# Same contract as the "--verbose diff" test above, with the comment prefix git itself uses moved
+# off the default, so the fix has to resolve the configured prefix rather than assume "#".
+r=$(adopted_repo)
+git -C "$r" config core.commentChar ';' || fixture_die "cannot set core.commentChar in $r"
+cat >"$r/subject-editor-scc" <<'EDITOR'
+#!/bin/sh
+printf 'chore: a change whose diff carries the shape\n\n' > "$1.new"
+cat "$1" >> "$1.new"
+mv "$1.new" "$1"
+EDITOR
+chmod +x "$r/subject-editor-scc" || fixture_die "cannot make the editor stub executable in $r"
+printf 'let a = 1\n' >"$r/Seed2.txt" || fixture_die "cannot write the seed file in $r"
+(cd "$r" && git add -- Seed2.txt && GIT_EDITOR="$r/subject-editor-scc" git commit -q -v) >/dev/null 2>&1 \
+    || fixture_die "cannot seed a baseline commit in $r"
+printf 'let a = 1\nClaude-Session: a-transcript-identifier\n' >"$r/Seed2.txt" \
+    || fixture_die "cannot write the refused shape into the seed file in $r"
+(cd "$r" && git add -- Seed2.txt) || fixture_die "cannot stage Seed2.txt in $r"
+_c0=$(commits "$r")
+if ! (cd "$r" && GIT_EDITOR="$r/subject-editor-scc" git commit -q -v) >/dev/null 2>&1; then
+    fail "read past a ';'-prefixed scissors line and refused a commit whose --verbose diff carries the shape"
 elif [ "$(commits "$r")" = "$_c0" ]; then
     fail "exited 0 without committing"
 elif (cd "$r" && git log -1 --format=%B) | grep -q "Claude-[S]ession"; then

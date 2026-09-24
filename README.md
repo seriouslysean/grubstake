@@ -22,9 +22,9 @@ the cache still is not a trust boundary -- only the pin checked at download is.
 Fetch the script and adopt the repo.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.3.0/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.3.1/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
-./grubstake.sh version   # expect 1.3.0
+./grubstake.sh version   # expect 1.3.1
 ./grubstake.sh install
 ```
 
@@ -55,8 +55,10 @@ running major; `update <version>` is how to cross one deliberately.
 The command rewrites `grubstake.sh` and stops, which leaves you a diff to review before committing.
 If an update turns out to be wrong, `git revert` puts the old version back.
 
-The `post-commit` hook tells you when a newer release exists in the major you are on. It only
-reports, and never changes anything.
+The `post-commit` hook tells you when a newer release exists in the major you are on, until a
+newer major is published, after which it reports nothing and a bare `update` still finds releases
+in your major. It never blocks a commit and writes nothing but its own advisory cache inside
+`.git`.
 
 ## Commands
 

@@ -1,10 +1,5 @@
 #!/bin/sh
-# grubstake post-commit: report that a newer grubstake exists. Notify only. It never updates,
-# never blocks, and never fails a commit.
-#
-# post-commit rather than pre-commit on purpose: nothing here should sit in the path that gates a
-# commit. The synchronous cost is one file read; the network refresh is backgrounded and only
-# runs once per TTL, so an offline machine stays silent instead of stalling.
+# grubstake post-commit: notify only, never blocking, since nothing here may sit in the path that gates a commit; the lookup is backgrounded so an offline machine stays silent instead of stalling.
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 GRUBSTAKE="$ROOT/grubstake.sh"
@@ -21,17 +16,24 @@ stamp=0
 case "$stamp" in '' | *[!0-9]*) stamp=0 ;; esac
 
 if [ $((now - stamp)) -gt "$TTL" ]; then
-    # Backgrounded and detached: a slow or unreachable network must not extend a commit.
+    # Stamped before the lookup starts, so a hung (not merely refused) lookup does not leave the TTL expired for every commit made while it hangs (#135); line 2 is preserved, not clobbered.
+    _prev_latest=$(sed -n 2p "$CACHE" 2>/dev/null)
+    _stamp_tmp="$CACHE.$$.stamp.tmp"
+    # rm only reaches here on a failed write or failed mv; a successful mv already made $_stamp_tmp disappear.
+    # shellcheck disable=SC2015
+    printf '%s\n%s\n' "$now" "$_prev_latest" >"$_stamp_tmp" && mv -f "$_stamp_tmp" "$CACHE" || rm -f "$_stamp_tmp"
+    # Backgrounded and detached, so a hung lookup strands a process, never a commit; only a stalled transfer once connected or a url.insteadOf rewrite to ssh is actually bounded, not a raw https connect-phase hang.
     (
-        latest=$(git ls-remote --tags --refs https://github.com/seriouslysean/grubstake 'v*' 2>/dev/null \
+        GIT_TERMINAL_PROMPT=0
+        GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=10'
+        export GIT_TERMINAL_PROMPT GIT_SSH_COMMAND
+        latest=$(git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 \
+            ls-remote --tags --refs https://github.com/seriouslysean/grubstake 'v*' 2>/dev/null \
             | awk '{print $2}' | sed 's|refs/tags/v||' \
             | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
             | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
-        # A lookup that answered nothing keeps whatever answer is already cached, so an offline
-        # week does not silence an advisory that was correct.
+        # A lookup that answered nothing keeps whatever answer is already cached, so an offline week does not silence an advisory that was correct.
         [ -n "$latest" ] || latest=$(sed -n 2p "$CACHE" 2>/dev/null)
-        # Stamped whether or not it answered: an unwritten stamp leaves the TTL expired and fires
-        # this lookup again on the very next commit, which is the network back on the commit path.
         # Renamed into place, because the read below runs while this is still in flight.
         tmp="$CACHE.$$.tmp"
         # rm only reaches here on a failed write or failed mv; a successful mv already made $tmp disappear.
@@ -44,13 +46,15 @@ LATEST=$(sed -n 2p "$CACHE" 2>/dev/null) || exit 0
 [ -n "$LATEST" ] || exit 0
 [ "$LATEST" = "$CURRENT" ] && exit 0
 
-# CURRENT comes from the installed script's own report; LATEST is read raw from a writable cache
-# file. Neither has passed the fetch filter's grep, so an unvalidated one reaches the advisory line.
+# CURRENT comes from the script's own report and LATEST raw from a writable cache file; neither has passed the fetch filter's grep, so both reach the advisory line unvalidated.
 printf '%s\n%s\n' "$CURRENT" "$LATEST" | grep -qvE '^[0-9]+\.[0-9]+\.[0-9]+$' && exit 0
 
-# Only speak when the cached latest is genuinely newer than what is installed.
+# Guards against a well-formed LATEST that is not actually newer, since the checks above only ruled out malformed values, not older ones.
 newest=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
 [ "$newest" = "$LATEST" ] || exit 0
+
+# A major bump is the signal that update's in-place replace may not carry across cleanly.
+[ "${CURRENT%%.*}" = "${LATEST%%.*}" ] || exit 0
 
 echo "[grubstake] $LATEST available (pinned $CURRENT) -- run: ./grubstake.sh update"
 exit 0

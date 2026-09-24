@@ -1,7 +1,5 @@
 #!/bin/sh
-# grubstake pre-commit spine. Verifies pinned tools, runs repo-local gates, then lints staged
-# Swift. Repo-specific checks belong in .githooks/pre-commit.d/, not in this file, which is
-# overwritten whenever the hooks are reinstalled.
+# grubstake pre-commit spine; repo-local checks belong in .githooks/pre-commit.d/, since this file is overwritten on reinstall.
 
 set -eu
 
@@ -13,17 +11,18 @@ GRUBSTAKE="$ROOT/grubstake.sh"
     exit 1
 }
 
-# Only verify tools when something this spine gates is staged. A cold cache should not refuse a
-# docs-only commit, and a repo with no pins has nothing to verify. Verified before the gates run,
-# so a gate reaching for a pinned tool finds one rather than downloading mid-commit.
-STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
-[ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
+# Exported for the whole spine, gates included, so a gate reaching for a pinned tool refuses a cold cache instead of downloading mid-commit (rule 17).
+export GRUBSTAKE_OFFLINE=1
 
-# Gates before the lint below, in glob order. A gate that formats staged Swift and re-stages it is
-# the whole reason this extension point exists, and linting first refuses exactly what such a gate
-# was about to fix -- so it never runs, and whether it runs at all comes down to whether the linter
-# happens to have an opinion about the same file. A gate's own refusal is also the whole answer:
-# nothing below should spend a lint pass on an index a gate has already turned down.
+# Checked only when Swift is staged, and before the gates run, so a docs-only commit is never refused by a check nothing here needed.
+STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
+CHECKED=0
+if [ -n "$STAGED_SWIFT" ]; then
+    "$GRUBSTAKE" check >/dev/null
+    CHECKED=1
+fi
+
+# Gates run before the lint below, so a gate that reformats and re-stages Swift is linted on what it produced, not refused for what it was about to fix.
 for gate in "$ROOT"/.githooks/pre-commit.d/*; do
     # A dangling symlink is neither -e nor an unmatched glob, and treating it as either is the silent skip rule 16 forbids.
     [ -L "$gate" ] && [ ! -e "$gate" ] && {
@@ -42,24 +41,24 @@ for gate in "$ROOT"/.githooks/pre-commit.d/*; do
     }
 done
 
-# Re-read the index. A gate may have re-staged what it fixed, and may have staged Swift where none
-# was staged at all, which the read above would leave linted by nobody.
+# Re-read since a gate may have staged Swift where none was staged before; runs again only if the first read skipped it, so an unchanged commit is not checked twice.
 STAGED_SWIFT=$(git diff --cached --name-only --diff-filter=ACMRT -- '*.swift')
-[ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
+[ "$CHECKED" -eq 0 ] && [ -n "$STAGED_SWIFT" ] && "$GRUBSTAKE" check >/dev/null
 
-# Only lint if the repo pinned swiftlint. A repo that does not use it should not be blocked by
-# the shared spine; its own gates in pre-commit.d decide. One line per tool, so grep is enough.
-if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.tools" 2>/dev/null; then
-    # GRUBSTAKE_OFFLINE keeps curl off the commit path: a clean racing this check must refuse, not download.
-    SWIFTLINT="$(GRUBSTAKE_OFFLINE=1 "$GRUBSTAKE" path swiftlint)" || exit 1
-    # Verify and refuse rather than format-and-restage: re-adding after a fix folds unrelated
-    # hunks into a partial `git add -p` and re-stages a working-tree deletion of a file staged
-    # as new. The developer fixes and re-stages; the hook never touches the index.
-    #
-    # Known limitation: SwiftLint reads the working tree, so this checks the current contents of
-    # files whose paths are staged, not the staged blobs. Linting a temp copy would break config
-    # resolution, and stashing the remainder to lint the index is what strands work in the tools
-    # that do it. Both shapes it can detect are refused below -- a second status column of D, where there is nothing to read, and M or T, where what was read is not what is staged -- and CI lints the committed tree.
+# Asked of the script, since grubstake.sh may be a symlink whose pins live beside its target; its own exit 3 is reserved to mean not pinned.
+SWIFTLINT=""
+if [ -n "$STAGED_SWIFT" ]; then
+    OUT=$("$GRUBSTAKE" path swiftlint 2>&1) && RC=0 || RC=$?
+    if [ "$RC" -eq 0 ]; then
+        SWIFTLINT="$OUT"
+    elif [ "$RC" -ne 3 ]; then
+        echo "$OUT" >&2
+        exit 1
+    fi
+fi
+
+if [ -n "$SWIFTLINT" ]; then
+    # Refuses rather than reformats-and-restages, since re-adding after a fix folds unrelated hunks in from a partial `git add -p`.
     STATUS=$(git status --porcelain -- '*.swift')
     # Second column D means the worktree copy is gone, decided here rather than trusted to the linter's exit status, which a batched run can mask.
     GONE=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMRT]D //p')
@@ -67,8 +66,7 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     OUT=$(git diff --cached --name-only -z --diff-filter=ACMRT -- '*.swift' \
         | xargs -0 "$SWIFTLINT" lint --strict --quiet -- 2>&1) && RC=0 || RC=$?
     if [ -n "$GONE" ]; then
-        # Print first: a real violation in a co-staged file the linter did read must not be
-        # swallowed by this refusal, or the developer only learns about it on a second retry.
+        # Printed first, so a real violation in a co-staged file is not swallowed by this refusal and only surfaces on a second retry.
         [ -n "$OUT" ] && echo "$OUT" >&2
         echo "[pre-commit] staged Swift file(s) missing from the working tree, so nothing was linted:" >&2
         printf '%s\n' "$GONE" | sed 's/^/[pre-commit]   /' >&2
@@ -82,13 +80,12 @@ if [ -n "$STAGED_SWIFT" ] && grep -qE '^swiftlint[[:space:]]' "$ROOT/grubstake.t
     fi
     [ -n "$OUT" ] && echo "$OUT"
 
-    # Second column M or T means the worktree differs from what's staged; sed, not grep, since a match-nothing grep would exit 1 and end a clean commit under set -e.
+    # SwiftLint reads the working tree, not the staged blobs, so second column M or T is refused below rather than trusted; sed, not grep, since a match-nothing grep would exit 1 and end a clean commit under set -e.
     PARTIAL=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMRT][MT] //p')
     if [ -n "$PARTIAL" ]; then
         echo "[pre-commit] staged Swift file(s) have unstaged edits, so the lint read bytes that are not being committed:" >&2
         printf '%s\n' "$PARTIAL" | sed 's/^/[pre-commit]   /' >&2
-        # --keep-index by name: a plain `git stash` takes the staged hunk with it and the retry
-        # then commits nothing, so naming the bare command would destroy what this is protecting.
+        # Named with --keep-index, since a bare `git stash` would take the staged hunk with it and the retry would commit nothing.
         echo "[pre-commit] stage the rest, or: git stash push --keep-index; commit; git stash pop" >&2
         exit 1
     fi

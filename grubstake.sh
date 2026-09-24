@@ -1121,8 +1121,7 @@ add_one() {
     _pins="$(pins_file)"
     _lock="$_pins.lock"
     _pt="$_pins.$$.tmp"
-    # Empty on purpose: nothing here writes through it, but a hostile TMPDIR still has to reach this section's own trap safely.
-    _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
+    _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")" || die "cannot create a scratch directory under ${TMPDIR:-/tmp}"
     # mkdir is the portable atomic lock. Two agents adding pins otherwise write from stale reads.
     _waited=0
     while :; do
@@ -1152,46 +1151,36 @@ add_one() {
     # grubstake.tools is only known-good once this lock is held, even though install_tool already proved this spec's own bytes.
     validate_pins
     [ -f "$_pins" ] || printf '# grubstake pins: name version sha256-darwin sha256-linux\n' >"$_pins"
-    # Counted before the rewrite, compared after: a rewrite that drops pins without erroring reads the same as an ordinary empty file otherwise.
+    # grep -v exits 1 when it selects nothing, the ordinary shape of the first pin in an empty or
+    # tool-only file; anything else is a real read failure and must abort before the rename below.
+    # A pipeline's own exit status is its last stage's, not grep's, so neither stage can run inside
+    # one and still have its own failure seen.
+    # The [[:space:]] here is a regex bracket expression, not array syntax.
+    # shellcheck disable=SC1087
+    if grep -v -E "^$_tool[[:space:]]" "$_pins" 2>/dev/null >"$_tmp/pins-sel"; then _selrc=0; else _selrc=$?; fi
+    case "$_selrc" in
+        0 | 1) : ;;
+        *) die "$_pins: cannot read pins file (grep exit $_selrc), $_tool@$_ver was not recorded" ;;
+    esac
+    if grep -v '^$' "$_tmp/pins-sel" >"$_pt"; then _filtrc=0; else _filtrc=$?; fi
+    case "$_filtrc" in
+        0 | 1) : ;;
+        *) die "$_pins: cannot read pins file (grep exit $_filtrc), $_tool@$_ver was not recorded" ;;
+    esac
+    # Counted, not just read: a rewrite that drops pins without erroring is indistinguishable from
+    # grep's own "selected nothing" by exit status alone, so only a pin count catches it. Same filter
+    # pinned_tools uses, so the header comment and a blank line are never mistaken for a pin lost.
     if _before="$(grep -vcE '^[[:space:]]*(#|$)' "$_pins" 2>/dev/null)"; then _bnrc=0; else _bnrc=$?; fi
     case "$_bnrc" in
         0 | 1) : ;;
         *) die "$_pins: cannot read pins file (grep exit $_bnrc), $_tool@$_ver was not recorded" ;;
     esac
-    # Sorts pin lines only, under LC_ALL=C to match the old whole-file sort's byte order: each comment travels with the pin line below it, so relocating a pin never strands its comment.
-    if LC_ALL=C awk -v tool="$_tool" -v newpin="$_tool $_ver$_shas" '
-BEGIN { hdr_done = 0; hdr = ""; n = 0; pend = "" }
-{
-    if (!hdr_done) {
-        if ($0 ~ /^#/ || $0 == "") { hdr = hdr $0 "\n"; next }
-        hdr_done = 1
-    }
-    if ($0 ~ /^#/ || $0 == "") { pend = pend $0 "\n"; next }
-    n++
-    key[n] = $1
-    cmt[n] = pend
-    pin[n] = $0
-    pend = ""
-}
-END {
-    found = 0
-    for (i = 1; i <= n; i++) if (key[i] == tool) { pin[i] = newpin; found = 1 }
-    if (!found) { n++; key[n] = tool; cmt[n] = ""; pin[n] = newpin }
-    printf "%s", hdr
-    for (c = 1; c <= n; c++) {
-        best = 0
-        for (i = 1; i <= n; i++) {
-            if (placed[i]) continue
-            if (best == 0 || key[i] < key[best]) best = i
-        }
-        placed[best] = 1
-        printf "%s", cmt[best]
-        print pin[best]
-    }
-    printf "%s", pend
-}
-' "$_pins" >"$_pt"; then _awkrc=0; else _awkrc=$?; fi
-    [ "$_awkrc" -eq 0 ] || die "$_pins: cannot rewrite pins file (awk exit $_awkrc), $_tool@$_ver was not recorded"
+    # shellcheck disable=SC2086
+    printf '%s %s%s\n' "$_tool" "$_ver" "$_shas" >>"$_pt"
+    # sort's own failure here must not let a partial or unchanged $_pt reach the count check below
+    # unnoticed, since that check is the one guard standing between a bad write and the rename.
+    if LC_ALL=C sort -o "$_pt" "$_pt"; then _srtrc=0; else _srtrc=$?; fi
+    [ "$_srtrc" -eq 0 ] || die "$_pins: cannot sort pins file (sort exit $_srtrc), $_tool@$_ver was not recorded"
     # The pin written above guarantees this always matches; anything else is a real read failure on the file just written, not zero pins.
     if _after="$(grep -vcE '^[[:space:]]*(#|$)' "$_pt")"; then _anrc=0; else _anrc=$?; fi
     [ "$_anrc" -eq 0 ] || die "$_pins: cannot verify the rewritten pins file (grep exit $_anrc), $_tool@$_ver was not recorded"

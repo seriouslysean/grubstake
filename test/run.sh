@@ -30,6 +30,12 @@ ROOT="$(mktemp -d "${TMPDIR:-/tmp}/grubstake-test.XXXXXX")" || {
     exit 2
 }
 
+# grubstake.sh resolves paths with cd -P, so fixtures under a symlinked TMPDIR must be physical to string-match them.
+ROOT="$(cd "$ROOT" && pwd -P)" || {
+    printf 'FATAL  cannot resolve the physical path of the scratch directory\n' >&2
+    exit 2
+}
+
 # Published cache entries are read-only, as Go's module cache is, so they need write back first.
 cleanup() {
     chmod -R u+w "$ROOT" 2>/dev/null
@@ -804,8 +810,10 @@ fi
 
 it "doctor exits 0 for a repo with every pinned tool installed and hooks never installed"
 # The informational rows (hooks not installed, not grubstake's, not graded) must not themselves
-# flip the new exit status; only an actual problem row may.
+# flip the new exit status; only an actual problem row may. core.hooksPath is set explicitly here so
+# this exercises the per-hook "not installed" rows rather than #146's separate not-wired row.
 r=$(new_repo)
+(cd "$r" && git config core.hooksPath .githooks) || fixture_die "cannot set core.hooksPath in $r"
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
 _out=$(gs "$r" doctor)
@@ -3804,6 +3812,37 @@ else
     pass
 fi
 
+it "install refuses a global absolute foreign hooksPath from a repo with a linked worktree, naming the scope, not the worktree reason"
+# #146: hookspath_is_foreign sets _hp_reason to the worktree-sharing sentence for any absolute value
+# once a linked worktree exists, regardless of scope, but only a local or worktree scope is this
+# repo's own arrangement -- a global or system value's remedy is always the explicit local override,
+# so that message must win the dispatch even when a linked worktree also makes the value foreign.
+r=$(new_committed_repo)
+_other=$(new_repo)
+_link="$ROOT/linked-global.$$.$(od -An -N2 -tu2 </dev/urandom | tr -d ' ')"
+(cd "$r" && git worktree add "$_link") >/dev/null 2>&1 || fixture_die "cannot add a linked worktree at $_link"
+_gcfg="$ROOT/global-gitconfig-worktree.$$.$(od -An -N2 -tu2 </dev/urandom | tr -d ' ')"
+GIT_CONFIG_GLOBAL="$_gcfg" git config --global core.hooksPath "$_other/.githooks" \
+    || fixture_die "cannot seed a scratch global core.hooksPath"
+_out=$(cd "$r" && GIT_CONFIG_GLOBAL="$_gcfg" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1)
+_rc=$?
+_hp_local=$(cd "$r" && GIT_CONFIG_GLOBAL="$_gcfg" git config --local --get core.hooksPath 2>/dev/null || true)
+if [ "$_rc" -eq 0 ]; then
+    fail "install accepted a foreign global core.hooksPath in a repo with a linked worktree: $_out"
+elif [ -e "$r/.githooks" ]; then
+    fail "install wrote .githooks before refusing: $_out"
+elif [ -f "$r/grubstake.tools" ]; then
+    fail "install wrote grubstake.tools before refusing: $_out"
+elif [ -n "$_hp_local" ]; then
+    fail "install wrote a local core.hooksPath despite refusing: $_out"
+elif ! printf '%s' "$_out" | grep -q "global"; then
+    fail "did not name the offending scope (global), reported the worktree reason instead: $_out"
+elif ! printf '%s' "$_out" | grep -qF "git config --local core.hooksPath .githooks"; then
+    fail "did not name the explicit local override: $_out"
+else
+    pass
+fi
+
 it "doctor shows a non-local scope in parentheses on the hooksPath line"
 r=$(new_repo)
 _gcfg="$ROOT/global-gitconfig-doctor.$$.$(od -An -N2 -tu2 </dev/urandom | tr -d ' ')"
@@ -5831,6 +5870,27 @@ else
         *"not installed"* | *"DRIFTED"*) fail "doctor graded a hook in a repo it was never asked to install: $_out" ;;
         *) pass ;;
     esac
+fi
+
+it "doctor reports hooks not wired when core.hooksPath is unset, even though install wrote them"
+# #146: an unset core.hooksPath means git runs .git/hooks, not .githooks (git-config(1)), so bytes
+# in .githooks matching the embedded copy is not the same as wired -- doctor graded these "ok" anyway.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+gs "$r" install >/dev/null 2>&1 || fixture_die "cannot install into $r to seed doctor's fixture"
+[ -x "$r/.githooks/pre-commit" ] || fixture_die "install did not write $r/.githooks/pre-commit"
+(cd "$r" && git config --unset core.hooksPath) || fixture_die "cannot unset core.hooksPath in $r"
+_out=$(gs "$r" doctor)
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "doctor exited non-zero though hooks merely being unwired is informational: $_out"
+elif ! printf '%s' "$_out" | grep -qF "hooks        not wired, core.hooksPath is unset (run: ./grubstake.sh install)"; then
+    fail "did not print the not-wired row: $_out"
+elif printf '%s\n' "$_out" | grep -qE '^  (pre-commit|post-commit|commit-msg) '; then
+    fail "graded a per-hook row despite core.hooksPath being unset: $_out"
+else
+    pass
 fi
 
 it "doctor names a core.hooksPath it cannot read instead of grading it as unset"

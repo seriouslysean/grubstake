@@ -1278,6 +1278,9 @@ cmd_doctor() {
     fi
     if [ "${_hookspath_unreadable:-0}" = 1 ]; then
         printf '  hooks        not graded, core.hooksPath could not be read\n'
+    elif [ "$_hp_rc" -eq 1 ]; then
+        # Unset means git runs .git/hooks (git-config(1)); bytes matching in .githooks is not wired, so grading them here would be misleading, not merely uninteresting.
+        printf '  hooks        not wired, core.hooksPath is unset (run: ./grubstake.sh install)\n'
     elif [ -n "$_hp_reason" ]; then
         printf '  hooks        not graded, %s\n' "$_hp_reason"
     elif [ "$_hookspath_foreign" -eq 1 ]; then
@@ -1408,9 +1411,11 @@ cmd_install() {
     if [ "$_gcrc" -eq 0 ]; then
         # Shared with cmd_doctor so neither call site reports whichever of the two resolves happened to fail first (#139 follow-up).
         if hookspath_is_foreign "$_root" "$_existing"; then
-            [ -z "$_hp_reason" ] || die "$_hp_reason"
             case "$_existing_scope" in
-                local | worktree) die "core.hooksPath is already '$_existing'; move those hooks into .githooks first" ;;
+                local | worktree)
+                    [ -z "$_hp_reason" ] || die "$_hp_reason"
+                    die "core.hooksPath is already '$_existing'; move those hooks into .githooks first"
+                    ;;
                 # A global or system value is not this repo's own arrangement (#112), so the remedy is the explicit override that names what it overrides, never a silent local write.
                 *) die "core.hooksPath is set in your $_existing_scope git config to '$_existing'; grubstake's hooks need .githooks. To use them here, set a local override (this stops the $_existing_scope hooks running in this repo): git config --local core.hooksPath .githooks" ;;
             esac
@@ -1545,10 +1550,11 @@ below_floor() {
 
 # Release tags, newest first. No mutable "latest" pointer.
 # Reverse must be per-key (nr); a trailing -r is ignored when key flags are present.
-# Prompt/credential-helper suppressed and bounded the same way hooks/post-commit's own lookup is,
-# since this runs synchronously on a command a human is waiting on, not backgrounded like that one.
+# Prompt suppressed and the transfer bounded the same way hooks/post-commit's own lookup is, since
+# this runs synchronously on a command a human is waiting on, not backgrounded like that one; ssh is
+# left to whatever core.sshCommand the user has configured (git-config(1)), since a person runs this update, not a hook.
 release_tags() {
-    GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=10' \
+    GIT_TERMINAL_PROMPT=0 \
         git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 \
         ls-remote --tags --refs "$GRUBSTAKE_REPO" 'v*' 2>/dev/null \
         | awk '{print $2}' | sed 's|refs/tags/v||' \

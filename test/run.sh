@@ -367,6 +367,18 @@ else
     esac
 fi
 
+it "no user-facing message spells the command bare, without ./ and .sh"
+# Locks in #146's rename: every remedy, usage line and hint said "grubstake <command>", but no such
+# command exists -- the script is "./grubstake.sh". A comment is exempt (rule 13's why-only prose can
+# say "grubstake" freely); every non-comment line is not.
+_bad=$(grep -vE '^[[:space:]]*#' "$GS" | grep -E 'grubstake (add|ensure|install|clean|help)')
+if [ -n "$_bad" ]; then
+    fail "found the bare spelling outside a comment:
+$_bad"
+else
+    pass
+fi
+
 # ---------------------------------------------------------------------------- platform
 
 printf '\nplatform\n'
@@ -574,7 +586,7 @@ else
     pass
 fi
 
-it "doctor on an unsupported arch stays advisory, without a stray guard message leaking past its report"
+it "doctor on an unsupported arch reports fully, then fails, without a stray guard message leaking past its report"
 # #70's remaining survey item at cmd_doctor covers two nestings. The header's own capture
 # ("_plat=\"\$(platform 2>&1)\"") redirects platform()'s stderr into the captured value, so a failure
 # there renders cleanly inside doctor's own "platform   ..." line instead of a blank field, and the
@@ -586,9 +598,10 @@ it "doctor on an unsupported arch stays advisory, without a stray guard message 
 # "elif [ \"\$(platform)\" = darwin ]" -- which is a tested condition, so a failure there is swallowed
 # for control-flow purposes (cache_root quietly takes the linux branch) but platform()'s own die() still
 # writes to stderr unconditionally, unredirected, leaking a duplicate "[grubstake] unsupported arch"
-# line the header's own clean capture does not have. doctor is advisory (confirmed against its own rc
-# semantics: a MISSING tool or a drifted hook already reports without failing doctor itself), so this
-# asserts exit 0 throughout, not a refusal.
+# line the header's own clean capture does not have.
+#
+# #148 makes an unsupported-platform row a reported problem, so doctor now exits 1 here rather than
+# 0; the report itself must still render in full and stay stderr-clean before that exit fires.
 #
 # This was watched failing directly against this branch's real grubstake.sh before cache_root's own
 # nesting was fixed here (a stray "[grubstake] unsupported arch" line leaking past doctor's clean
@@ -604,8 +617,8 @@ mkdir -p "$_fakehome" || fixture_die "cannot create the fake HOME dir"
 _out=$(cd "$r" && PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh doctor 2>/dev/null)
 _rc=$?
 _err=$(cd "$r" && PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh doctor 2>&1 1>/dev/null)
-if [ "$_rc" -ne 0 ]; then
-    fail "doctor exited $_rc on an unsupported arch; doctor is advisory and must still report, not fail: $_out"
+if [ "$_rc" -eq 0 ]; then
+    fail "doctor exited 0 on an unsupported arch, now a reported problem: $_out"
 elif ! printf '%s\n' "$_out" | grep -q '^platform.*unsupported arch: aarch64'; then
     fail "the platform field did not carry the guard's own message: $_out"
 elif ! printf '%s' "$_out" | grep -q "unsupported platform"; then
@@ -665,6 +678,37 @@ elif ! printf '%s' "$_pout" | grep -q "HOME"; then
     fail "path refused, but without naming HOME: $_pout"
 elif ! printf '%s' "$_cout" | grep -q "HOME"; then
     fail "clean refused, but without naming HOME: $_cout"
+else
+    pass
+fi
+
+it "a relative XDG_CACHE_HOME is treated as unset, not refused"
+# XDG Base Directory spec: "If an implementation encounters a relative path in any of these
+# variables it should consider the path invalid and ignore it," falling back to $HOME/.cache.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_lshim="$r/uname-linux"
+mkdir -p "$_lshim" || fixture_die "cannot create the linux uname shim dir"
+cat >"$_lshim/uname" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    -s) echo Linux ;;
+    -m) echo x86_64 ;;
+    *)  echo Linux ;;
+esac
+SHIM
+chmod +x "$_lshim/uname" || fixture_die "cannot make the linux uname shim executable"
+_fakehome="$r/fake-home"
+_dest="$_fakehome/.cache/grubstake/swiftlint/$SHA_A"
+mkdir -p "$_dest" || fixture_die "cannot create $_dest"
+printf '#!/bin/sh\necho 0.63.2\n' >"$_dest/swiftlint" || fixture_die "cannot write the fixture binary"
+chmod +x "$_dest/swiftlint" || fixture_die "cannot make the fixture binary executable"
+_out=$(cd "$r" && env -u GRUBSTAKE_CACHE PATH="$_lshim:$PATH" HOME="$_fakehome" XDG_CACHE_HOME=rel GRUBSTAKE_OFFLINE=1 ./grubstake.sh path swiftlint 2>&1)
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "a relative XDG_CACHE_HOME was refused instead of treated as unset: $_out"
+elif [ "$_out" != "$_dest/swiftlint" ]; then
+    fail "resolved somewhere other than \$HOME/.cache/grubstake: $_out"
 else
     pass
 fi
@@ -741,6 +785,36 @@ it "a malformed pin fails doctor too"
 r=$(new_repo)
 pins "$r" "garbage 1.0.0 $SHA_A $SHA_B"
 expect_fail "$r" doctor
+
+it "doctor exits non-zero when a pinned tool is missing"
+# #148: doctor printed every row, MISSING included, but always exited 0 -- a script or CI step
+# running it as a check passed on a broken install.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_out=$(gs "$r" doctor)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "doctor exited 0 with swiftlint MISSING: $_out"
+else
+    case "$_out" in
+        *MISSING*) pass ;;
+        *) fail "doctor failed, but not because it reported MISSING: $_out" ;;
+    esac
+fi
+
+it "doctor exits 0 for a repo with every pinned tool installed and hooks never installed"
+# The informational rows (hooks not installed, not grubstake's, not graded) must not themselves
+# flip the new exit status; only an actual problem row may.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+_out=$(gs "$r" doctor)
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "doctor exited non-zero though nothing pinned is a problem (hooks merely not installed): $_out"
+else
+    pass
+fi
 
 # ---------------------------------------------------------------------------- keyed pins
 
@@ -889,6 +963,28 @@ else
     esac
 fi
 
+it "a cache root carrying a backslash-c round-trips intact through path under dash's XSI echo"
+# cache_root, tool_dir, tool_bin and cmd_path's own final print all carried a value through echo;
+# any one of them left unfixed truncates the same as pin_sha's own hazard above, just on a path
+# instead of a pins-file field. GRUBSTAKE_OFFLINE=1 with the binary already in place keeps this
+# offline instead of needing a real download.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_cache="$r/cache-a\cb"
+_dest="$_cache/swiftlint/$SHA_A"
+mkdir -p "$_dest" || fixture_die "cannot create $_dest"
+printf '#!/bin/sh\necho 0.63.2\n' >"$_dest/swiftlint" || fixture_die "cannot write the fixture binary"
+chmod +x "$_dest/swiftlint" || fixture_die "cannot make the fixture binary executable"
+_out=$(cd "$r" && GRUBSTAKE_CACHE="$_cache" GRUBSTAKE_OFFLINE=1 dash ./grubstake.sh path swiftlint 2>&1)
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "a backslash-c in the cache root was truncated by echo instead of round-tripping intact: $_out"
+elif [ "$_out" != "$_dest/swiftlint" ]; then
+    fail "resolved to '$_out', expected '$_dest/swiftlint'"
+else
+    pass
+fi
+
 # "$_l"/"$_ps_line" are unquoted in the split that reads a pins line, so a field shaped like a glob
 # undergoes pathname expansion against cwd before any hex check ever sees it. A decoy file whose name
 # happens to match is a silent substitution, not a parse. Single-quoted so the literal "?" reaches
@@ -1006,6 +1102,31 @@ _out=$(cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubst
 _rc=$?
 if [ "$_rc" -eq 0 ]; then
     fail "ensure exited 0 even though the archived binary itself exits nonzero: $_out"
+else
+    pass
+fi
+
+it "a broken TMPDIR refuses before ever reaching curl, naming itself in the refusal"
+# install_tool's own "_tmp=\"\$(mktemp -d ...)\"" and its "mkdir -p \"\$(dirname \"\$_dest\")\"" were
+# unchecked, so a missing TMPDIR left \$_tmp empty and sent the download to "/archive". The curl shim
+# below never writes to its -o target at all (only marks that it ran), so this stays safe even if the
+# unfixed code really does try to reach a root-level path.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_badtmp="$r/no-such-tmp"
+_curlshim="$r/curl-shim"
+mkdir -p "$_curlshim" || fixture_die "cannot create the curl shim dir"
+_marker="$r/CURL-RAN"
+printf '#!/bin/sh\n: > "%s"\nexit 6\n' "$_marker" >"$_curlshim/curl" || fixture_die "cannot write the curl marker shim"
+chmod +x "$_curlshim/curl" || fixture_die "cannot make the curl marker shim executable"
+_out=$(cd "$r" && PATH="$_curlshim:$PATH" TMPDIR="$_badtmp" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 with no working TMPDIR: $_out"
+elif [ -f "$_marker" ]; then
+    fail "curl ran despite mktemp having nowhere to create a scratch directory: $_out"
+elif ! printf '%s' "$_out" | grep -qF "$_badtmp"; then
+    fail "refused, but never named the broken TMPDIR: $_out"
 else
     pass
 fi
@@ -2540,6 +2661,28 @@ case "$out" in
     *) fail "symlink resolved pins elsewhere: $out" ;;
 esac
 
+it "script_dir resolves under CDPATH, not just from a bare cd's extra stdout line"
+# POSIX cd writes the new directory to stdout when a CDPATH entry is used; script_dir's own "cd ... &&
+# pwd" then returns two lines, pins_file names nothing that exists, and check reads zero tools off it
+# instead of failing. Reproduced with a copy at sub/grubstake.sh, invoked with "sh sub/grubstake.sh"
+# (a "./" invocation skips CDPATH and would not reproduce this).
+r=$(new_repo)
+mkdir -p "$r/sub" || fixture_die "cannot create $r/sub"
+cp "$r/grubstake.sh" "$r/sub/grubstake.sh" || fixture_die "cannot copy grubstake.sh into $r/sub"
+chmod +x "$r/sub/grubstake.sh" || fixture_die "cannot make $r/sub/grubstake.sh executable"
+# Pins live beside the script, not cwd: sub/grubstake.sh reads sub/grubstake.tools, not $r's own.
+pins "$r/sub" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_out=$(cd "$r" && CDPATH=. GRUBSTAKE_CACHE="$r/.cache" sh sub/grubstake.sh check 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "check exited 0 under CDPATH, reading a pinned tool as though nothing were pinned: $_out"
+else
+    case "$_out" in
+        *"not installed"*) pass ;;
+        *) fail "refused, but not because the pinned tool was reported not installed: $_out" ;;
+    esac
+fi
+
 it "path fails for a tool that is not pinned"
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
@@ -2560,7 +2703,7 @@ if [ "$_rc" -eq 0 ]; then
 else
     case "$_out" in
         *"must not run"*) fail "curl ran despite GRUBSTAKE_OFFLINE=1: $_out" ;;
-        *"not installed"*"grubstake ensure"*) pass ;;
+        *"not installed"*"./grubstake.sh ensure"*) pass ;;
         *) fail "refused without the documented message: $_out" ;;
     esac
 fi
@@ -3433,22 +3576,28 @@ exit 6
 SHIM
 cat >"$_shims/git" <<SHIM
 #!/bin/sh
-if [ "\${1:-}" = "ls-remote" ]; then
-    _ok=1
-    for a in "\$@"; do
-        case "\$a" in file://*) _ok=0 ;; esac
-    done
-    if [ "\$_ok" = 1 ]; then
-        echo "git: network blocked in test" >&2
-        exit 128
-    fi
-fi
+# Substring, not "\${1:-} = ls-remote": release_tags now leads with -c flags, so \$1 is "-c", not
+# "ls-remote", and an anchored check here would stop ever firing while looking like it still does.
+case " \$* " in
+    *" ls-remote "*)
+        _ok=1
+        for a in "\$@"; do
+            case "\$a" in file://*) _ok=0 ;; esac
+        done
+        if [ "\$_ok" = 1 ]; then
+            echo "git: network blocked in test" >&2
+            exit 128
+        fi
+        ;;
+esac
 exec "$_realgit" "\$@"
 SHIM
 chmod +x "$_shims/curl" "$_shims/git"
 
 f=$(new_update_fixture)
 r=$(new_repo)
+# Same major as the fixture's 9.9.9 release, so this stays a same-major bare update under #149's new gate.
+sed -i.bak 's/^GRUBSTAKE_VERSION=.*/GRUBSTAKE_VERSION="9.0.0"/' "$r/grubstake.sh" && rm -f "$r/grubstake.sh.bak"
 _marker="$r/EXECUTED"
 _out=$(cd "$r" && PATH="$_shims:$PATH" \
     GRUBSTAKE_CACHE="$r/.cache" GST_TEST_MARKER="$_marker" \
@@ -3465,6 +3614,35 @@ else
         # ensures on its way out, so naming ensure here would leave the hooks a release behind.
         *"./grubstake.sh install"*) pass ;;
         *) fail "did not tell the user to run install: $_out" ;;
+    esac
+fi
+
+it "a bare update stays within the running major and names a newer one that crosses it"
+# #149: a bare update took the newest tag across every major, so a future major that breaks the
+# frozen grammar was one command away with no signal beyond the diff. git_tags_shim's own $2 is
+# "aaa <version>" for a single-tag override; passing more pairs here reuses it unmodified for three.
+r=$(new_repo)
+sed -i.bak 's/^GRUBSTAKE_VERSION=.*/GRUBSTAKE_VERSION="1.2.1"/' "$r/grubstake.sh" && rm -f "$r/grubstake.sh.bak"
+_shim="$(mktemp -d "$ROOT/major-gate-shim.XXXXXX")" || fixture_die "cannot create the major-gate git shim dir"
+git_tags_shim "$_shim" "1.2.1 bbb 1.3.0 ccc 2.0.0"
+_uf="$(mktemp -d "$ROOT/major-gate-fixture.XXXXXX")" || fixture_die "cannot create the major-gate raw fixture dir"
+mkdir -p "$_uf/raw/v1.3.0" || fixture_die "cannot create $_uf/raw/v1.3.0"
+printf '#!/bin/sh\nGRUBSTAKE_VERSION="1.3.0"\nmain() { :; }\nmain "$@"\n' >"$_uf/raw/v1.3.0/grubstake.sh" \
+    || fixture_die "cannot write the major-gate v1.3.0 fixture release"
+mkdir -p "$_uf/raw/v2.0.0" || fixture_die "cannot create $_uf/raw/v2.0.0"
+printf '#!/bin/sh\nGRUBSTAKE_VERSION="2.0.0"\nmain() { :; }\nmain "$@"\n' >"$_uf/raw/v2.0.0/grubstake.sh" \
+    || fixture_die "cannot write the major-gate v2.0.0 fixture release"
+_out=$(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$_uf/raw" ./grubstake.sh update 2>&1)
+_rc=$?
+_after="$(sed -n 's/^GRUBSTAKE_VERSION="\(.*\)"$/\1/p' "$r/grubstake.sh")"
+if [ "$_rc" -ne 0 ]; then
+    fail "bare update exited non-zero with a same-major release available: $_out"
+elif [ "$_after" != "1.3.0" ]; then
+    fail "bare update did not install the newest same-major release (1.3.0), got $_after: $_out"
+else
+    case "$_out" in
+        *"2.0.0"*"update 2.0.0"*) pass ;;
+        *) fail "bare update crossed the major, or never named 2.0.0 as the one that would: $_out" ;;
     esac
 fi
 
@@ -3595,6 +3773,47 @@ elif [ "$_out" != "$_expected" ]; then
 else
     pass
 fi
+
+it "install refuses a global core.hooksPath, naming the scope and the local override, without writing anything"
+# #148/#112: only a local (or worktree) value is this repo's own arrangement. A global or system
+# value is read the same way (git config --show-scope --path --get, merged), but never silently
+# adopted and never blamed on this repo the way a local value is -- the message must name which
+# scope it came from and the explicit override that would use grubstake's hooks here anyway.
+r=$(new_repo)
+_other=$(new_repo)
+_gcfg="$ROOT/global-gitconfig.$$.$(od -An -N2 -tu2 </dev/urandom | tr -d ' ')"
+GIT_CONFIG_GLOBAL="$_gcfg" git config --global core.hooksPath "$_other/.githooks" \
+    || fixture_die "cannot seed a scratch global core.hooksPath"
+_cfg_before="$(mktemp "$ROOT/local-gitconfig-before.XXXXXX")" || fixture_die "cannot create a snapshot file"
+cp "$r/.git/config" "$_cfg_before" || fixture_die "cannot snapshot $r/.git/config"
+_out=$(cd "$r" && GIT_CONFIG_GLOBAL="$_gcfg" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "install accepted a foreign global core.hooksPath: $_out"
+elif [ -d "$r/.githooks" ]; then
+    fail "install wrote .githooks before refusing a foreign global core.hooksPath: $_out"
+elif [ -f "$r/grubstake.tools" ]; then
+    fail "install wrote grubstake.tools before refusing a foreign global core.hooksPath: $_out"
+elif ! cmp -s "$_cfg_before" "$r/.git/config"; then
+    fail "install changed the repo's local git config despite refusing: $_out"
+elif ! printf '%s' "$_out" | grep -q "global"; then
+    fail "did not name the offending scope (global): $_out"
+elif ! printf '%s' "$_out" | grep -qF "git config --local core.hooksPath .githooks"; then
+    fail "did not name the explicit local override: $_out"
+else
+    pass
+fi
+
+it "doctor shows a non-local scope in parentheses on the hooksPath line"
+r=$(new_repo)
+_gcfg="$ROOT/global-gitconfig-doctor.$$.$(od -An -N2 -tu2 </dev/urandom | tr -d ' ')"
+GIT_CONFIG_GLOBAL="$_gcfg" git config --global core.hooksPath .githooks \
+    || fixture_die "cannot seed a scratch global core.hooksPath"
+_out=$(cd "$r" && GIT_CONFIG_GLOBAL="$_gcfg" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh doctor 2>&1)
+case "$_out" in
+    *"hooksPath  .githooks (global)"*) pass ;;
+    *) fail "doctor did not name the global scope on the hooksPath line: $_out" ;;
+esac
 
 it "install refuses an explicitly empty core.hooksPath, and doctor names it rather than reading it as unset"
 # git treats core.hooksPath= as the worktree root, not as unset (git -c core.hooksPath= rev-parse
@@ -5024,7 +5243,7 @@ elif [ -f "$_marker" ]; then
     fail "curl ran on the commit path racing a stale check: $_out"
 else
     case "$_out" in
-        *"not installed"*"grubstake ensure"*) pass ;;
+        *"not installed"*"./grubstake.sh ensure"*) pass ;;
         *) fail "refused without the documented offline message: $_out" ;;
     esac
 fi
@@ -5299,7 +5518,7 @@ _out=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_OFFLINE=1 ./grubstake.sh
 _rc=$?
 if [ "$_rc" -eq 0 ]; then
     fail "ensure exited 0 with a pinned tool never installed: $_out"
-elif printf '%s' "$_out" | grep -q "grubstake ensure"; then
+elif printf '%s' "$_out" | grep -q "./grubstake.sh ensure"; then
     fail "told a caller already running ensure to run ensure: $_out"
 elif ! printf '%s' "$_out" | grep -qi "offline"; then
     fail "didn't name GRUBSTAKE_OFFLINE as the reason: $_out"
@@ -5588,7 +5807,7 @@ _out=$(gs "$r" doctor)
 # that must carry them together.
 _line=$(printf '%s\n' "$_out" | grep 'pre-commit')
 case "$_line" in
-    *"DRIFTED"*"rm it and run: grubstake install"*) pass ;;
+    *"DRIFTED"*"rm it and run: ./grubstake.sh install"*) pass ;;
     *) fail "doctor stopped flagging a genuinely drifted grubstake hook: $_out" ;;
 esac
 
@@ -5616,13 +5835,14 @@ fi
 
 it "doctor names a core.hooksPath it cannot read instead of grading it as unset"
 # ~nosuchuser/hooks fails git's own user-dir expansion (rc 128, not rc 1 for unset) -- doctor's own
-# read discarded every nonzero status, which graded that failure the same as .githooks.
+# read discarded every nonzero status, which graded that failure the same as .githooks. #148 makes a
+# read failure a reported problem, so doctor now fails here too, rather than passing while unable to say so.
 r=$(new_repo)
 (cd "$r" && git config core.hooksPath "~nosuchuser/hooks") || fixture_die "cannot seed core.hooksPath in $r"
 _out=$(gs "$r" doctor)
 _rc=$?
-if [ "$_rc" -ne 0 ]; then
-    fail "doctor exited non-zero rather than reporting the read failure (rc $_rc): $_out"
+if [ "$_rc" -eq 0 ]; then
+    fail "doctor exited 0 despite failing to read core.hooksPath: $_out"
 else
     case "$_out" in
         *"hooksPath  (unset)"*) fail "doctor graded an unreadable core.hooksPath as unset: $_out" ;;

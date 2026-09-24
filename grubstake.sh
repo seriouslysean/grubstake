@@ -45,15 +45,15 @@ usage() {
     cat <<'USAGE'
 grubstake: pinned, verified build tooling for iOS repos.
 
-  grubstake install                  adopt this repo: write config, wire hooks, install tools
-  grubstake update [<tag>]           fetch a newer grubstake, replace this script, leave the diff
-  grubstake ensure                   install and verify every pinned tool
-  grubstake check                    confirm every pinned tool is installed for this platform
-  grubstake add <tool>@<version>...  pin one or more tools: download, hash, record
-  grubstake path <tool>              absolute path to a pinned tool
-  grubstake doctor                   report install health
-  grubstake clean                    remove the cached tool entries, read-only entries included
-  grubstake version                  print the version of this script
+  ./grubstake.sh install                  adopt this repo: write config, wire hooks, install tools
+  ./grubstake.sh update [<tag>]           fetch a newer grubstake, replace this script, leave the diff
+  ./grubstake.sh ensure                   install and verify every pinned tool
+  ./grubstake.sh check                    confirm every pinned tool is installed for this platform
+  ./grubstake.sh add <tool>@<version>...  pin one or more tools: download, hash, record
+  ./grubstake.sh path <tool>              absolute path to a pinned tool
+  ./grubstake.sh doctor                   report install health
+  ./grubstake.sh clean                    remove the cached tool entries, read-only entries included
+  ./grubstake.sh version                  print the version of this script
 
 Tools: swiftlint, swiftformat, xcbeautify, periphery
 USAGE
@@ -85,7 +85,8 @@ cache_root() {
             _cr_var=HOME
             _cr_val="${HOME:-}"
             _cr_root="$_cr_val/Library/Caches/grubstake"
-        elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+        # A relative value is invalid per the XDG Base Directory spec and treated the same as unset.
+        elif [ -n "${XDG_CACHE_HOME:-}" ] && [ "${XDG_CACHE_HOME#/}" != "$XDG_CACHE_HOME" ]; then
             _cr_var=XDG_CACHE_HOME
             _cr_val="$XDG_CACHE_HOME"
             _cr_root="$_cr_val/grubstake"
@@ -108,7 +109,7 @@ cache_root() {
             return 1
             ;;
     esac
-    echo "$_cr_root"
+    printf '%s\n' "$_cr_root"
 }
 
 sha256_file() {
@@ -178,15 +179,19 @@ script_path() {
         _t="$(readlink "$_p")"
         case "$_t" in /*) _p="$_t" ;; *) _p="$(dirname "$_p")/$_t" ;; esac
     done
-    echo "$_p"
+    printf '%s\n' "$_p"
 }
-script_dir() { cd "$(dirname "$(script_path)")" && pwd; }
-pins_file() { echo "$(script_dir)/grubstake.tools"; }
+script_dir() {
+    # CDPATH= scopes to this one cd; it is not a mistyped assignment.
+    # shellcheck disable=SC1007
+    CDPATH= cd -P "$(dirname "$(script_path)")" && pwd
+}
+pins_file() { printf '%s\n' "$(script_dir)/grubstake.tools"; }
 
 pin_field() {
     _line=$(grep -E "^$1[[:space:]]" "$(pins_file)" 2>/dev/null || true)
     [ -n "$_line" ] || return 1
-    echo "$_line" | awk -v n="$2" '{print $n}'
+    printf '%s\n' "$_line" | awk -v n="$2" '{print $n}'
 }
 
 pin_version() { pin_field "$1" 2; }
@@ -289,15 +294,15 @@ validate_pins() {
 # pin changes the path, which is a cache miss, which reinstalls. Nothing has to detect staleness.
 tool_dir() {
     _tdr="$(cache_root)" || return 1
-    echo "$_tdr/$1/$2"
+    printf '%s\n' "$_tdr/$1/$2"
 } # $2 is the pinned sha256
 tool_bin() {
     _tbd="$(tool_dir "$1" "$2")" || return 1
-    echo "$_tbd/$1"
+    printf '%s\n' "$_tbd/$1"
 }
 
 receipt_file() {
-    echo "$1/.grubstake-receipt"
+    printf '%s\n' "$1/.grubstake-receipt"
 }
 
 # Hashes $1 and prints it only if it comes back 64 lowercase hex; prints nothing otherwise. Shared
@@ -457,7 +462,7 @@ assert_reported_version() {
     _arv="$(reported_version "$1" "$2" || echo '')"
     [ "$_arv" = "$3" ] && return 0
     warn "$2: $4 reports ${_arv:-nothing}, not the pinned $3.
-  The pin may have been edited without re-hashing; run: grubstake add $2@$3, or remove $4 by hand."
+  The pin may have been edited without re-hashing; run: ./grubstake.sh add $2@$3, or remove $4 by hand."
     return 1
 }
 
@@ -481,7 +486,7 @@ install_tool() {
         log "$_tool: not published for $_plat, skipping"
         return 0
     fi
-    [ "$_want" != "-" ] && [ -n "$_want" ] || die "$_tool has no $_plat hash in grubstake.tools (run: grubstake add $_tool@$_ver)"
+    [ "$_want" != "-" ] && [ -n "$_want" ] || die "$_tool has no $_plat hash in grubstake.tools (run: ./grubstake.sh add $_tool@$_ver)"
 
     _dest="$(tool_dir "$_tool" "$_want")" || return 1
     _bin="$(tool_bin "$_tool" "$_want")" || return 1
@@ -518,7 +523,7 @@ install_tool() {
                 # Warned, not died: one flagged entry must not block installing or verifying every
                 # other pinned tool; cmd_ensure exits non-zero at the end if any were flagged.
                 warn "$_tool: $_dest does not match its receipt recorded at install.
-  Remove that directory by hand, or run: grubstake clean"
+  Remove that directory by hand, or run: ./grubstake.sh clean"
                 return 1
             fi
             # No receipt, or a header this script does not recognize: predates receipts, or was
@@ -544,14 +549,15 @@ install_tool() {
     fi
 
     # Refused before any network call; $4 overrides the remedy for a caller that is itself ensure.
-    [ -z "${GRUBSTAKE_OFFLINE:-}" ] || die "$_tool $_ver: not installed (${4:-run: grubstake ensure})"
+    [ -z "${GRUBSTAKE_OFFLINE:-}" ] || die "$_tool $_ver: not installed (${4:-run: ./grubstake.sh ensure})"
 
-    _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
+    _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")" \
+        || die "$_tool $_ver: cannot create a scratch directory under ${TMPDIR:-/tmp}"
     arm_cleanup "rm -rf $(sq "$_tmp")"
 
     log "$_tool $_ver: downloading"
     _archive="$_tmp/archive"
-    curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$_url" -o "$_archive" \
+    curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors --max-time 300 "$_url" -o "$_archive" \
         || die "$_tool $_ver: download failed"
 
     _got="$(sha256_file "$_archive")"
@@ -600,7 +606,7 @@ install_tool() {
         warn "$_tool $_ver: could not hash the installed binary to record a receipt (publishing without one)"
     fi
 
-    mkdir -p "$(dirname "$_dest")"
+    mkdir -p "$(dirname "$_dest")" || die "$_tool $_ver: cannot create $(dirname "$_dest")"
     # Under a guarded caller, errexit is suspended for this whole body, so this failing without a die does not exit the caller too; unguarded, it would.
     with_lock "$_dest.lock" publish_dir "$_staging" "$_dest" "$_tool" || {
         rm -rf "$_tmp"
@@ -649,7 +655,7 @@ verify_tool() {
     _bin="$(tool_bin "$_tool" "$_sha")" || return 1
     [ -x "$_bin" ] && return 0
     # Warned, not died: cmd_check's own loop is where every missing tool gets named, not just the first.
-    warn "$_tool $2: not installed (run: grubstake ensure)"
+    warn "$_tool $2: not installed (run: ./grubstake.sh ensure)"
     return 1
 }
 
@@ -1029,7 +1035,7 @@ is_known_hook_hash() {
 add_one() {
     _tool="${1%@*}"
     _ver="${1#*@}"
-    [ "$_tool" != "$1" ] || die "usage: grubstake add <tool>@<version>"
+    [ "$_tool" != "$1" ] || die "usage: ./grubstake.sh add <tool>@<version>"
     is_known_tool "$_tool" || die "unknown tool: $_tool"
     # Checked before anything is fetched: an unvalidated value would otherwise reach tool_url and every later reader of a recorded pin.
     valid_version "$_ver" || die "$_tool@$_ver: bad version (want N.N or N.N.N)"
@@ -1050,7 +1056,7 @@ add_one() {
             continue
         fi
         log "$_tool $_ver: hashing $_plat artifact"
-        curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$_url" -o "$_tmp/a" || die "$_tool $_ver: cannot fetch $_plat artifact"
+        curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors --max-time 300 "$_url" -o "$_tmp/a" || die "$_tool $_ver: cannot fetch $_plat artifact"
         _h="$(sha256_file "$_tmp/a")"
         _shas="$_shas $_h"
         [ "$_plat" != "$_hostplat" ] || _this_sha="$_h"
@@ -1142,7 +1148,7 @@ add_one() {
 
 # Every argument is pinned. Reading only $1 meant a batched call pinned one tool and exited 0.
 cmd_add() {
-    [ $# -ge 1 ] || die "usage: grubstake add <tool>@<version>..."
+    [ $# -ge 1 ] || die "usage: ./grubstake.sh add <tool>@<version>..."
     validate_pins
     for _spec in "$@"; do
         add_one "$_spec"
@@ -1157,7 +1163,7 @@ cmd_ensure() {
         _any=1
         install_tool "$_tool" "$(pin_version "$_tool")" "" "GRUBSTAKE_OFFLINE is set" || _bad=1
     done
-    [ "$_any" = 1 ] || warn "no tools pinned yet (run: grubstake add swiftlint@x.y.z)"
+    [ "$_any" = 1 ] || warn "no tools pinned yet (run: ./grubstake.sh add swiftlint@x.y.z)"
     # Bare would let verify_pinned's own now-possible non-zero return trip set -e before the line below runs.
     verify_pinned || _bad=1
     # verify_pinned's status alone still cannot stand in for this: a receipt mismatch above already left
@@ -1182,7 +1188,7 @@ cmd_check() {
 }
 
 cmd_path() {
-    [ $# -ge 1 ] || die "usage: grubstake path <tool>"
+    [ $# -ge 1 ] || die "usage: ./grubstake.sh path <tool>"
     validate_pins
     is_known_tool "$1" || die "unknown tool: $1"
     # Exit 3, not die's usual 1, so a caller reads this off status rather than this rewordable message.
@@ -1203,12 +1209,14 @@ cmd_path() {
         install_tool "$1" "$_ver" >&2
     fi
     verify_tool "$1" "$_ver"
-    echo "$_bin"
+    printf '%s\n' "$_bin"
 }
 
 cmd_doctor() {
     validate_pins
     _root="$(repo_root)"
+    # Every row still prints regardless; this only decides the exit status once the report is complete.
+    _problem=0
     printf 'grubstake  %s\n' "$GRUBSTAKE_VERSION"
     printf 'repo       %s\n' "$_root"
     # Captured and checked, not embedded: a die inside $( ) only kills that subshell, so an
@@ -1229,25 +1237,33 @@ cmd_doctor() {
         _cache_ok=0
         _cache="${_cache#\[grubstake\] }"
         printf 'cache      unresolved (%s)\n' "$_cache"
+        _problem=1
     fi
     # --path matches cmd_install's own read; rc 1 is unset, anything else is a real read failure and must be named rather than folded into unset, which is what let a bad ~user expansion grade as .githooks.
-    if _hookspath="$(git -C "$_root" config --path --get core.hooksPath 2>/dev/null)"; then _hp_rc=0; else _hp_rc=$?; fi
+    # --show-scope names which config file won the merge, shown on the line below when it is not local (#112).
+    if _hp_line="$(git -C "$_root" config --show-scope --path --get core.hooksPath 2>/dev/null)"; then _hp_rc=0; else _hp_rc=$?; fi
     case "$_hp_rc" in
-        0) : ;;
+        0)
+            _hp_scope="$(printf '%s' "$_hp_line" | cut -f1)"
+            _hookspath="$(printf '%s' "$_hp_line" | cut -f2-)"
+            ;;
         1) _hookspath="" ;;
         # Stderr re-read separately rather than merged into the first capture, so a clean value on the success path can never carry git's own error text riding along with it; || true, since this second read failing the same way must still reach the report below rather than exit on git's own raw status.
         *)
-            _hp_err="$(git -C "$_root" config --path --get core.hooksPath 2>&1 >/dev/null)" || true
+            _hp_err="$(git -C "$_root" config --show-scope --path --get core.hooksPath 2>&1 >/dev/null)" || true
             _hookspath_unreadable=1
             ;;
     esac
     if [ "${_hookspath_unreadable:-0}" = 1 ]; then
         printf 'hooksPath  cannot read core.hooksPath: %s\n' "$_hp_err"
+        _problem=1
     elif [ "$_hp_rc" -eq 1 ]; then
         printf 'hooksPath  (unset)\n'
     elif [ -z "$_hookspath" ]; then
         # Named explicitly, not left blank: a bare "hooksPath  " reads as a rendering bug to a human, not as the configured-empty value it actually is, the very reading this fix exists to close.
         printf "hooksPath  '' (empty, resolves to the worktree root)\n"
+    elif [ "$_hp_scope" != local ]; then
+        printf 'hooksPath  %s (%s)\n' "$_hookspath" "$_hp_scope"
     else
         printf 'hooksPath  %s\n' "$_hookspath"
     fi
@@ -1278,18 +1294,22 @@ cmd_doctor() {
                     printf '  %-12s not grubstake'"'"'s (repo-managed; leaving it alone)\n' "$_hook"
                 elif [ "$_marker_rc" -ge 2 ]; then
                     printf '  %-12s cannot be read\n' "$_hook"
+                    _problem=1
                 elif embedded_hook "$_hook" | cmp -s - "$_installed"; then
                     # Bytes matching is not enough: git silently skips a hook with no exec bit.
                     if [ -x "$_installed" ]; then
                         printf '  %-12s ok\n' "$_hook"
                     else
-                        printf '  %-12s not executable (run: grubstake install)\n' "$_hook"
+                        printf '  %-12s not executable (run: ./grubstake.sh install)\n' "$_hook"
+                        _problem=1
                     fi
                 elif is_known_hook_hash "$_hook" "$(sha256_file "$_installed")"; then
                     # A known previous copy is refreshed, not deleted: install's own refresh handles this now.
-                    printf '  %-12s DRIFTED from the embedded copy (run: grubstake install to refresh)\n' "$_hook"
+                    printf '  %-12s DRIFTED from the embedded copy (run: ./grubstake.sh install to refresh)\n' "$_hook"
+                    _problem=1
                 else
-                    printf '  %-12s DRIFTED from the embedded copy (rm it and run: grubstake install)\n' "$_hook"
+                    printf '  %-12s DRIFTED from the embedded copy (rm it and run: ./grubstake.sh install)\n' "$_hook"
+                    _problem=1
                 fi
             fi
         done
@@ -1298,6 +1318,7 @@ cmd_doctor() {
         _ver="$(pin_version "$_tool")"
         if [ "$_plat_ok" = 0 ]; then
             printf '  %-12s %-10s unsupported platform\n' "$_tool" "$_ver"
+            _problem=1
             continue
         fi
         # Guarded like verify_tool's own: $_plat_ok only proves the exit status was clean, not the
@@ -1307,6 +1328,7 @@ cmd_doctor() {
         # this report must stay stderr-clean the same way the cache line above does.
         if ! _url="$(tool_url "$_tool" "$_ver" "$_plat" 2>/dev/null)"; then
             printf '  %-12s %-10s could not resolve\n' "$_tool" "$_ver"
+            _problem=1
             continue
         fi
         if [ -z "$_url" ]; then
@@ -1314,12 +1336,15 @@ cmd_doctor() {
         elif [ "$_cache_ok" = 0 ]; then
             # Reuses $_cache_ok from the header instead of tool_bin's own cache_root call, which would otherwise repeat cache_root's refusal warning once per pinned tool.
             printf '  %-12s %-10s could not resolve\n' "$_tool" "$_ver"
+            _problem=1
         elif [ -x "$(tool_bin "$_tool" "$(pin_sha "$_tool" "$_plat")")" ]; then
             printf '  %-12s %-10s installed\n' "$_tool" "$_ver"
         else
             printf '  %-12s %-10s MISSING\n' "$_tool" "$_ver"
+            _problem=1
         fi
     done
+    [ "$_problem" = 0 ] || return 1
 }
 
 # No validate_pins: a malformed grubstake.tools must not block the one command that recovers a wedged cache.
@@ -1365,13 +1390,18 @@ cmd_install() {
     _root="$(repo_root)"
     # Check before writing anything: refusing after creating files is a half-adopted repo.
     # --path matches how git itself expands core.hooksPath; --get's own exit code (1 for unset) is what tells "nothing configured" apart from git failing to read the value at all.
-    if _existing="$(git -C "$_root" config --path --get core.hooksPath 2>/dev/null)"; then _gcrc=0; else _gcrc=$?; fi
+    # --show-scope names which config file won the merge, so a global or system value is never
+    # mistaken for this repo's own arrangement the way a plain --get already reads it (#112).
+    if _existing_line="$(git -C "$_root" config --show-scope --path --get core.hooksPath 2>/dev/null)"; then _gcrc=0; else _gcrc=$?; fi
     case "$_gcrc" in
-        0) : ;;
+        0)
+            _existing_scope="$(printf '%s' "$_existing_line" | cut -f1)"
+            _existing="$(printf '%s' "$_existing_line" | cut -f2-)"
+            ;;
         1) _existing="" ;;
         # Stderr re-read separately rather than merged into the first capture, so a clean value on the success path can never carry git's own error text riding along with it; || true, since this second read failing the same way must still reach die below rather than exit on git's own raw status.
         *)
-            _gcerr="$(git -C "$_root" config --path --get core.hooksPath 2>&1 >/dev/null)" || true
+            _gcerr="$(git -C "$_root" config --show-scope --path --get core.hooksPath 2>&1 >/dev/null)" || true
             die "cannot read core.hooksPath: $_gcerr"
             ;;
     esac
@@ -1379,7 +1409,11 @@ cmd_install() {
         # Shared with cmd_doctor so neither call site reports whichever of the two resolves happened to fail first (#139 follow-up).
         if hookspath_is_foreign "$_root" "$_existing"; then
             [ -z "$_hp_reason" ] || die "$_hp_reason"
-            die "core.hooksPath is already '$_existing'; move those hooks into .githooks first"
+            case "$_existing_scope" in
+                local | worktree) die "core.hooksPath is already '$_existing'; move those hooks into .githooks first" ;;
+                # A global or system value is not this repo's own arrangement (#112), so the remedy is the explicit override that names what it overrides, never a silent local write.
+                *) die "core.hooksPath is set in your $_existing_scope git config to '$_existing'; grubstake's hooks need .githooks. To use them here, set a local override (this stops the $_existing_scope hooks running in this repo): git config --local core.hooksPath .githooks" ;;
+            esac
         fi
     fi
     # Unset hooksPath means git already runs whatever sits executable in .git/hooks; wiring .githooks over it would silence that hook, the failure rule 16 exists to close.
@@ -1490,7 +1524,7 @@ cmd_install() {
 
     [ -f "$(pins_file)" ] || {
         printf '# grubstake pins: name version sha256-darwin sha256-linux\n' >"$(pins_file)"
-        log "grubstake.tools: created (pin tools with: grubstake add swiftlint@x.y.z)"
+        log "grubstake.tools: created (pin tools with: ./grubstake.sh add swiftlint@x.y.z)"
     }
 
     cmd_ensure
@@ -1511,8 +1545,12 @@ below_floor() {
 
 # Release tags, newest first. No mutable "latest" pointer.
 # Reverse must be per-key (nr); a trailing -r is ignored when key flags are present.
+# Prompt/credential-helper suppressed and bounded the same way hooks/post-commit's own lookup is,
+# since this runs synchronously on a command a human is waiting on, not backgrounded like that one.
 release_tags() {
-    git ls-remote --tags --refs "$GRUBSTAKE_REPO" 'v*' 2>/dev/null \
+    GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=10' \
+        git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 \
+        ls-remote --tags --refs "$GRUBSTAKE_REPO" 'v*' 2>/dev/null \
         | awk '{print $2}' | sed 's|refs/tags/v||' \
         | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
         | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr
@@ -1521,7 +1559,7 @@ release_tags() {
 # Fetch one candidate into $2 and confirm it is a usable script declaring $1. Returns 1, never dies,
 # so an unusable tag can be skipped rather than blocking every update.
 fetch_release() {
-    curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$GRUBSTAKE_RAW/v$1/grubstake.sh" -o "$2" 2>/dev/null || return 1
+    curl -fsSL --proto-redir '=https' --retry 3 --retry-all-errors --max-time 300 "$GRUBSTAKE_RAW/v$1/grubstake.sh" -o "$2" 2>/dev/null || return 1
     sh -n "$2" 2>/dev/null || return 1
     # A tag is a mutable ref, and an unescaped "." in $1 is a grep wildcard, so match the whole line literally.
     grep -qxF "GRUBSTAKE_VERSION=\"$1\"" "$2" || return 1
@@ -1554,17 +1592,25 @@ cmd_update() {
     else
         _candidates="$(release_tags)"
         [ -n "$_candidates" ] || die "cannot resolve a release tag from $GRUBSTAKE_REPO"
+        _my_major="${GRUBSTAKE_VERSION%%.*}"
+        # release_tags sorts every major together and descending, so the overall newest tag names the newest major present, if it is even newer at all.
+        _newest="$(printf '%s\n' "$_candidates" | head -1)"
+        if [ "${_newest%%.*}" != "$_my_major" ] && version_lt "$GRUBSTAKE_VERSION" "$_newest"; then
+            log "$_newest is out, a major version ahead; ./grubstake.sh update $_newest crosses it"
+        fi
         _target=""
         for _c in $_candidates; do
             [ "$_c" = "$GRUBSTAKE_VERSION" ] && {
                 log "already on $GRUBSTAKE_VERSION"
                 return 0
             }
-            # release_tags sorts newest first, so the first candidate that is not newer means none after it are either.
+            # release_tags sorts newest first across every major, so the first candidate that is not newer means none after it are either, regardless of major.
             version_lt "$GRUBSTAKE_VERSION" "$_c" || {
                 log "no usable release newer than $GRUBSTAKE_VERSION"
                 return 0
             }
+            # A bare update never leaves the running major; an explicit "update <version>" is how to cross one.
+            [ "${_c%%.*}" = "$_my_major" ] || continue
             log "fetching $_c"
             if fetch_release "$_c" "$_tmp"; then
                 _target="$_c"
@@ -1581,7 +1627,9 @@ cmd_update() {
     # the old inode and finishes reading it undisturbed, so there is no need to hand off to a temp
     # copy. That handoff avoided a hazard rename never had, and cost a $0 that lied about its repo.
     _self="$(script_path)"
-    _self="$(cd "$(dirname "$_self")" && pwd)/$(basename "$_self")"
+    # CDPATH= scopes to this one cd; it is not a mistyped assignment.
+    # shellcheck disable=SC1007
+    _self="$(CDPATH= cd -P "$(dirname "$_self")" && pwd)/$(basename "$_self")"
     _staged="$(mktemp "$(dirname "$_self")/.grubstake.XXXXXX")" || die "cannot stage beside $_self"
     arm_cleanup "rm -f $(sq "$_tmp") $(sq "$_staged")"
     cp "$_tmp" "$_staged"
@@ -1620,7 +1668,7 @@ main() {
         clean) cmd_clean "$@" ;;
         version) echo "$GRUBSTAKE_VERSION" ;;
         -h | --help | help) usage ;;
-        *) die "unknown command: $_cmd (try: grubstake help)" ;;
+        *) die "unknown command: $_cmd (try: ./grubstake.sh help)" ;;
     esac
 }
 

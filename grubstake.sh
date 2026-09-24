@@ -1345,7 +1345,7 @@ cmd_clean() {
         chmod -R u+w "$_e" 2>/dev/null || true
         rm -rf "$_e" || _bad=1
     done
-    [ "$_bad" -eq 0 ] || die "could not remove every tool entry under $_root; remove it by hand"
+    [ "$_bad" -eq 0 ] || die "could not remove every tool entry under $_root; rerun clean, or remove the paths rm named above by hand"
 }
 
 # An older release fetched this script and handed off with: __replace-self <installed> <version>.

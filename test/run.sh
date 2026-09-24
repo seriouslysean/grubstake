@@ -1544,8 +1544,7 @@ else
 fi
 
 it "clean racing a concurrent ensure leaves either a complete install or a loud failure"
-# with_lock's mkdir cannot tell its own ENOENT (clean just removed the parent) apart from EEXIST (a
-# real lock held by another run), so the only property to hold onto here is no silent half-install.
+# with_lock reads mkdir's own ENOENT, so a loud failure here must name the removed cache, never a stale lock nobody held.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
@@ -1581,10 +1580,12 @@ if [ "$_rc" -eq 0 ]; then
     else
         fail "ensure exited 0 racing clean, but check afterward failed: $_checkout"
     fi
-elif [ -n "$_err" ]; then
-    pass
+elif printf '%s\n' "$_err" | grep -qF "stale? rmdir it"; then
+    fail "ensure exited $_rc racing clean but blamed a stale lock instead of the removed cache: $_err"
+elif ! printf '%s\n' "$_err" | grep -qF "removed the cache mid-install"; then
+    fail "ensure exited $_rc racing clean without naming the removed cache: $_err"
 else
-    fail "ensure exited $_rc racing clean with no diagnostic on stderr"
+    pass
 fi
 
 it "ensure fails fast on a permission-denied lock, not a five-second contention stall"

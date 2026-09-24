@@ -1290,6 +1290,7 @@ cmd_doctor() {
             _installed="$_root/.githooks/$_hook"
             if [ ! -f "$_installed" ]; then
                 printf '  %-12s not installed\n' "$_hook"
+                _problem=1
             else
                 hook_has_marker "$_hook" "$_installed" && _marker_rc=0 || _marker_rc=$?
                 if [ "$_marker_rc" -eq 1 ]; then

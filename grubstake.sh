@@ -1286,10 +1286,23 @@ cmd_doctor() {
         # A foreign hooksPath means the repo owns its hooks, the same reason install refuses one.
         printf '  hooks        not graded, hooksPath is not .githooks\n'
     else
+        # A marked sibling is the only proof install ran here; without one, .githooks may be the repo's own.
+        _hooks_marked=0
+        for _hook in pre-commit post-commit commit-msg; do
+            _installed="$_root/.githooks/$_hook"
+            if [ -f "$_installed" ] && hook_has_marker "$_hook" "$_installed"; then
+                _hooks_marked=1
+            fi
+        done
         for _hook in pre-commit post-commit commit-msg; do
             _installed="$_root/.githooks/$_hook"
             if [ ! -f "$_installed" ]; then
-                printf '  %-12s not installed\n' "$_hook"
+                if [ "$_hooks_marked" -eq 1 ]; then
+                    printf '  %-12s not installed (run: ./grubstake.sh install)\n' "$_hook"
+                    _problem=1
+                else
+                    printf '  %-12s not installed\n' "$_hook"
+                fi
             else
                 hook_has_marker "$_hook" "$_installed" && _marker_rc=0 || _marker_rc=$?
                 if [ "$_marker_rc" -eq 1 ]; then

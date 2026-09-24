@@ -927,18 +927,44 @@ else
     esac
 fi
 
-it "doctor exits 0 for a repo with every pinned tool installed and hooks never installed"
-# The informational rows (hooks not installed, not grubstake's, not graded) must not themselves
-# flip the new exit status; only an actual problem row may. core.hooksPath is set explicitly here so
-# this exercises the per-hook "not installed" rows rather than #146's separate not-wired row.
+it "doctor exits non-zero when a grubstake hook is missing from a wired .githooks"
+# Removing only the hook file, leaving the healthy tool and the other two hooks alone, ties a later non-zero exit to the missing hook and nothing else.
 r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+gs "$r" install >/dev/null 2>&1 || fixture_die "cannot install into $r to seed doctor's fixture"
+[ -f "$r/.githooks/pre-commit" ] && [ -f "$r/.githooks/post-commit" ] && [ -f "$r/.githooks/commit-msg" ] \
+    || fixture_die "install did not write all three hooks in $r"
+gs_rc "$r" doctor || fixture_die "doctor is not clean before the hook under test is removed"
+rm "$r/.githooks/post-commit" || fixture_die "cannot remove $r/.githooks/post-commit"
+_out=$(gs "$r" doctor)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "doctor exited 0 with a grubstake hook missing from a wired .githooks: $_out"
+elif ! printf '%s\n' "$_out" | grep -qxF '  post-commit  not installed (run: ./grubstake.sh install)'; then
+    fail "doctor did not report the missing hook's remedy: $_out"
+else
+    pass
+fi
+
+it "doctor exits 0 when the only hook in .githooks is repo-managed, not grubstake's"
+# A missing hook only fails doctor when some other hook in .githooks carries grubstake's marker.
+r=$(new_repo)
+mkdir -p "$r/.githooks" || fixture_die "cannot create $r/.githooks"
+printf '#!/bin/sh\necho "repo-managed gate"\n' >"$r/.githooks/pre-commit" \
+    || fixture_die "cannot write $r/.githooks/pre-commit"
+chmod +x "$r/.githooks/pre-commit" || fixture_die "cannot make $r/.githooks/pre-commit executable"
 (cd "$r" && git config core.hooksPath .githooks) || fixture_die "cannot set core.hooksPath in $r"
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
 _out=$(gs "$r" doctor)
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
-    fail "doctor exited non-zero though nothing pinned is a problem (hooks merely not installed): $_out"
+    fail "doctor exited non-zero though no hook in .githooks carries grubstake's marker (rc $_rc): $_out"
+elif ! printf '%s\n' "$_out" | grep -qxF '  post-commit  not installed'; then
+    fail "doctor did not report post-commit as merely not installed: $_out"
+elif ! printf '%s\n' "$_out" | grep -qxF '  commit-msg   not installed'; then
+    fail "doctor did not report commit-msg as merely not installed: $_out"
 else
     pass
 fi

@@ -190,23 +190,26 @@ SHIM
     echo "$_sha"
 }
 
-# A deterministic stand-in for hoping a real race lands: any mkdir call ending in ".lock" --
-# with_lock's own lock acquisition is the only mkdir shaped this way anywhere in grubstake.sh --
-# blocks until $3 exists, running "$1/plant" first if the caller wrote one there. That gives a test
-# a fixed point to attach a second process to instead of a window it has to get lucky to hit. The
-# real mkdir's path is resolved once, here, against the unshimmed PATH this helper itself runs
-# under, and baked into the generated script as a literal -- never re-resolved at runtime, or a
-# shim earlier on the shimmed PATH would find itself and recurse.
+# A deterministic stand-in for hoping a real race lands: a mkdir call matching $4 (default "*.lock",
+# the shape every lock acquisition in grubstake.sh uses) blocks until $3 exists, running "$1/plant"
+# first if the caller wrote one there. That gives a test a fixed point to attach a second process to
+# instead of a window it has to get lucky to hit. add's own pins lock and install_tool's own cache-dir
+# lock are both mkdir-".lock" now that add runs install_tool before it takes the pins lock, so a
+# caller pausing add specifically has to narrow $4 past the default or it pauses whichever lock comes
+# first instead of the one under test. The real mkdir's path is resolved once, here, against the
+# unshimmed PATH this helper itself runs under, and baked into the generated script as a literal --
+# never re-resolved at runtime, or a shim earlier on the shimmed PATH would find itself and recurse.
 lock_pause_shim() {
     _lpdir="$1"
     _lpreached="$2"
     _lpgo="$3"
+    _lppat="${4:-*.lock}"
     mkdir -p "$_lpdir" || fixture_die "cannot create the lock-pause shim dir $_lpdir"
     _lpreal="$(command -v mkdir)" || fixture_die "no real mkdir on PATH to wrap"
     cat >"$_lpdir/mkdir" <<SHIM
 #!/bin/sh
 case "\$*" in
-    *.lock)
+    $_lppat)
         [ -x "$_lpdir/plant" ] && "$_lpdir/plant" "\$@"
         : > "$_lpreached"
         _lpw=0
@@ -6539,20 +6542,22 @@ it "add's pins lock fails fast naming the vanished directory, not a phantom hold
 # fast, name what actually happened.
 #
 # add's own network fetches happen before the lock (hashing every platform first), so
-# fake_release/curl-shim get add_one to the lock cheaply and offline. lock_pause_shim pauses
-# add_one's own lock mkdir (it ends in ".lock" the same way with_lock's does, so the existing shim
-# needs no changes), which is the deterministic point to rename the repo directory away: renaming
-# it does not disturb the already-running, already-exec'd grubstake.sh process (the open script and
-# its cwd survive a renamed-away directory entry same as any Unix process would), but the lock's
-# own path, computed once from script_dir() before the loop started, no longer resolves once the
-# real mkdir is finally allowed to run. The reached/go handshake files live under $ROOT, one level
-# above the repo, since the repo itself is what gets renamed out from under this test.
+# fake_release/curl-shim get add_one to the lock cheaply and offline. add now also installs before
+# it ever takes its own pins lock (#113), and install_tool's own cache-dir lock is mkdir-".lock" the
+# same shape, so lock_pause_shim is narrowed to grubstake.tools.lock specifically or it would pause
+# at install's lock instead. That narrowed pause is the deterministic point to rename the repo
+# directory away: renaming it does not disturb the already-running, already-exec'd grubstake.sh
+# process (the open script and its cwd survive a renamed-away directory entry same as any Unix
+# process would), but the lock's own path, computed once from script_dir() before the loop started,
+# no longer resolves once the real mkdir is finally allowed to run. The reached/go handshake files
+# live under $ROOT, one level above the repo, since the repo itself is what gets renamed out from
+# under this test.
 r=$(new_repo)
 _sha=$(fake_release "$r" 1.0.0)
 _shim="$r/mkdir-shim"
 _reached="$ROOT/add-reached.$$"
 _go="$ROOT/add-go.$$"
-lock_pause_shim "$_shim" "$_reached" "$_go"
+lock_pause_shim "$_shim" "$_reached" "$_go" '*grubstake.tools.lock'
 (
     cd "$r" || exit 1
     PATH="$r/curl-shim:$_shim:$PATH"
@@ -6665,7 +6670,11 @@ it "add blames an unreadable ancestor honestly, not a repository that was never 
 # fix as with_lock's equivalent test above: shim "mkdir" to flip the permission the instant the
 # pins-lock path is attempted, landing the change after add_one's own hash/download phase -- which
 # never touches the repo; the download lands in system $TMPDIR -- and right before the mkdir under
-# test, with grubstake.sh itself still reached via the repo's own absolute path throughout.
+# test, with grubstake.sh itself still reached via the repo's own absolute path throughout. Matched
+# on the full grubstake.tools.lock path, not a bare "*.lock)": add now installs before it takes its
+# own pins lock (#113), and install_tool's cache-dir lock under $r/.cache is mkdir-".lock" too, so an
+# unnarrowed match would flip the gate's permission at that earlier lock and test with_lock's own
+# message instead of add_one's.
 r=$(new_gated_repo)
 _gate="$(dirname "$r")"
 fake_release "$r" 1.0.0 >/dev/null
@@ -6675,7 +6684,7 @@ _realmkdir="$(command -v mkdir)" || fixture_die "no real mkdir on PATH to wrap"
 cat >"$_shim/mkdir" <<SHIM
 #!/bin/sh
 case "\$*" in
-    *.lock)
+    *grubstake.tools.lock)
         chmod 000 "$_gate"
         ;;
 esac
@@ -6953,7 +6962,10 @@ rm -f "$_marker" 2>/dev/null
 rm -rf "$_lockdir" 2>/dev/null
 
 it "a signal after add_one renames grubstake.tools into place does not let a killed run report success"
-# F02: deferred until the rename returns, a signal here must not let the run finish silently -- exit 0, "installed" printed -- as if the kill never landed.
+# F02: deferred until the rename returns, a signal here must not let the run finish silently -- exit
+# 0, "pinned" printed -- as if the kill never landed. Not "installed": install_tool now runs before
+# this rename (#113), so "installed" legitimately prints beforehand regardless of what happens to the
+# signal here; "pinned" is add_one's own last line, printed only once the rename and cleanup return.
 r=$(new_repo)
 fake_release "$r" 1.0.0 >/dev/null
 _pins="$r/grubstake.tools"
@@ -6979,12 +6991,214 @@ if [ ! -f "$_marker" ]; then
     fail "the mv shim never fired, so this proves nothing: $_out"
 elif [ "$_rc" -eq 0 ]; then
     fail "add exited 0 after being killed mid-rename, as if the signal never landed: $_out"
-elif printf '%s' "$_out" | grep -q ': installed'; then
-    fail "add finished installing after being killed mid-rename: $_out"
+elif printf '%s' "$_out" | grep -q 'pinned'; then
+    fail "add reported the pin as recorded after being killed mid-rename: $_out"
 else
     pass
 fi
 rm -f "$_marker" 2>/dev/null
+
+it "add refuses a version outside validate_pins' own grammar before ever calling curl"
+# #145: add never checked the version it was given against the grammar validate_pins enforces, so
+# "add swiftlint@0.50.0-rc.1" printed success and exited 0, and every later command -- including add
+# itself -- then died on "bad version" once that value reached grubstake.tools; the raw value was
+# also interpolated straight into the download URL. valid_version is shared by both, so a value one
+# refuses is a value the other can never write. A curl shim that only ever records that it ran,
+# never serving anything, proves the refusal lands before the hashing loop's first fetch.
+_bad=""
+for _badver in "0.50.0-rc.1" "0.50..1"; do
+    [ -z "$_bad" ] || break
+    r=$(new_repo)
+    _shim="$r/curl-record"
+    mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+    _log="$r/curl-invoked"
+    cat >"$_shim/curl" <<SHIM
+#!/bin/sh
+: >> "$_log"
+exit 1
+SHIM
+    chmod +x "$_shim/curl" || fixture_die "cannot make the recording curl shim executable"
+    _out=$(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add "swiftlint@$_badver" 2>&1)
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+        _bad="$_badver: add exited 0 over an invalid version: $_out"
+    elif [ -e "$_log" ]; then
+        _bad="$_badver: add called curl before refusing an invalid version: $_out"
+    elif ! printf '%s' "$_out" | grep -qi "bad version"; then
+        _bad="$_badver: refused, but without naming a bad version: $_out"
+    fi
+done
+if [ -n "$_bad" ]; then fail "$_bad"; else pass; fi
+
+it "add refuses up front under GRUBSTAKE_OFFLINE, before fetching anything"
+# A curl shim that only records whether it ran proves the refusal lands before any fetch.
+r=$(new_repo)
+_shim="$r/curl-record"
+mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+_log="$r/curl-invoked"
+cat >"$_shim/curl" <<SHIM
+#!/bin/sh
+: >> "$_log"
+exit 1
+SHIM
+chmod +x "$_shim/curl" || fixture_die "cannot make the recording curl shim executable"
+_out=$(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_OFFLINE=1 ./grubstake.sh add swiftlint@1.0.0 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 under GRUBSTAKE_OFFLINE: $_out"
+elif [ -e "$_log" ]; then
+    fail "add called curl despite GRUBSTAKE_OFFLINE=1: $_out"
+elif ! printf '%s' "$_out" | grep -q "GRUBSTAKE_OFFLINE"; then
+    fail "refused, but without naming GRUBSTAKE_OFFLINE: $_out"
+elif grep -q '^swiftlint' "$r/grubstake.tools" 2>/dev/null; then
+    fail "add recorded a pin despite refusing under GRUBSTAKE_OFFLINE: $(cat "$r/grubstake.tools" 2>/dev/null)"
+else
+    pass
+fi
+
+it "install's version assertion failing leaves no pin recorded, even mid-batch"
+# #113: add_one used to rename the new pin into place before install_tool ever asserted the binary
+# reports the version it is about to be pinned to, so a failed assertion still left that version
+# recorded and a later ensure would try to honour it. A fabricated release whose binary reports a
+# different version than the one it is fetched for reproduces the failed assertion offline. The
+# first spec (a genuine, matching release) pins normally first, proving the batch contract #102
+# already pins for an unknown-tool failure extends to a failure that only shows up after a real
+# fetch and install: an earlier spec's pin must survive a later spec's failed assertion.
+r=$(new_repo)
+_gsrc="$r/good-src"
+mkdir -p "$_gsrc" || fixture_die "cannot create $_gsrc"
+printf '#!/bin/sh\necho 1.0.0\n' >"$_gsrc/swiftlint" || fixture_die "cannot write the good fixture binary"
+printf '#!/bin/sh\necho 1.0.0\n' >"$_gsrc/swiftlint-static" || fixture_die "cannot write the good fixture binary"
+chmod +x "$_gsrc/swiftlint" "$_gsrc/swiftlint-static" || fixture_die "cannot make the good fixture binaries executable"
+_gzip="$r/good.zip"
+(cd "$_gsrc" && zip -q "$_gzip" swiftlint swiftlint-static) || fixture_die "cannot zip the good fixture release"
+
+_wfmember=swiftformat
+case "$(uname -s)" in
+    Linux) _wfmember=swiftformat_linux ;;
+esac
+_bsrc="$r/wrong-version-src"
+mkdir -p "$_bsrc" || fixture_die "cannot create $_bsrc"
+printf '#!/bin/sh\necho 8.8.8\n' >"$_bsrc/$_wfmember" || fixture_die "cannot write the mismatched-version fixture"
+chmod +x "$_bsrc/$_wfmember" || fixture_die "cannot make the mismatched-version fixture executable"
+_bzip="$r/wrong-version.zip"
+(cd "$_bsrc" && zip -q "$_bzip" "$_wfmember") || fixture_die "cannot zip the mismatched-version fixture"
+
+_shim="$r/curl-shim"
+mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+cat >"$_shim/curl" <<SHIM
+#!/bin/sh
+_out=""; _prev=""; _iswf=0
+for a in "\$@"; do
+    case "\$a" in *swiftformat*) _iswf=1 ;; esac
+    [ "\$_prev" = "-o" ] && _out="\$a"
+    _prev="\$a"
+done
+[ -n "\$_out" ] || exit 1
+if [ "\$_iswf" = 1 ]; then cp "$_bzip" "\$_out"; else cp "$_gzip" "\$_out"; fi
+SHIM
+chmod +x "$_shim/curl" || fixture_die "cannot make the fixture curl shim executable"
+
+_pins_path="$r/grubstake.tools"
+_out=$(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 swiftformat@2.0.0 2>&1)
+_rc=$?
+_after=$(cat "$_pins_path" 2>/dev/null || echo '')
+if [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 despite swiftformat's archive reporting the wrong version: $_out"
+elif ! printf '%s\n' "$_after" | grep -qE '^swiftlint[[:space:]]+1\.0\.0[[:space:]]'; then
+    fail "the earlier spec's pin (swiftlint 1.0.0) did not survive the later spec's install failure. pins file now:
+$_after"
+elif printf '%s\n' "$_after" | grep -q '^swiftformat'; then
+    fail "swiftformat was recorded despite its archive reporting the wrong version. pins file now:
+$_after"
+elif [ -e "$_pins_path.lock" ]; then
+    fail "add failed, but left the pins lock behind: $_pins_path.lock"
+else
+    pass
+fi
+
+it "add pins and installs a tool on a cold cache"
+# The curl shim below serves different bytes per platform URL, so the two hash columns must differ.
+r=$(new_repo)
+fake_release "$r" 1.0.0 >/dev/null
+_hostplat=darwin
+case "$(uname -s)" in Linux) _hostplat=linux ;; esac
+_altzip="$r/release-alt.zip"
+cp "$r/release.zip" "$_altzip" || fixture_die "cannot copy the fixture release for the other platform"
+printf 'x' >>"$_altzip" || fixture_die "cannot mutate the other-platform fixture release"
+cat >"$r/curl-shim/curl" <<SHIM
+#!/bin/sh
+_out=""; _prev=""; _urlplat=darwin
+for a in "\$@"; do
+    [ "\$_prev" = "-o" ] && _out="\$a"
+    _prev="\$a"
+    case "\$a" in http*linux*) _urlplat=linux ;; esac
+done
+[ -n "\$_out" ] || exit 1
+if [ "\$_urlplat" = "$_hostplat" ]; then cp "$r/release.zip" "\$_out"; else cp "$_altzip" "\$_out"; fi
+SHIM
+chmod +x "$r/curl-shim/curl" || fixture_die "cannot make the fixture curl shim executable"
+_pins_path="$r/grubstake.tools"
+_out=$(cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "add exited $_rc on a cold cache: $_out"
+elif ! grep -qE '^swiftlint[[:space:]]+1\.0\.0[[:space:]]' "$_pins_path" 2>/dev/null; then
+    fail "add exited 0 but grubstake.tools has no swiftlint pin line: $(cat "$_pins_path" 2>/dev/null)"
+else
+    _line=$(grep '^swiftlint' "$_pins_path")
+    _dsha=$(printf '%s\n' "$_line" | awk '{print $3}')
+    _lsha=$(printf '%s\n' "$_line" | awk '{print $4}')
+    _bin=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftlint)
+    _brc=$?
+    if [ "$_brc" -ne 0 ]; then
+        fail "path exited $_brc for a tool add just installed: $_bin"
+    elif [ ! -x "$_bin" ]; then
+        fail "path printed a non-executable path: $_bin"
+    elif [ "$_dsha" = "$_lsha" ]; then
+        fail "the darwin and linux hash columns are identical, so the host-platform pick is untested: $_line"
+    else
+        pass
+    fi
+fi
+
+it "add pins a tool whose verified entry is already cached"
+# add's hash loop always fetches both platforms, so any third curl call is install downloading again.
+r=$(new_repo)
+fake_release "$r" 1.0.0 >/dev/null
+_pins_path="$r/grubstake.tools"
+_out1=$(cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
+_rc1=$?
+grep -v '^swiftlint[[:space:]]' "$_pins_path" >"$_pins_path.tmp" 2>/dev/null && mv "$_pins_path.tmp" "$_pins_path" || fixture_die "cannot drop the swiftlint pin"
+mv "$r/curl-shim/curl" "$r/curl-shim/curl-real"
+_curllog="$r/curl-calls"
+: >"$_curllog"
+cat >"$r/curl-shim/curl" <<SHIM
+#!/bin/sh
+echo x >> "$_curllog"
+exec "$r/curl-shim/curl-real" "\$@"
+SHIM
+chmod +x "$r/curl-shim/curl" || fixture_die "cannot make the counting curl shim executable"
+_out2=$(cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
+_rc2=$?
+_calls=$(wc -l <"$_curllog" | tr -d ' ')
+if [ "$_rc1" -ne 0 ]; then
+    fail "first add exited $_rc1, so this proves nothing: $_out1"
+elif [ "$_rc2" -ne 0 ]; then
+    fail "second add exited $_rc2 despite an already-verified cache entry: $_out2"
+elif ! grep -qE '^swiftlint[[:space:]]+1\.0\.0[[:space:]]' "$_pins_path" 2>/dev/null; then
+    fail "second add exited 0 but grubstake.tools has no swiftlint pin line: $(cat "$_pins_path" 2>/dev/null)"
+elif [ "$_calls" -ne 2 ]; then
+    fail "second add invoked curl $_calls time(s), expected exactly 2 (the hash loop only): $_out2"
+else
+    _bin=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftlint)
+    _brc=$?
+    if [ "$_brc" -ne 0 ] || [ ! -x "$_bin" ]; then
+        fail "path did not resolve an executable after re-pinning an already-cached tool (rc $_brc): $_bin"
+    else
+        pass
+    fi
+fi
 
 if [ "$NETWORK" = 1 ]; then
     printf '\nadd, network\n'

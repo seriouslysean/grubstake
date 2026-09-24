@@ -234,6 +234,11 @@ pinned_tools() {
     grep -vE '^[[:space:]]*(#|$)' "$(pins_file)" | awk '{print $1}'
 }
 
+# Shared by validate_pins and add, so a version one refuses is a version the other never writes.
+valid_version() {
+    printf '%s\n' "$1" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'
+}
+
 # grubstake.tools is hand-editable and merge-conflict-prone. Reject a malformed file loudly
 # instead of letting a duplicate line, a CRLF, or a conflict marker fail somewhere downstream.
 validate_pins() {
@@ -252,7 +257,7 @@ validate_pins() {
         set -- $_l
         set +f
         is_known_tool "${1:-}" || die "grubstake.tools:$_n unknown tool: ${1:-}"
-        printf '%s\n' "${2:-}" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || die "grubstake.tools:$_n bad version: ${2:-}"
+        valid_version "${2:-}" || die "grubstake.tools:$_n bad version: ${2:-}"
         case "${3:-}" in
             *=*)
                 shift 2
@@ -513,10 +518,14 @@ assert_reported_version() {
 install_tool() {
     _tool="$1"
     _ver="$2"
-    # Checked, not assigned: errexit is suspended for this whole body under "install_tool ... || _bad=1",
-    # so a bare assignment would swallow platform()'s own die and fall through to a misleading empty-platform skip.
+    # Checked, not assigned: a bare assignment would swallow platform()'s own die under a guarded caller, where errexit is suspended for this whole body.
     _plat="$(platform)" || return 1
-    _want="$(pin_sha "$_tool" "$_plat" 2>/dev/null || echo '-')"
+    # $3, optional: install against this hash instead of reading grubstake.tools, for a caller whose pin is not written yet.
+    if [ -n "${3:-}" ]; then
+        _want="$3"
+    else
+        _want="$(pin_sha "$_tool" "$_plat" 2>/dev/null || echo '-')"
+    fi
     # Same shape as $_plat above: an unknown tool name reaching here must fail, not read as an empty, not-published URL and be skipped as if nothing were wrong.
     _url="$(tool_url "$_tool" "$_ver" "$_plat")" || return 1
 
@@ -592,8 +601,8 @@ install_tool() {
         fi
     fi
 
-    # Refused before any network call; $3 overrides the remedy for a caller that is itself ensure.
-    [ -z "${GRUBSTAKE_OFFLINE:-}" ] || die "$_tool $_ver: not installed (${3:-run: grubstake ensure})"
+    # Refused before any network call; $4 overrides the remedy for a caller that is itself ensure.
+    [ -z "${GRUBSTAKE_OFFLINE:-}" ] || die "$_tool $_ver: not installed (${4:-run: grubstake ensure})"
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     arm_cleanup "rm -rf $(sq "$_tmp")"
@@ -650,7 +659,7 @@ install_tool() {
     fi
 
     mkdir -p "$(dirname "$_dest")"
-    # errexit is suspended for this function's whole body under cmd_ensure's "install_tool ... || _bad=1".
+    # Under a guarded caller, errexit is suspended for this whole body, so this failing without a die does not exit the caller too; unguarded, it would.
     with_lock "$_dest.lock" publish_dir "$_staging" "$_dest" "$_tool" || {
         rm -rf "$_tmp"
         chmod -R u+w "$_staging" 2>/dev/null || true
@@ -1080,12 +1089,18 @@ add_one() {
     _ver="${1#*@}"
     [ "$_tool" != "$1" ] || die "usage: grubstake add <tool>@<version>"
     is_known_tool "$_tool" || die "unknown tool: $_tool"
+    # Checked before anything is fetched: an unvalidated value would otherwise reach tool_url and every later reader of a recorded pin.
+    valid_version "$_ver" || die "$_tool@$_ver: bad version (want N.N or N.N.N)"
+    # The hash loop below fetches before install_tool ever runs, so this refusal must sit above it.
+    [ -z "${GRUBSTAKE_OFFLINE:-}" ] || die "$_tool@$_ver: add downloads and cannot run with GRUBSTAKE_OFFLINE set"
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     arm_cleanup "rm -rf $(sq "$_tmp")"
 
     # Hash every platform, so a macOS run still pins what Linux CI fetches.
+    _hostplat="$(platform)"
     _shas=""
+    _this_sha="-"
     for _plat in darwin linux; do
         _url="$(tool_url "$_tool" "$_ver" "$_plat")"
         if [ -z "$_url" ]; then
@@ -1094,12 +1109,22 @@ add_one() {
         fi
         log "$_tool $_ver: hashing $_plat artifact"
         curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$_url" -o "$_tmp/a" || die "$_tool $_ver: cannot fetch $_plat artifact"
-        _shas="$_shas $(sha256_file "$_tmp/a")"
+        _h="$(sha256_file "$_tmp/a")"
+        _shas="$_shas $_h"
+        [ "$_plat" != "$_hostplat" ] || _this_sha="$_h"
     done
+    rm -rf "$_tmp"
+    # Disarmed before install_tool arms its own trap, since a trap assignment replaces rather than stacks.
+    disarm_cleanup
+
+    # Installed, and its version asserted, against the hash just computed -- not yet read back from grubstake.tools -- before this spec is ever recorded.
+    install_tool "$_tool" "$_ver" "$_this_sha" || die "$_tool@$_ver: not recorded (install did not verify)"
 
     _pins="$(pins_file)"
     _lock="$_pins.lock"
     _pt="$_pins.$$.tmp"
+    _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")" || die "cannot create a scratch directory under ${TMPDIR:-/tmp}"
+    arm_cleanup "rm -rf $(sq "$_tmp")"
     # mkdir is the portable atomic lock. Two agents adding pins otherwise write from stale reads.
     _waited=0
     while :; do
@@ -1126,8 +1151,7 @@ add_one() {
         sleep 0.1 2>/dev/null || sleep 1
     done
     arm_cleanup "rm -rf $(sq "$_tmp") $(sq "$_pt") $(sq "$_lock")"
-    # The fetch above can run for minutes with nothing holding the pins file, so its contents are
-    # only known-good once the lock that guards the rewrite below is held.
+    # grubstake.tools is only known-good once this lock is held, even though install_tool already proved this spec's own bytes.
     validate_pins
     [ -f "$_pins" ] || printf '# grubstake pins: name version sha256-darwin sha256-linux\n' >"$_pins"
     # grep -v exits 1 when it selects nothing, the ordinary shape of the first pin in an empty or
@@ -1160,8 +1184,7 @@ add_one() {
     # unnoticed, since that check is the one guard standing between a bad write and the rename.
     if LC_ALL=C sort -o "$_pt" "$_pt"; then _srtrc=0; else _srtrc=$?; fi
     [ "$_srtrc" -eq 0 ] || die "$_pins: cannot sort pins file (sort exit $_srtrc), $_tool@$_ver was not recorded"
-    # The pin appended above guarantees this always matches; anything else is a real read failure on
-    # the file just written, not zero pins, and must not reach the comparison below.
+    # The pin written above guarantees this always matches; anything else is a real read failure on the file just written, not zero pins.
     if _after="$(grep -vcE '^[[:space:]]*(#|$)' "$_pt")"; then _anrc=0; else _anrc=$?; fi
     [ "$_anrc" -eq 0 ] || die "$_pins: cannot verify the rewritten pins file (grep exit $_anrc), $_tool@$_ver was not recorded"
     [ "$_before" -eq 0 ] || [ "$_after" -ge "$_before" ] \
@@ -1173,7 +1196,6 @@ add_one() {
     rmdir "$_lock" 2>/dev/null || true
 
     log "pinned $_tool $_ver"
-    install_tool "$_tool" "$_ver"
 }
 
 # Every argument is pinned. Reading only $1 meant a batched call pinned one tool and exited 0.
@@ -1191,7 +1213,7 @@ cmd_ensure() {
     _bad=0
     for _tool in $(pinned_tools); do
         _any=1
-        install_tool "$_tool" "$(pin_version "$_tool")" "GRUBSTAKE_OFFLINE is set" || _bad=1
+        install_tool "$_tool" "$(pin_version "$_tool")" "" "GRUBSTAKE_OFFLINE is set" || _bad=1
     done
     [ "$_any" = 1 ] || warn "no tools pinned yet (run: grubstake add swiftlint@x.y.z)"
     # Bare would let verify_pinned's own now-possible non-zero return trip set -e before the line below runs.

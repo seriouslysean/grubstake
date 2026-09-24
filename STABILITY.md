@@ -34,11 +34,11 @@ No arguments, or `-h`/`--help`/`help`, prints usage and exits 0.
 - `path <tool>` writes exactly one absolute path to stdout, nothing else. Diagnostics go to
   stderr.
 - `doctor` exits non-zero when a pinned tool is missing or cannot be resolved for this platform, a
-  grubstake hook is unreadable, drifted, not executable, or missing from a wired `.githooks`,
-  `core.hooksPath` cannot be read, or the cache root cannot be resolved. Hooks that are not wired,
-  not grubstake's, or not graded, and a tool with no build for this platform, are reported without
-  failing it. A malformed pins file, or a directory outside a git repository, fails it before any
-  row prints.
+  grubstake hook is unreadable, drifted, not executable, or missing while another grubstake hook in
+  `.githooks` is present, `core.hooksPath` cannot be read, or the cache root cannot be resolved.
+  Hooks that are not wired, not grubstake's, or not graded, and a tool with no build for this
+  platform, are reported without failing it. A malformed pins file, or a directory outside a git
+  repository, fails it before any row prints.
 - Every command exits 0 on success and non-zero on any documented failure class. The specific
   non-zero value is not part of the contract; only zero-vs-nonzero may be relied on.
 

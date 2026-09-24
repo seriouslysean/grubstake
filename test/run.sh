@@ -941,8 +941,30 @@ _out=$(gs "$r" doctor)
 _rc=$?
 if [ "$_rc" -eq 0 ]; then
     fail "doctor exited 0 with a grubstake hook missing from a wired .githooks: $_out"
+elif ! printf '%s\n' "$_out" | grep -qxF '  post-commit  not installed (run: ./grubstake.sh install)'; then
+    fail "doctor did not report the missing hook's remedy: $_out"
+else
+    pass
+fi
+
+it "doctor exits 0 when the only hook in .githooks is repo-managed, not grubstake's"
+# A missing hook only fails doctor when some other hook in .githooks carries grubstake's marker.
+r=$(new_repo)
+mkdir -p "$r/.githooks" || fixture_die "cannot create $r/.githooks"
+printf '#!/bin/sh\necho "repo-managed gate"\n' >"$r/.githooks/pre-commit" \
+    || fixture_die "cannot write $r/.githooks/pre-commit"
+chmod +x "$r/.githooks/pre-commit" || fixture_die "cannot make $r/.githooks/pre-commit executable"
+(cd "$r" && git config core.hooksPath .githooks) || fixture_die "cannot set core.hooksPath in $r"
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+_out=$(gs "$r" doctor)
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "doctor exited non-zero though no hook in .githooks carries grubstake's marker (rc $_rc): $_out"
 elif ! printf '%s\n' "$_out" | grep -qxF '  post-commit  not installed'; then
-    fail "doctor did not report the missing hook as not installed: $_out"
+    fail "doctor did not report post-commit as merely not installed: $_out"
+elif ! printf '%s\n' "$_out" | grep -qxF '  commit-msg   not installed'; then
+    fail "doctor did not report commit-msg as merely not installed: $_out"
 else
     pass
 fi
@@ -6209,12 +6231,6 @@ mkdir -p "$r/.githooks" || fixture_die "cannot create $r/.githooks"
 printf '#!/bin/sh\necho "repo-managed gate"\n' >"$r/.githooks/pre-commit" \
     || fixture_die "cannot write $r/.githooks/pre-commit"
 chmod +x "$r/.githooks/pre-commit" || fixture_die "cannot make $r/.githooks/pre-commit executable"
-printf '#!/bin/sh\necho "repo-managed gate"\n' >"$r/.githooks/post-commit" \
-    || fixture_die "cannot write $r/.githooks/post-commit"
-chmod +x "$r/.githooks/post-commit" || fixture_die "cannot make $r/.githooks/post-commit executable"
-printf '#!/bin/sh\necho "repo-managed gate"\n' >"$r/.githooks/commit-msg" \
-    || fixture_die "cannot write $r/.githooks/commit-msg"
-chmod +x "$r/.githooks/commit-msg" || fixture_die "cannot make $r/.githooks/commit-msg executable"
 (cd "$r" && git config core.hooksPath .githooks) || fixture_die "cannot set core.hooksPath in $r"
 # Read back what was just written: doctor's report hinges entirely on this value, so a config
 # write that silently did not take must fail the fixture, not masquerade as doctor misbehaving.

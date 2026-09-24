@@ -1,12 +1,12 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT
 # grubstake: pinned, verified build tooling for iOS repos.
-#
 # main() wraps everything and runs last. A shell reads scripts incrementally, so a truncated file
 # would otherwise execute its valid prefix silently. Same reason nvm and rustup-init do it.
 
 set -eu
 
-GRUBSTAKE_VERSION="1.2.1"
+GRUBSTAKE_VERSION="1.3.0"
 GRUBSTAKE_MIN_VERSION="0.3.0" # every earlier release has a known blocking defect
 # Named so cmd_update can tell an override apart from the default it is comparing against.
 GRUBSTAKE_REPO_DEFAULT="https://github.com/seriouslysean/grubstake"
@@ -196,7 +196,7 @@ pin_field() {
 
 pin_version() { pin_field "$1" 2; }
 
-# A "=" in field 3 marks the keyed form (key=sha256; unknown keys ignored, so a later platform is additive); add still only writes positional, forever -- see STABILITY.md.
+# A "=" in field 3 marks the keyed form (key=sha256; unknown keys ignored, so a later platform is additive); add writes positional today -- STABILITY.md is where a switch to keyed would be promised.
 pin_sha() {
     _ps_tool="$1"
     _ps_plat="$2"
@@ -1228,8 +1228,7 @@ cmd_doctor() {
         _plat="${_plat#\[grubstake\] }"
     fi
     printf 'platform   %s\n' "$_plat"
-    # Same shape as the platform field above: cache_root can fail on its own (GRUBSTAKE_CACHE unset,
-    # platform unsupported, or a relative override) even when $_plat_ok already covered the platform line's own failure. 2>&1, not 2>/dev/null: the refusal reason is the only way this line can say more than "unresolved" without a stale label naming just one of several now-possible causes.
+    # Same shape as the platform field above: cache_root can fail on its own (HOME empty or unset, platform unsupported, or a relative GRUBSTAKE_CACHE), and 2>&1 rather than 2>/dev/null is the only way this line can say more than "unresolved".
     if _cache="$(cache_root 2>&1)"; then
         _cache_ok=1
         printf 'cache      %s\n' "$_cache"

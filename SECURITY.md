@@ -25,11 +25,15 @@ somewhere other than the committed pins file.
 ## What the cache does not cover
 
 The cache is an optimisation, not a boundary. It lives in your home directory, anything that can
-write to it can write to all of it, and grubstake does not pretend otherwise. Entries are verified
-once, at download, against the pin, before they are published; nothing re-hashes them on read. The
-receipt records the hash of the tool's main executable only; sibling files extracted with it (for
-example a bundled library) are not individually hashed. A poisoned cache entry is served, and a test
-asserts that it is, so the claim that it would be caught cannot quietly return.
+write to it can write to all of it, and grubstake does not pretend otherwise. The download is
+checked against the pin before anything is published; that is the one place bytes are verified
+against an external source. After that, `path` and `check` only confirm the pinned entry exists, so
+the commit path stays fast and offline, and a test asserts that a poisoned entry is served there
+rather than refused. `ensure` goes further: it re-hashes each binary and compares it against the
+receipt written at install, and reports a mismatch rather than repairing it. A receipt that is
+removed, or rewritten to match a rewritten binary, passes that comparison too, so the cache is still not a trust boundary --
+only the pin checked at download is. The receipt records the hash of the tool's main executable
+only; sibling files extracted with it (for example a bundled library) are not individually hashed.
 
 An attacker who can write to your home directory already runs as you, and no cache layout changes
 that. Reports resting on that access are not vulnerabilities in this model.

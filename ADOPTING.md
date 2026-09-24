@@ -14,7 +14,7 @@ point of this migration is to change the mechanism, not the versions.
 ## Phase 1: pin the tools, change nothing else
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.2.1/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.3.0/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
 ./grubstake.sh version   # confirm it matches the tag you asked for
 ```
@@ -73,19 +73,20 @@ exists to prevent: a tool manager that reads its manifest relative to the workin
 the pin when a script moves, and installs whatever is newest without saying so.
 
 `path` installs the tool if it is missing, which is what lets this phase work before CI knows about
-grubstake. That means a call to `path` can reach the network. The shipped pre-commit hook runs
-`check` first, which fails with an instruction to run `ensure` rather than downloading mid-commit,
-so keep that ordering in any hook of your own.
+grubstake. That means a call to `path` can reach the network. The shipped pre-commit hook sets
+`GRUBSTAKE_OFFLINE` for its whole run, so inside a commit `path` refuses a missing tool with an
+instruction to run `ensure` rather than downloading; set it in any hook of your own that calls `path`.
 
-The pin is checked when the archive is downloaded, and the cache is keyed by that hash, so editing
-a pin is a cache miss rather than something that has to be detected. `ensure` also re-verifies each
-published entry against a receipt recorded at install: an entry from before this existed gets one
-written in place, offline, against whatever is already there, and an entry that no longer matches
-its receipt is reported rather than replaced, since nothing here will delete a binary another repo
-might be executing. Both stay inside the same trust boundary: a receipt cannot say why the bytes
-changed, and it cannot stop a person or process already trusted to write to the cache from rewriting
-it too. What the cache cannot do is defend itself: it lives in your home directory and anything able
-to write to it can write to all of it.
+The download is checked against the pin, and the cache is keyed by that hash, so editing a pin is a
+cache miss rather than something that has to be detected. `path` and `check` then confirm the
+pinned entry exists, no hashing, so the commit path stays fast and offline. `ensure` goes further:
+it re-hashes each binary and compares it against a receipt recorded at install -- an entry from
+before receipts existed gets one written in place, offline, against whatever is already there --
+and an entry that no longer matches its receipt is reported rather than replaced, since nothing
+here will delete a binary another repo might be executing. A receipt that is removed, or rewritten
+to match a rewritten binary, passes that comparison too: the cache is not a trust boundary, only the
+pin checked at download is. What the cache cannot do is defend itself: it lives in your home directory and
+anything able to write to it can write to all of it.
 
 Run the repo's lint and validation entry points and confirm the results are unchanged. Every commit
 from here to the end of phase 3 should be pushable and green.
@@ -117,9 +118,11 @@ re-downloads everything, and then saves nothing because the key already existed.
 green and pays that cost on every run until someone happens to edit a pin.
 
 Avoid a `restore-keys` prefix, or expect the cache to grow: entries are never unlinked, so a prefix
-hit restores the old layout and saves it alongside the new one. `ensure` re-verifies on a cache hit, so a poisoned cache
-fails at install rather than during lint, and the conditional "only install on cache miss" step can
-go.
+hit restores the old layout and saves it alongside the new one. `ensure` re-hashes each binary on a
+cache hit and compares it against the receipt recorded at install, so a binary poisoned on its own
+fails at install rather than surfacing later during lint, and the conditional "only install on cache
+miss" step can go. A receipt that is removed, or rewritten to match a rewritten binary, passes that
+comparison too: the cache is not a trust boundary, the pin checked at download is.
 
 If you add `ensure` to an existing bootstrap script, put it after anything that does not need the
 network. Under `set -e` a failed download aborts every later step, and a fresh clone can end up
@@ -141,16 +144,19 @@ rather than as a gap in the proof: it is being downloaded on every cold cache fo
 commit-msg spine, and a post-commit version notice. It refuses to run if another hooks directory is
 already configured, or if `.git/hooks` holds an executable hook that wiring `.githooks` would
 silence; move that hook under `.githooks/` first. A value that already resolves to this repo's own
-hooks directory -- an absolute path to it, say -- is accepted and left exactly as written. Once
-installed, it leaves existing hook files alone.
+hooks directory -- an absolute path to it, say -- is accepted and left exactly as written, unless
+the repository has linked worktrees, where only the relative `.githooks` is accepted. Once
+installed, it writes any hook that is missing, refreshes one whose bytes match an earlier published
+copy of itself, and otherwise leaves it alone -- with a warning for one it does not recognise,
+silently for one carrying no marker.
 
 The commit-msg spine refuses a commit message carrying an agent-session trailer or a transcript
 link. Both name a transcript outside the repository, which nobody reading the history later can
 open, and no scan of tracked files can see a message that has not been written yet. Either shape is
-refused in any casing, and every line is read except the `--verbose` diff below git's scissors line,
-which git removes before the message is published. Comment lines are read: `-m`, `-F`, and
-`--cleanup=verbatim` all publish a `#` line, so move a reference out of the message rather than
-relying on a cleanup mode to drop it.
+refused in any casing, on every line, comment lines included. Text below git's own scissors line is
+skipped only when an editor produced the message, since that is the one path on which git itself
+ever removes it; `-m` and `-F` publish everything below it too, and the spine reads it in full
+there.
 
 A repo with its own pre-commit logic should keep it. Move repo-specific checks into
 `.githooks/pre-commit.d/`, and checks on the commit message into `.githooks/commit-msg.d/`, where
@@ -187,7 +193,8 @@ fix it locally.
 `periphery` publishes no Linux build, so it is skipped there rather than failing.
 
 Updates are manual and per repo. Run `./grubstake.sh update` in a repo when you want that repo on a
-newer version, review the diff, and commit it. Repos are expected to sit on different versions.
+newer version, then `./grubstake.sh install` to pick up whatever hook or config change it brought,
+review the diff, and commit it. Repos are expected to sit on different versions.
 
 Every open issue is in this repository. Read them before reporting something as new.
 

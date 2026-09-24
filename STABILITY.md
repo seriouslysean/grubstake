@@ -3,6 +3,13 @@
 What a script or a person may rely on across releases, and what may still change without notice.
 Anything not listed here is an implementation detail.
 
+## Versioning
+
+A major release may break something this file promises. A minor release adds to it -- a command, a
+pins-file key, a tool, an environment variable, or a hook behaviour -- without breaking what is
+already promised. A patch release fixes behaviour without changing what is promised. A bare
+`update` never crosses a major; `update <version>` is how to cross one deliberately.
+
 ## Commands
 
 Argument grammar, frozen:
@@ -26,8 +33,27 @@ No arguments, or `-h`/`--help`/`help`, prints usage and exits 0.
 - `version` writes exactly the version string (e.g. `1.0.0`) to stdout, nothing else.
 - `path <tool>` writes exactly one absolute path to stdout, nothing else. Diagnostics go to
   stderr.
+- `doctor` exits non-zero when a pinned tool is missing or cannot be resolved for this platform, a
+  grubstake hook is unreadable, drifted, or not executable, `core.hooksPath` cannot be read, or the
+  cache root cannot be resolved. Hooks that are not wired, not grubstake's, or not graded, and a
+  tool with no build for this platform, are reported without failing it. A malformed pins file, or
+  a directory outside a git repository, fails it before any row prints.
 - Every command exits 0 on success and non-zero on any documented failure class. The specific
   non-zero value is not part of the contract; only zero-vs-nonzero may be relied on.
+
+## Environment
+
+- `GRUBSTAKE_CACHE`: an absolute path; overrides the cache root.
+- `GRUBSTAKE_OFFLINE`: non-empty means no tool is downloaded -- a missing one is refused instead of
+  installed, and `add` refuses outright since it downloads by design. The shipped pre-commit hook
+  sets it for the whole spine.
+- `XDG_CACHE_HOME`: read on Linux only; a relative value is treated as unset.
+- `HOME`: the cache root falls back to a path under it when `GRUBSTAKE_CACHE` (and, on Linux,
+  `XDG_CACHE_HOME`) is not set.
+- `TMPDIR`: download and extraction scratch is created under it, `/tmp` otherwise; staging is
+  created beside its destination, so every replacement is a same-filesystem rename.
+- `GRUBSTAKE_REPO`, `GRUBSTAKE_RAW`: override the repository and raw-content source `update`
+  fetches releases from.
 
 ## The pins file
 
@@ -40,9 +66,12 @@ Two line grammars are accepted, and may coexist in the same file:
 - Positional: `name version sha256-darwin sha256-linux`, one line per tool, `-` marking a
   platform with no build.
 - Keyed: `name version key=sha256 [key=sha256 ...]`, one line per tool. `darwin` and `linux` are
-  the keys read today. An unrecognized key is accepted and ignored, so a new platform is an
-  addition to this file, not a breaking change to it. A platform with no build is expressed by
-  omitting its key, never by `-`, in the keyed form.
+  the keys read today. Every field from the third on matches `[a-z0-9_]+=[0-9a-f]{64}` -- one
+  field failing that shape makes the whole file malformed, and every command that reads pins
+  refuses it -- and no key repeats on a line; a key inside that
+  shape but not read by name yet is accepted and ignored, so a new platform is an addition to this
+  file, not a breaking change to it. A platform with no build is expressed by omitting its key,
+  never by `-`, in the keyed form.
 - A line is keyed exactly when its third field contains `=`.
 
 Coexistence is across tools, not within one: a tool is pinned by exactly one line, positional or
@@ -67,16 +96,19 @@ The pre-commit, commit-msg, and post-commit behaviour is a contract, not the hoo
   path on which git itself ever removes that text. It then runs any repo-local gates in
   `.githooks/commit-msg.d/` with the message file as their argument, and blocks the commit on
   failure.
-- post-commit reports when a newer grubstake release exists. It only reports, touches nothing
-  but its own advisory cache inside `.git`, and never blocks a commit. That cache is stamped
-  before the lookup starts and again once it returns, answer or not, so a lookup that hangs is
-  never restarted by the next commit and one that fails is not repeated either.
+- post-commit reports when the newest grubstake release is newer than the one running and shares
+  its major version. Once a newer major is published it reports nothing, including later releases
+  in the running major, which a bare `update` still finds. It only reports, touches nothing but its own advisory cache inside `.git`, and never
+  blocks a commit. That cache is stamped before the lookup starts and again once it returns, answer
+  or not, so a lookup that hangs is never restarted by the next commit and one that fails is not
+  repeated either.
 
 The hook scripts themselves may be rewritten release to release; only this behaviour is promised.
 
 ## Dependencies
 
-`unzip`, `tar` with `xz` support, a sha256 tool (`shasum` or `sha256sum`), `git`, and `curl`.
+Standard POSIX utilities, plus `git`, `curl`, `unzip`, `tar` with `xz` support, `mktemp`,
+`readlink`, and a sha256 tool (`shasum` or `sha256sum`).
 
 ## Not promised
 

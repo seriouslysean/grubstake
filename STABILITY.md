@@ -15,7 +15,7 @@ check                      confirm every pinned tool is installed for this platf
 add <tool>@<version>...   pin one or more tools: download, hash, record
 path <tool>                print the absolute path to a pinned tool
 doctor                     report install health
-clean                      remove the entire cache
+clean                      remove the cached tool entries, leaving the cache root and anything else in it alone
 version                    print the version of this script
 ```
 

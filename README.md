@@ -60,7 +60,7 @@ check                     confirm every pinned tool is installed for this platfo
 add <tool>@<version>...   pin one or more tools by downloading, hashing, and recording them
 path <tool>               print the absolute path to a pinned tool
 doctor                    report the health of this install
-clean                     remove the entire cache, read-only entries included
+clean                     remove the cached tool entries, read-only entries included
 version                   print the version of this script
 ```
 
@@ -81,7 +81,8 @@ puts curl on the commit path.
 Each entry is a directory named for the archive hash it was installed from, so changing a pin
 installs alongside rather than over, and two repos pinning different hashes of the same version
 coexist. Entries are made read-only after they are published, so clearing the cache by hand needs
-write permission back first; `grubstake clean` does both steps and removes the whole cache root:
+write permission back first; `grubstake clean` does both steps and removes the cached tool entries,
+leaving the cache root and anything else in it alone:
 
 ```sh
 ./grubstake.sh clean

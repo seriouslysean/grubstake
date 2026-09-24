@@ -26,9 +26,10 @@ somewhere other than the committed pins file.
 
 The cache is an optimisation, not a boundary. It lives in your home directory, anything that can
 write to it can write to all of it, and grubstake does not pretend otherwise. Entries are verified
-once, at download, against the pin, before they are published; nothing re-hashes them on read. A
-poisoned cache entry is served, and a test asserts that it is, so the claim that it would be caught
-cannot quietly return.
+once, at download, against the pin, before they are published; nothing re-hashes them on read. The
+receipt records the hash of the tool's main executable only; sibling files extracted with it (for
+example a bundled library) are not individually hashed. A poisoned cache entry is served, and a test
+asserts that it is, so the claim that it would be caught cannot quietly return.
 
 An attacker who can write to your home directory already runs as you, and no cache layout changes
 that. Reports resting on that access are not vulnerabilities in this model.

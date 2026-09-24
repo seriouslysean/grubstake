@@ -1611,6 +1611,52 @@ else
     pass
 fi
 
+it "install_tool extracts a .tar.xz archive, not just the unzip default"
+# xcbeautify ships a .tar.xz on linux; every other archive fixture in this suite is a .zip, so unzip's own success never exercises install_tool's tar branch.
+r=$(new_repo)
+sed 's/        Darwin) echo darwin ;;/        Darwin) echo linux ;;/' "$GS" >"$r/grubstake.sh"
+chmod +x "$r/grubstake.sh" || fixture_die "cannot make $r/grubstake.sh executable"
+_src="$r/release-src"
+mkdir -p "$_src" || fixture_die "cannot create $_src"
+printf '#!/bin/sh\necho 1.6.2\n' >"$_src/xcbeautify" || fixture_die "cannot write the fixture xcbeautify binary"
+chmod +x "$_src/xcbeautify" || fixture_die "cannot make the fixture xcbeautify binary executable"
+_archive="$r/release.tar.xz"
+(cd "$_src" && tar -cJf "$_archive" xcbeautify) || fixture_die "no tar -cJf on this host to build the fixture archive"
+if command -v shasum >/dev/null 2>&1; then
+    _sha=$(shasum -a 256 "$_archive" | awk '{print $1}')
+elif command -v sha256sum >/dev/null 2>&1; then
+    _sha=$(sha256sum "$_archive" | awk '{print $1}')
+else
+    fixture_die "no shasum or sha256sum to hash the fixture archive"
+fi
+[ -n "$_sha" ] || fixture_die "cannot hash the fixture .tar.xz archive"
+pins "$r" "xcbeautify 1.6.2 - $_sha"
+_shim="$r/curl-shim"
+mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+cat >"$_shim/curl" <<SHIM
+#!/bin/sh
+_out=""; _prev=""
+for a in "\$@"; do
+    [ "\$_prev" = "-o" ] && _out="\$a"
+    _prev="\$a"
+done
+[ -n "\$_out" ] || exit 1
+cp "$_archive" "\$_out"
+SHIM
+chmod +x "$_shim/curl" || fixture_die "cannot make the fixture curl shim executable"
+_out=$(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path xcbeautify 2>&1)
+_rc=$?
+_bin="$r/.cache/xcbeautify/$_sha/xcbeautify"
+if [ "$_rc" -ne 0 ]; then
+    fail "path exited $_rc extracting a .tar.xz fixture: $_out"
+elif [ ! -x "$_bin" ]; then
+    fail "path exited 0 but did not extract $_bin: $_out"
+else
+    _checkout=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh check 2>&1)
+    _checkrc=$?
+    [ "$_checkrc" -eq 0 ] && pass || fail "check did not verify the .tar.xz install: $_checkout"
+fi
+
 it "clean refuses a degenerate cache root"
 # GRUBSTAKE_CACHE is used verbatim, so a value that is neither empty nor literally "/" but still
 # resolves to the filesystem root -- ".." above root is root again, so "/.." does -- has to be caught
@@ -2827,6 +2873,34 @@ chmod +x "$r/grubstake.sh"
 pins "$r" "periphery 3.7.4 $SHA_A -"
 expect_says_fail "periphery is not published for linux" "$r" path periphery
 
+it "path exits exactly 3 only for a tool that is not pinned, never for another refusal"
+# The pre-commit hook reads this exit status literally (embedded_hook pre-commit: RC -eq 3 means "not pinned"); a different refusal exiting 3 by coincidence would make the hook treat it as a missing pin instead of a hard failure.
+r=$(new_repo)
+pins "$r" "periphery 3.7.4 $SHA_A $SHA_A"
+gs_rc "$r" path swiftlint
+_rc_unpinned=$?
+
+r2=$(new_repo)
+sed 's/        Darwin) echo darwin ;;/        Darwin) echo linux ;;/' "$GS" >"$r2/grubstake.sh"
+chmod +x "$r2/grubstake.sh" || fixture_die "cannot make $r2/grubstake.sh executable"
+pins "$r2" "periphery 3.7.4 $SHA_A -"
+gs_rc "$r2" path periphery
+_rc_noartifact=$?
+
+r3=$(new_repo)
+gs_rc "$r3" path notatool
+_rc_unknown=$?
+
+if [ "$_rc_unpinned" -ne 3 ]; then
+    fail "an unpinned tool exited $_rc_unpinned, expected exactly 3"
+elif [ "$_rc_noartifact" -eq 3 ]; then
+    fail "a tool with no artifact on this platform also exited 3, indistinguishable from unpinned"
+elif [ "$_rc_unknown" -eq 3 ]; then
+    fail "an unknown tool name also exited 3, indistinguishable from unpinned"
+else
+    pass
+fi
+
 it "path rejects a tool name that is not a known tool"
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
@@ -2871,6 +2945,12 @@ else
         *) fail "refused, but without naming the pins-file line responsible: $_out" ;;
     esac
 fi
+
+it "validate_pins refuses a bad version already sitting in grubstake.tools"
+# add refuses a bad version before it is ever written (see "add refuses a version outside validate_pins' own grammar" below), so only a hand-edited pins file like this one reaches validate_pins' own branch.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2-rc1 $SHA_A $SHA_A"
+expect_says_fail "grubstake.tools:2 bad version: 0.63.2-rc1" "$r" check
 
 it "a tool with no artifact on this platform is skipped, not failed, by check"
 r=$(new_repo)
@@ -3143,6 +3223,109 @@ SHIM
         fi
     fi
 else
+    printf '  skip  %s (network)\n' "$CURRENT"
+fi
+
+# Every release tag from v0.3.0 up fetches its own real grubstake.sh and runs its own update, unmodified, against a shim serving only the candidate -- proving every still-supported client can reach it, not just the one release the test above names.
+if [ "$NETWORK" = 1 ]; then
+    _repodefault="$(sed -n 's/^GRUBSTAKE_REPO_DEFAULT="\(.*\)"$/\1/p' "$GS")"
+    [ -n "$_repodefault" ] || fixture_die "cannot read GRUBSTAKE_REPO_DEFAULT from $GS"
+    _cand="$(sed -n 's/^GRUBSTAKE_VERSION="\(.*\)"$/\1/p' "$GS")"
+    [ -n "$_cand" ] || fixture_die "cannot read GRUBSTAKE_VERSION from $GS"
+    _realgit="$(command -v git)" || fixture_die "no git on PATH"
+    _alltags="$(git ls-remote --tags --refs "$_repodefault" 'v*' 2>/dev/null \
+        | awk '{print $2}' | sed 's|refs/tags/v||' \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+        | LC_ALL=C sort -t. -k1,1n -k2,2n -k3,3n)"
+    if [ -z "$_alltags" ]; then
+        it "every release from v0.3.0 up updates cleanly to this candidate"
+        fail "cannot list release tags from $_repodefault"
+    else
+        for _tag in $_alltags; do
+            # Below v0.3.0: out of this loop's own scope, not a candidate worth a result line at all.
+            case "$(printf '%s\n0.3.0\n' "$_tag" | LC_ALL=C sort -t. -k1,1n -k2,2n -k3,3n | head -1)" in
+                0.3.0) : ;;
+                *) continue ;;
+            esac
+            it "v$_tag updates cleanly to the candidate $_cand"
+            if [ "$_tag" = "$_cand" ]; then
+                # The tag matching GRUBSTAKE_VERSION is this run's own pre-bump state: nothing to fetch or compare yet.
+                printf '  skip  v%s (candidate'"'"'s own pre-bump tag)\n' "$_tag"
+                continue
+            fi
+            _hi="$(printf '%s\n%s\n' "$_tag" "$_cand" | LC_ALL=C sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"
+            if [ "$_hi" = "$_tag" ]; then
+                fail "v$_tag is newer than the candidate $_cand -- the candidate needs a version bump"
+                continue
+            fi
+            r=$(new_repo)
+            rm -f "$r/grubstake.sh"
+            if ! curl -fsSL "https://raw.githubusercontent.com/seriouslysean/grubstake/v$_tag/grubstake.sh" -o "$r/grubstake.sh" 2>/dev/null; then
+                fail "v$_tag: could not fetch its own grubstake.sh"
+                continue
+            fi
+            chmod +x "$r/grubstake.sh" || fixture_die "cannot make $r/grubstake.sh executable"
+            # Run unmodified, no tools pinned: only its own install/hook-wiring logic is under test here, not a tool download.
+            _instout1=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1)
+            _instrc1=$?
+            if [ "$_instrc1" -ne 0 ]; then
+                fail "v$_tag: its own install failed: $_instout1"
+                continue
+            fi
+            _shims="$(mktemp -d "$ROOT/old-client-shim.XXXXXX")" || fixture_die "cannot create a shim dir for v$_tag"
+            cat >"$_shims/curl" <<SHIM
+#!/bin/sh
+_out=""; _prev=""; _match=0
+for a in "\$@"; do
+    case "\$a" in */v$_cand/grubstake.sh) _match=1 ;; esac
+    [ "\$_prev" = "-o" ] && _out="\$a"
+    _prev="\$a"
+done
+if [ "\$_match" = 1 ] && [ -n "\$_out" ]; then
+    cp "$GS" "\$_out"
+    exit 0
+fi
+echo "curl: unexpected url in old-client update test" >&2
+exit 1
+SHIM
+            cat >"$_shims/git" <<SHIM
+#!/bin/sh
+case " \$* " in
+    *" ls-remote "*)
+        printf '0000000000000000000000000000000000000000\trefs/tags/v$_cand\n'
+        exit 0
+        ;;
+esac
+exec "$_realgit" "\$@"
+SHIM
+            chmod +x "$_shims/curl" "$_shims/git" || fixture_die "cannot make the old-client shims executable for v$_tag"
+            _updout=$(cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh update 2>&1)
+            _updrc=$?
+            if [ "$_updrc" -ne 0 ]; then
+                fail "v$_tag: its own bare update exited $_updrc: $_updout"
+                continue
+            fi
+            if ! cmp -s "$r/grubstake.sh" "$GS"; then
+                fail "v$_tag: after its own update, grubstake.sh is not byte-identical to the candidate: $_updout"
+                continue
+            fi
+            _instout2=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1)
+            _instrc2=$?
+            _hookfail=""
+            for _h in pre-commit post-commit commit-msg; do
+                cmp -s "$r/.githooks/$_h" "$HOOKS/$_h" || _hookfail="$_hookfail $_h"
+            done
+            if [ "$_instrc2" -ne 0 ]; then
+                fail "v$_tag: after update, the new install exited $_instrc2: $_instout2"
+            elif [ -n "$_hookfail" ]; then
+                fail "v$_tag: after update, these hooks are not byte-identical to hooks/:$_hookfail"
+            else
+                pass
+            fi
+        done
+    fi
+else
+    it "every release from v0.3.0 up updates cleanly to this candidate"
     printf '  skip  %s (network)\n' "$CURRENT"
 fi
 
@@ -3742,6 +3925,96 @@ else
     case "$_out" in
         *"2.0.0"*"update 2.0.0"*) pass ;;
         *) fail "bare update crossed the major, or never named 2.0.0 as the one that would: $_out" ;;
+    esac
+fi
+
+it "update refuses a fetched release that fails sh -n"
+# fetch_release's own sh -n check runs before the main-call check "update refuses a fetched release that never calls main" above exercises, so a syntax error must be refused on its own, not only a structurally valid file missing the final call.
+r=$(new_repo)
+_before="$r/before.sh"
+cp "$r/grubstake.sh" "$_before" || fixture_die "cannot snapshot $r/grubstake.sh"
+_raw="$(mktemp -d "$ROOT/bad-syntax-release.XXXXXX")" || fixture_die "cannot create the bad-syntax release fixture dir"
+mkdir -p "$_raw/v9.9.9" || fixture_die "cannot create the bad-syntax release version dir"
+printf '#!/bin/sh\nGRUBSTAKE_VERSION="9.9.9"\nif [ 1 = 1 ]; then\nmain() { :; }\nmain "$@"\n' >"$_raw/v9.9.9/grubstake.sh"
+_out=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$_raw" ./grubstake.sh update 9.9.9 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "update exited 0 for a release that fails sh -n: $_out"
+elif ! cmp -s "$_before" "$r/grubstake.sh"; then
+    fail "the running script was replaced despite the fetched release failing sh -n"
+else
+    case "$_out" in
+        *"is not a usable release"*) pass ;;
+        *) fail "refused, but without saying why: $_out" ;;
+    esac
+fi
+
+it "a bare update skips a bad newest tag with a warning and installs the next usable one"
+r=$(new_repo)
+sed -i.bak 's/^GRUBSTAKE_VERSION=.*/GRUBSTAKE_VERSION="1.0.0"/' "$r/grubstake.sh" && rm -f "$r/grubstake.sh.bak"
+_shim="$(mktemp -d "$ROOT/skip-bad-tag-shim.XXXXXX")" || fixture_die "cannot create the skip-bad-tag git shim dir"
+git_tags_shim "$_shim" "1.2.0 bbb 1.1.0"
+_uf="$(mktemp -d "$ROOT/skip-bad-tag-fixture.XXXXXX")" || fixture_die "cannot create the skip-bad-tag raw fixture dir"
+mkdir -p "$_uf/raw/v1.2.0" "$_uf/raw/v1.1.0" || fixture_die "cannot create the skip-bad-tag version dirs"
+printf '#!/bin/sh\nGRUBSTAKE_VERSION="1.2.0"\nmain() { :; }\n' >"$_uf/raw/v1.2.0/grubstake.sh" \
+    || fixture_die "cannot write the bad v1.2.0 fixture release"
+printf '#!/bin/sh\nGRUBSTAKE_VERSION="1.1.0"\nmain() { :; }\nmain "$@"\n' >"$_uf/raw/v1.1.0/grubstake.sh" \
+    || fixture_die "cannot write the good v1.1.0 fixture release"
+_out=$(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$_uf/raw" ./grubstake.sh update 2>&1)
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "bare update exited non-zero despite a usable candidate behind the bad one: $_out"
+elif ! cmp -s "$r/grubstake.sh" "$_uf/raw/v1.1.0/grubstake.sh"; then
+    fail "bare update did not land the next usable release (1.1.0) byte for byte: $_out"
+else
+    case "$_out" in
+        *"v1.2.0 is not a usable release, skipping"*"1.1.0"*) pass ;;
+        *) fail "did not warn about the skipped tag before installing the next one: $_out" ;;
+    esac
+fi
+
+it "bare update dies naming no usable release when every same-major candidate fails to fetch"
+r=$(new_repo)
+sed -i.bak 's/^GRUBSTAKE_VERSION=.*/GRUBSTAKE_VERSION="1.0.0"/' "$r/grubstake.sh" && rm -f "$r/grubstake.sh.bak"
+_before="$r/before.sh"
+cp "$r/grubstake.sh" "$_before" || fixture_die "cannot snapshot $r/grubstake.sh"
+_shim="$(mktemp -d "$ROOT/no-usable-shim.XXXXXX")" || fixture_die "cannot create the no-usable-release git shim dir"
+git_tags_shim "$_shim" 1.2.0
+_uf="$(mktemp -d "$ROOT/no-usable-fixture.XXXXXX")" || fixture_die "cannot create the no-usable-release raw fixture dir"
+mkdir -p "$_uf/raw/v1.2.0" || fixture_die "cannot create $_uf/raw/v1.2.0"
+printf '#!/bin/sh\nGRUBSTAKE_VERSION="1.2.0"\nmain() { :; }\n' >"$_uf/raw/v1.2.0/grubstake.sh" \
+    || fixture_die "cannot write the no-usable-release fixture"
+_repodefault="$(sed -n 's/^GRUBSTAKE_REPO_DEFAULT="\(.*\)"$/\1/p' "$GS")"
+[ -n "$_repodefault" ] || fixture_die "cannot read GRUBSTAKE_REPO_DEFAULT from $GS"
+_out=$(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_RAW="file://$_uf/raw" ./grubstake.sh update 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "update exited 0 despite every same-major candidate being unusable: $_out"
+elif ! cmp -s "$_before" "$r/grubstake.sh"; then
+    fail "the running script was replaced despite every candidate being refused"
+else
+    case "$_out" in
+        *"no usable release found in $_repodefault"*) pass ;;
+        *) fail "did not die with the no-usable-release message: $_out" ;;
+    esac
+fi
+
+it "bare update dies naming the repo when its tags cannot be resolved"
+# release_tags discards git's own stderr, so an unreachable repo reads as zero candidates, not a git error.
+r=$(new_repo)
+_before="$r/before.sh"
+cp "$r/grubstake.sh" "$_before" || fixture_die "cannot snapshot $r/grubstake.sh"
+_badrepo="file://$ROOT/no-such-repo.$$"
+_out=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_REPO="$_badrepo" ./grubstake.sh update 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "update exited 0 despite an unresolvable repo: $_out"
+elif ! cmp -s "$_before" "$r/grubstake.sh"; then
+    fail "the running script was replaced despite the repo being unresolvable"
+else
+    case "$_out" in
+        *"cannot resolve a release tag from $_badrepo"*) pass ;;
+        *) fail "did not name the repo it could not resolve: $_out" ;;
     esac
 fi
 
@@ -6901,6 +7174,47 @@ if [ "$NETWORK" = 1 ]; then
     if gs_rc "$r" check && [ "$("$_p" version 2>/dev/null)" = "0.63.2" ]; then
         pass
     else fail "install did not verify, or the path does not run"; fi
+
+    it "a real install of xcbeautify passes check, and path resolves an executable"
+    # xcbeautify publishes both a darwin and a linux artifact, so this mirrors swiftlint's own case directly.
+    r=$(new_repo)
+    if ! gs_rc "$r" add xcbeautify@3.2.1; then
+        fail "add exited non-zero"
+    else
+        _p="$(gs "$r" path xcbeautify)"
+        if gs_rc "$r" check && [ -x "$_p" ]; then
+            pass
+        else fail "install did not verify, or the path does not resolve: $_p"; fi
+    fi
+
+    it "a real install of periphery passes check on darwin; linux has no artifact, so add skips it and check still passes"
+    # periphery's tool_url is unconditionally empty for linux (never published there), so this is the one tool whose network case has to branch by host.
+    r=$(new_repo)
+    case "$(uname -s)" in
+        Linux)
+            _out=$(gs "$r" add periphery@3.8.0)
+            _rc=$?
+            if [ "$_rc" -ne 0 ]; then
+                fail "add exited $_rc for periphery on linux, which install_tool is supposed to skip, not fail: $_out"
+            elif ! printf '%s' "$_out" | grep -q "periphery: not published for linux, skipping"; then
+                fail "add did not print install_tool's own skip line: $_out"
+            else
+                gs_rc "$r" check
+                _checkrc=$?
+                [ "$_checkrc" -eq 0 ] && pass || fail "check did not pass after a legitimately unpublished tool was skipped (rc $_checkrc)"
+            fi
+            ;;
+        *)
+            if ! gs_rc "$r" add periphery@3.8.0; then
+                fail "add exited non-zero"
+            else
+                _p="$(gs "$r" path periphery)"
+                if gs_rc "$r" check && [ -x "$_p" ]; then
+                    pass
+                else fail "install did not verify, or the path does not resolve: $_p"; fi
+            fi
+            ;;
+    esac
 
     it "a real install lands under the pinned archive hash"
     # The path is the validity, so it must be the hash from grubstake.tools and nothing else.

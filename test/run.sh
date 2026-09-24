@@ -7030,6 +7030,32 @@ SHIM
 done
 if [ -n "$_bad" ]; then fail "$_bad"; else pass; fi
 
+it "add refuses up front under GRUBSTAKE_OFFLINE, before fetching anything"
+# A curl shim that only records whether it ran proves the refusal lands before any fetch.
+r=$(new_repo)
+_shim="$r/curl-record"
+mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+_log="$r/curl-invoked"
+cat >"$_shim/curl" <<SHIM
+#!/bin/sh
+: >> "$_log"
+exit 1
+SHIM
+chmod +x "$_shim/curl" || fixture_die "cannot make the recording curl shim executable"
+_out=$(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_OFFLINE=1 ./grubstake.sh add swiftlint@1.0.0 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "add exited 0 under GRUBSTAKE_OFFLINE: $_out"
+elif [ -e "$_log" ]; then
+    fail "add called curl despite GRUBSTAKE_OFFLINE=1: $_out"
+elif ! printf '%s' "$_out" | grep -q "GRUBSTAKE_OFFLINE"; then
+    fail "refused, but without naming GRUBSTAKE_OFFLINE: $_out"
+elif grep -q '^swiftlint' "$r/grubstake.tools" 2>/dev/null; then
+    fail "add recorded a pin despite refusing under GRUBSTAKE_OFFLINE: $(cat "$r/grubstake.tools" 2>/dev/null)"
+else
+    pass
+fi
+
 it "install's version assertion failing leaves no pin recorded, even mid-batch"
 # #113: add_one used to rename the new pin into place before install_tool ever asserted the binary
 # reports the version it is about to be pinned to, so a failed assertion still left that version
@@ -7092,8 +7118,26 @@ else
 fi
 
 it "add pins and installs a tool on a cold cache"
+# The curl shim below serves different bytes per platform URL, so the two hash columns must differ.
 r=$(new_repo)
 fake_release "$r" 1.0.0 >/dev/null
+_hostplat=darwin
+case "$(uname -s)" in Linux) _hostplat=linux ;; esac
+_altzip="$r/release-alt.zip"
+cp "$r/release.zip" "$_altzip" || fixture_die "cannot copy the fixture release for the other platform"
+printf 'x' >>"$_altzip" || fixture_die "cannot mutate the other-platform fixture release"
+cat >"$r/curl-shim/curl" <<SHIM
+#!/bin/sh
+_out=""; _prev=""; _urlplat=darwin
+for a in "\$@"; do
+    [ "\$_prev" = "-o" ] && _out="\$a"
+    _prev="\$a"
+    case "\$a" in http*linux*) _urlplat=linux ;; esac
+done
+[ -n "\$_out" ] || exit 1
+if [ "\$_urlplat" = "$_hostplat" ]; then cp "$r/release.zip" "\$_out"; else cp "$_altzip" "\$_out"; fi
+SHIM
+chmod +x "$r/curl-shim/curl" || fixture_die "cannot make the fixture curl shim executable"
 _pins_path="$r/grubstake.tools"
 _out=$(cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
 _rc=$?
@@ -7102,12 +7146,17 @@ if [ "$_rc" -ne 0 ]; then
 elif ! grep -qE '^swiftlint[[:space:]]+1\.0\.0[[:space:]]' "$_pins_path" 2>/dev/null; then
     fail "add exited 0 but grubstake.tools has no swiftlint pin line: $(cat "$_pins_path" 2>/dev/null)"
 else
+    _line=$(grep '^swiftlint' "$_pins_path")
+    _dsha=$(printf '%s\n' "$_line" | awk '{print $3}')
+    _lsha=$(printf '%s\n' "$_line" | awk '{print $4}')
     _bin=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftlint)
     _brc=$?
     if [ "$_brc" -ne 0 ]; then
         fail "path exited $_brc for a tool add just installed: $_bin"
     elif [ ! -x "$_bin" ]; then
         fail "path printed a non-executable path: $_bin"
+    elif [ "$_dsha" = "$_lsha" ]; then
+        fail "the darwin and linux hash columns are identical, so the host-platform pick is untested: $_line"
     else
         pass
     fi

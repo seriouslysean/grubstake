@@ -1091,6 +1091,8 @@ add_one() {
     is_known_tool "$_tool" || die "unknown tool: $_tool"
     # Checked before anything is fetched: an unvalidated value would otherwise reach tool_url and every later reader of a recorded pin.
     valid_version "$_ver" || die "$_tool@$_ver: bad version (want N.N or N.N.N)"
+    # The hash loop below fetches before install_tool ever runs, so this refusal must sit above it.
+    [ -z "${GRUBSTAKE_OFFLINE:-}" ] || die "$_tool@$_ver: add downloads and cannot run with GRUBSTAKE_OFFLINE set"
 
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     arm_cleanup "rm -rf $(sq "$_tmp")"
@@ -1122,6 +1124,7 @@ add_one() {
     _lock="$_pins.lock"
     _pt="$_pins.$$.tmp"
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")" || die "cannot create a scratch directory under ${TMPDIR:-/tmp}"
+    arm_cleanup "rm -rf $(sq "$_tmp")"
     # mkdir is the portable atomic lock. Two agents adding pins otherwise write from stale reads.
     _waited=0
     while :; do

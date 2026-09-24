@@ -494,7 +494,7 @@ fi
 
 it "no user-facing message spells the command bare, without ./ and .sh"
 # Locks in #146's rename: every remedy, usage line and hint said "grubstake <command>", but no such
-# command exists -- the script is "./grubstake.sh". A comment is exempt (rule 13's why-only prose can
+# command exists -- the script is "./grubstake.sh". A comment is exempt (it is not user-facing, so it can
 # say "grubstake" freely); every non-comment line is not.
 _bad=$(grep -vE '^[[:space:]]*#' "$GS" | grep -E 'grubstake (add|ensure|install|clean|help)')
 if [ -n "$_bad" ]; then

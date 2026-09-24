@@ -5939,10 +5939,10 @@ it "a pre-commit.d gate's own cold-cache path call refuses offline instead of do
 # gate calling path on a cold cache ran curl on the commit path (AGENTS rule 17). A curl shim that
 # records its own invocation catches a download rather than trusting the refusal message alone.
 r=$(new_hook_repo)
-pins "$r" "periphery 1.0.0 $SHA_A $SHA_A"
+pins "$r" "swiftformat 1.0.0 $SHA_A $SHA_A"
 gate_script "$r" 05-cold-cache <<'GATE'
 ROOT="$(git rev-parse --show-toplevel)"
-"$ROOT/grubstake.sh" path periphery >/dev/null
+"$ROOT/grubstake.sh" path swiftformat >/dev/null
 GATE
 _marker="$r/CURL-RAN"
 _shim="$r/curl-shim"
@@ -5964,7 +5964,7 @@ it "a pre-commit.d gate's own cold-cache ensure call refuses offline instead of 
 # cmd_ensure called install_tool with no GRUBSTAKE_OFFLINE check of its own -- only cmd_path had
 # one, so a gate calling ensure instead of path on a cold cache still ran curl on the commit path.
 r=$(new_hook_repo)
-pins "$r" "periphery 1.0.0 $SHA_A $SHA_A"
+pins "$r" "swiftformat 1.0.0 $SHA_A $SHA_A"
 gate_script "$r" 05-cold-cache <<'GATE'
 ROOT="$(git rev-parse --show-toplevel)"
 "$ROOT/grubstake.sh" ensure >/dev/null 2>&1
@@ -5988,7 +5988,7 @@ fi
 it "an offline ensure refusal names the real cause, not the command already running"
 # Telling a caller already running ensure to run ensure is circular.
 r=$(new_repo)
-pins "$r" "periphery 1.0.0 $SHA_A $SHA_A"
+pins "$r" "swiftformat 1.0.0 $SHA_A $SHA_A"
 _out=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_OFFLINE=1 ./grubstake.sh ensure 2>&1)
 _rc=$?
 if [ "$_rc" -eq 0 ]; then

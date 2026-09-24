@@ -11,10 +11,11 @@ The pin is the trust boundary and it is checked at download. The cache afterward
 optimisation: it lives in your home directory, anything that can write to it can write to all of
 it, and grubstake does not pretend otherwise.
 
-`path` and `check` confirm a pinned entry exists, nothing more, so the commit path stays fast and
-offline. `ensure` re-hashes each binary and compares it against the receipt recorded at install; a
-receipt rewritten to match a rewritten binary passes that comparison too, so the cache still is not
-a trust boundary -- only the pin checked at download is.
+`path` and `check` confirm a pinned entry exists without re-hashing it, so the commit path stays
+fast; `path` downloads a missing entry unless `GRUBSTAKE_OFFLINE` is set, which the pre-commit spine
+does. `ensure` re-hashes each binary and compares it against the receipt recorded at install; a
+receipt that is removed, or rewritten to match a rewritten binary, passes that comparison too, so
+the cache still is not a trust boundary -- only the pin checked at download is.
 
 ## Install
 
@@ -54,8 +55,8 @@ running major; `update <version>` is how to cross one deliberately.
 The command rewrites `grubstake.sh` and stops, which leaves you a diff to review before committing.
 If an update turns out to be wrong, `git revert` puts the old version back.
 
-The `post-commit` hook tells you when a newer release exists. It only reports, and never changes
-anything.
+The `post-commit` hook tells you when a newer release exists in the major you are on. It only
+reports, and never changes anything.
 
 ## Commands
 
@@ -136,9 +137,11 @@ grubstake knows how to install `swiftlint`, `swiftformat`, `xcbeautify`, and `pe
 
 ## Operating
 
-**Unadopt.** Delete `grubstake.sh`, `grubstake.tools`, and `.githooks/`, then run
-`git config --unset core.hooksPath`. Run `./grubstake.sh clean` first if the cached tool binaries
-should go too.
+**Unadopt.** Run `./grubstake.sh clean` if the cached binaries should go. Move anything repo-owned
+out of `.githooks/` (the `pre-commit.d/` and `commit-msg.d/` gates, and any hook without
+grubstake's marker), then delete `grubstake.sh`, `grubstake.tools`, grubstake's three hooks and
+`.git/grubstake-latest`, and run `git config --unset core.hooksPath`, the only git config grubstake
+writes.
 
 **Platforms.** macOS on arm64 or x86_64, and Linux on x86_64. Any other platform, or any other
 Linux architecture, is refused.
@@ -154,7 +157,7 @@ Linux architecture, is refused.
     path: ${{ env.GRUBSTAKE_CACHE }}
     key: grubstake-${{ runner.os }}-${{ hashFiles('grubstake.tools', 'grubstake.sh') }}
 - run: ./grubstake.sh ensure
-- run: ./grubstake.sh path swiftlint
+- run: '"$(./grubstake.sh path swiftlint)" lint --strict'
 ```
 
 **Linked worktrees.** `core.hooksPath` is shared config across every worktree of a repository, but

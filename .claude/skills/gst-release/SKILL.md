@@ -23,6 +23,7 @@ A dirty tree or diverged SHAs stops here. A release was once cut from a stale lo
 ## 2. Prove the candidate locally
 
 ```sh
+test/scan-for-leaks.sh --all
 test/run.sh --network
 ```
 
@@ -32,13 +33,13 @@ happened. The run that gates the tag is step 6, after the merge.
 
 ## 3. Bump
 
-Raise the version in all three places: `GRUBSTAKE_VERSION` in `grubstake.sh`, and the install snippets in `README.md` and `ADOPTING.md`. Then prove they agree:
+Raise the version in all four places: `GRUBSTAKE_VERSION` in `grubstake.sh`, the install snippets in `README.md` and `ADOPTING.md`, and README's `# expect` line. Then prove they agree:
 
 ```sh
-grep -n 'GRUBSTAKE_VERSION="\|grubstake/v' grubstake.sh README.md ADOPTING.md
+grep -n 'GRUBSTAKE_VERSION="\|grubstake/v\|# expect ' grubstake.sh README.md ADOPTING.md
 ```
 
-All three must declare the target, because `fetch_release` skips a tag whose bytes disagree with its name, and the mismatched release becomes a silent dud that cost a version number.
+All four must declare the target, because `fetch_release` skips a tag whose bytes disagree with its name, and the mismatched release becomes a silent dud that cost a version number.
 
 ## 4. Land it
 

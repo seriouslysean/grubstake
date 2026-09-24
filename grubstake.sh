@@ -1228,7 +1228,7 @@ cmd_doctor() {
         _plat="${_plat#\[grubstake\] }"
     fi
     printf 'platform   %s\n' "$_plat"
-    # Same shape as the platform field above: cache_root can fail on its own (HOME or XDG_CACHE_HOME empty, platform unsupported, or a relative override), and 2>&1 rather than 2>/dev/null is the only way this line can say more than "unresolved".
+    # Same shape as the platform field above: cache_root can fail on its own (HOME empty or unset, platform unsupported, or a relative GRUBSTAKE_CACHE), and 2>&1 rather than 2>/dev/null is the only way this line can say more than "unresolved".
     if _cache="$(cache_root 2>&1)"; then
         _cache_ok=1
         printf 'cache      %s\n' "$_cache"

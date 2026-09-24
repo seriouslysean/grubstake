@@ -30,8 +30,8 @@ checked against the pin before anything is published; that is the one place byte
 against an external source. After that, `path` and `check` only confirm the pinned entry exists, so
 the commit path stays fast and offline, and a test asserts that a poisoned entry is served there
 rather than refused. `ensure` goes further: it re-hashes each binary and compares it against the
-receipt written at install, and reports a mismatch rather than repairing it. A receipt rewritten to
-match a rewritten binary passes that comparison too, so the cache is still not a trust boundary --
+receipt written at install, and reports a mismatch rather than repairing it. A receipt that is
+removed, or rewritten to match a rewritten binary, passes that comparison too, so the cache is still not a trust boundary --
 only the pin checked at download is. The receipt records the hash of the tool's main executable
 only; sibling files extracted with it (for example a bundled library) are not individually hashed.
 

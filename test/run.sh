@@ -291,6 +291,19 @@ SHIM
     chmod +x "$_lcdir/mkdir" || fixture_die "cannot make the lock-count mkdir shim executable"
 }
 
+# sleep is an external utility under both dash and bash (never a shell builtin), so placing one on PATH intercepts every backoff call outright; logging its arguments and returning immediately proves the real pause is still there without a budget-exhaustion test paying for any of it.
+sleep_log_shim() {
+    _sldir="$1"
+    _sllog="$2"
+    mkdir -p "$_sldir" || fixture_die "cannot create the sleep-log shim dir $_sldir"
+    : >"$_sllog" || fixture_die "cannot create the sleep-log log file $_sllog"
+    cat >"$_sldir/sleep" <<SHIM
+#!/bin/sh
+printf '%s\n' "\$*" >>"$_sllog"
+SHIM
+    chmod +x "$_sldir/sleep" || fixture_die "cannot make the sleep-log shim executable"
+}
+
 # Pauses "mv" only when its destination (mv's own last argument) exactly matches $4, so it does not
 # also catch an unrelated mv on the same run -- install_tool renames the archived member into place
 # inside staging before ever publishing, and on Linux (where swiftlint's member is named
@@ -1176,7 +1189,18 @@ pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
 printf '#!/bin/sh\necho 0.63.2\n' >"$r/.cache/swiftlint/$SHA_A/swiftlint"
 chmod +x "$r/.cache/swiftlint/$SHA_A/swiftlint"
-expect_ok "$r" check
+# Exact output, not exit status: any extra line beside a passing check is itself a claim.
+_want=$(sed -n 's/^GRUBSTAKE_VERSION="\(.*\)"$/\1/p' "$GS")
+[ -n "$_want" ] || fixture_die "cannot read GRUBSTAKE_VERSION from $GS"
+_out=$(gs "$r" check)
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+    fail "check exited non-zero on a poisoned cache it is honestly serving: $_out"
+elif [ "$_out" != "[grubstake] ok ($_want)" ]; then
+    fail "check's output was not exactly the ok line, so something claimed otherwise: $_out"
+else
+    pass
+fi
 
 it "no source file claims to detect tampering"
 # git grep, not a filesystem grep with --include filters: the shipped hooks and the workflow YAML
@@ -3255,12 +3279,12 @@ if [ "$NETWORK" = 1 ]; then
             fi
             _hi="$(printf '%s\n%s\n' "$_tag" "$_cand" | LC_ALL=C sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"
             if [ "$_hi" = "$_tag" ]; then
-                fail "v$_tag is newer than the candidate $_cand -- the candidate needs a version bump"
+                fail "v$_tag is newer than the candidate $_cand -- the candidate is behind a tagged release"
                 continue
             fi
             r=$(new_repo)
             rm -f "$r/grubstake.sh"
-            if ! curl -fsSL "https://raw.githubusercontent.com/seriouslysean/grubstake/v$_tag/grubstake.sh" -o "$r/grubstake.sh" 2>/dev/null; then
+            if ! curl -fsSL --retry 3 --retry-all-errors "https://raw.githubusercontent.com/seriouslysean/grubstake/v$_tag/grubstake.sh" -o "$r/grubstake.sh"; then
                 fail "v$_tag: could not fetch its own grubstake.sh"
                 continue
             fi
@@ -3299,10 +3323,15 @@ esac
 exec "$_realgit" "\$@"
 SHIM
             chmod +x "$_shims/curl" "$_shims/git" || fixture_die "cannot make the old-client shims executable for v$_tag"
-            _updout=$(cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh update 2>&1)
+            # A bare update stays within its own major, so a tag whose major differs from the candidate's needs its own explicit-version update (supported from v0.3.0) to reach it.
+            if [ "${_tag%%.*}" = "${_cand%%.*}" ]; then
+                _updout=$(cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh update 2>&1)
+            else
+                _updout=$(cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh update "$_cand" 2>&1)
+            fi
             _updrc=$?
             if [ "$_updrc" -ne 0 ]; then
-                fail "v$_tag: its own bare update exited $_updrc: $_updout"
+                fail "v$_tag: its own update to $_cand exited $_updrc: $_updout"
                 continue
             fi
             if ! cmp -s "$r/grubstake.sh" "$GS"; then
@@ -4871,22 +4900,27 @@ it "install exhausting a genuinely stale git-config lock still blames the lock, 
 # contention is real and simply never clears (its holder crashed, say) -- the die still has to name
 # the lock, not go silent or say something fabricated, once the budget genuinely runs out.
 #
-# A count proves the loop ran to its real end (51 attempts, the same -gt 50 budget with_lock uses) rather than a shortened one, without depending on how long any one attempt's sleep actually took.
+# A count proves the loop ran to its real end (51 attempts, the same -gt 50 budget with_lock uses) rather than a shortened one, and a shimmed sleep logging 50 calls of 0.1 proves the backoff itself is still there, without paying for 50 real pauses or depending on how long any one attempt's sleep actually took.
 r=$(new_repo)
 _shims="$(mktemp -d "$ROOT/no-net-lock-stale.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
 printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' >"$_shims/curl"
 chmod +x "$_shims/curl"
 _counter="$_shims/git-count"
 git_count_shim "$_shims" "$_counter"
+_sleeplog="$_shims/sleep-log"
+sleep_log_shim "$_shims" "$_sleeplog"
 : >"$r/.git/config.lock" || fixture_die "cannot plant a genuine git-config lock in $r"
 _out=$(cd "$r" && PATH="$_shims:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh install 2>&1)
 _rc=$?
 rm -f "$r/.git/config.lock" 2>/dev/null
 _count=$(wc -l <"$_counter" | tr -d ' ')
+_slcount=$(wc -l <"$_sleeplog" | tr -d ' ')
 if [ "$_rc" -eq 0 ]; then
     fail "install exited 0 despite a git-config lock that was never released: $_out"
 elif [ "$_count" -ne 51 ]; then
     fail "the hooksPath write was attempted $_count times instead of exhausting the full 51-attempt budget: $_out"
+elif [ "$_slcount" -ne 50 ] || grep -qv '^0\.1$' "$_sleeplog"; then
+    fail "the backoff slept $_slcount times instead of the full 50-sleep budget of 0.1 each: $_out"
 elif ! printf '%s' "$_out" | grep -qi "lock"; then
     fail "exhausted the retry budget without naming the lock as the cause: $_out"
 else
@@ -6549,7 +6583,7 @@ it "add's pins lock still reports a genuine holder when the directory is intact"
 # needed, the same static-plant technique #67's sibling lock test used. Exit and message alone do
 # not prove the retry budget was honestly exhausted rather than skipped (a "> 0" in place of the
 # real "> 50" would still exit non-zero and still say "locked by another run" on its very first
-# retry) -- a count of every real attempt is what actually distinguishes a full 51-attempt budget from a gutted one.
+# retry) -- a count of every real attempt is what actually distinguishes a full 51-attempt budget from a gutted one, and a shimmed sleep logging 50 calls of 0.1 proves the backoff itself is still there without paying for 50 real pauses.
 r=$(new_repo)
 fake_release "$r" 1.0.0 >/dev/null
 _lockdir="$r/grubstake.tools.lock"
@@ -6557,9 +6591,12 @@ mkdir -p "$_lockdir" || fixture_die "cannot plant the stale pins lock"
 _shim="$(mktemp -d "$ROOT/lock-count.XXXXXX")" || fixture_die "cannot create the lock-count shim dir"
 _counter="$_shim/count"
 lock_count_shim "$_shim" "$_counter" '*grubstake.tools.lock'
+_sleeplog="$_shim/sleep-log"
+sleep_log_shim "$_shim" "$_sleeplog"
 _out=$(cd "$r" && PATH="$_shim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
 _rc=$?
 _count=$(wc -l <"$_counter" | tr -d ' ')
+_slcount=$(wc -l <"$_sleeplog" | tr -d ' ')
 rm -rf "$_lockdir" 2>/dev/null
 if [ "$_rc" -eq 0 ]; then
     fail "add exited 0 despite a pins lock genuinely held by another run: $_out"
@@ -6567,6 +6604,8 @@ elif ! printf '%s' "$_out" | grep -q "locked by another run"; then
     fail "genuine contention was not reported as locked by another run: $_out"
 elif [ "$_count" -ne 51 ]; then
     fail "add attempted the pins lock $_count times instead of exhausting the full 51-attempt budget: $_out"
+elif [ "$_slcount" -ne 50 ] || grep -qv '^0\.1$' "$_sleeplog"; then
+    fail "add's backoff slept $_slcount times instead of the full 50-sleep budget of 0.1 each: $_out"
 else
     pass
 fi

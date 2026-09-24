@@ -8111,7 +8111,7 @@ doc_install_versions() {
 }
 
 it "GRUBSTAKE_VERSION matches every install-snippet version in README.md and ADOPTING.md"
-# fetch_release skips a tag whose bytes disagree with its name (CONTRIBUTING's release step 3), so
+# fetch_release skips a tag whose bytes disagree with its name (the release skill's bump step), so
 # a doc pinning the wrong version would not fail a release; it would just ship a bad instruction.
 # Every match is walked, not just the first: a doc carrying a second, stale snippet -- a leftover
 # pasted example, an unfinished bump -- must not pass on the strength of whichever occurrence a

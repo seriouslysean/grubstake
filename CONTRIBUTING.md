@@ -89,16 +89,7 @@ for rules this repo would have to author regardless.
 
 ## Releasing
 
-1. `test/scan-for-leaks.sh --all` passes. The commit-msg hook reads one message at a time, so
-   history as a whole is checked here or not at all.
-2. `test/run.sh --network` passes.
-3. Bump `GRUBSTAKE_VERSION` in `grubstake.sh`, and the version in the install snippets in
-   `README.md` and `ADOPTING.md`.
-4. Merge the pull request.
-5. Confirm local `main` matches `origin/main`, and that the commit you are about to tag declares
-   the version you are about to tag it as. A release was once cut from a stale local `main` and
-   published a tag whose script identified as the previous version.
-6. Tag `vX.Y.Z`, push the tag, publish a release naming the issues it closes.
+The release procedure is [`.claude/skills/gst-release/SKILL.md`](.claude/skills/gst-release/SKILL.md).
 
 Tags are annotated, so `git clone --branch vX.Y.Z` prints `refs/tags/... is not a commit!` and
 then checks out the commit the tag points at. That is git dereferencing a tag object and is
@@ -106,8 +97,7 @@ expected; the checkout is correct.
 
 Tags matching `v*` are protected against deletion, update, and force-push, so a published tag
 cannot move silently. A release that may have been consumed is never corrected in place, and a
-mistake there costs a patch version. Deleting and re-cutting through the admin bypass is reserved
-for a release known to be unconsumed.
+mistake there costs a patch version.
 
 `main` is protected the same way, so a rewrite requires disabling the ruleset first.
 

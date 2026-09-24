@@ -14,7 +14,7 @@ Rules for working in this repo.
 10. Write POSIX `sh` and avoid bashisms, because these scripts run under `dash` in CI.
 11. Keep everything repo-agnostic, so no app names, schemes, bundle identifiers, or paths appear here.
 12. Never name a consuming repo anywhere in this repository, including in comments.
-13. Keep comments to a single line, and explain why rather than what.
+13. Keep comments to a single line.
 14. Prove that a gate fails on known-bad input before trusting it to pass, and keep that proof as a test.
 15. Remember that a gate which never fires looks exactly like one that passes.
 16. Make hooks fail loudly or not at all, and never let one skip silently.
@@ -25,7 +25,7 @@ Rules for working in this repo.
 21. Leave anything that changes for repo-local reasons in the repo that owns it.
 22. Ship a fix with a test you have watched fail without it, because a fix verified once by hand is a fix that can be broken silently by the next one.
 23. A comment states a constraint the code cannot show, and never what the next line does or why a change is correct.
-24. Write terse and factual prose, and never pad it with filler, preamble, or motivational opener.
+24. Write terse and factual prose.
 25. Keep the orchestrating session to routing and judgement, and dispatch implementation and review to the project agents where a harness provides them.
 26. Run the adversarial pass over concurrency, portability, and published prose before reporting work done, because the suite only re-proves past failures.
 27. State the reason in one sentence when dispatching above an agent's pinned model, since escalation is a decision rather than a default.

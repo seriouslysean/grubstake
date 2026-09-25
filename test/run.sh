@@ -339,7 +339,7 @@ SHIM
 
 # Pauses "git" only on cmd_install's own hooksPath write ("git -C <root> config core.hooksPath
 # .githooks", five arguments exactly), never the read earlier in the same command ("git -C <root>
-# config --path --get core.hooksPath", six arguments, no value) -- pausing that one too would
+# config --show-scope --path --get core.hooksPath", seven arguments, no value) -- pausing that one too would
 # strand the caller before it ever reaches the call under test. Each paused invocation writes
 # "$_reached.$GST_LABEL", a label the caller sets per racer (GST_LABEL=1, GST_LABEL=2), not a pid:
 # measured directly against git's own lock (not through a full "install"), a poll-with-sleep
@@ -509,8 +509,7 @@ fi
 printf '\nplatform\n'
 
 it "a non-x86_64 Linux is refused by name, not silently installed as amd64"
-# rc alone does not discriminate: `ensure` exits non-zero either way. The two guard-only properties
-# asserted are the arch named on stderr and no "downloading" line.
+# rc alone does not discriminate, since a guard-stripped run still fails at the blocked curl, which also keeps it off the network; only the guard names aarch64 and never logs "downloading".
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 _unameshim="$r/uname-shim"
@@ -541,8 +540,7 @@ else
 fi
 
 it "ensure on an unsupported arch fails with the guard's own error, not an empty-platform skip"
-# install_tool must stop at the platform guard rather than log a per-tool skip for an empty platform.
-# The fixture pins only swiftlint, since periphery's genuine linux gap logs the same "not published for" line.
+# install_tool must stop at the platform guard, and only swiftlint is pinned since periphery's genuine linux gap logs the same "not published for" line.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 _unameshim="$r/uname-shim"
@@ -575,7 +573,7 @@ else
 fi
 
 # Shared by every remaining #70 site test below: the same uname stand-in as the two tests above,
-# factored out because three more call sites now need it. Not backported into those two: they are
+# factored out because four more call sites now need it. Not backported into those two: they are
 # already reviewed and passing, and this section's rule is add coverage, not churn proven tests.
 uname_arch_shim() {
     mkdir -p "$1" || fixture_die "cannot create the uname shim dir"
@@ -671,8 +669,7 @@ else
 fi
 
 it "doctor on an unsupported arch reports fully, then fails, without a stray guard message leaking past its report"
-# GRUBSTAKE_CACHE is left unset so cache_root's own platform check is reached, and the report must
-# render in full, stderr-clean, before doctor exits non-zero.
+# Relies on the runner's environment leaving GRUBSTAKE_CACHE unset, since only then does cache_root's platform check run; the report must render in full and stderr-clean before doctor exits non-zero.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 _unameshim="$r/uname-shim"
@@ -1181,14 +1178,7 @@ rm -f "$r/.cache/swiftlint/$SHA_A/swiftlint"
 expect_fail "$r" check
 
 it "an install does not verify when the archived binary itself exits nonzero"
-# reported_version's pipeline (tool | head | sed | tr) returns tr's exit status, not the tool's own.
-# A binary that prints the pinned version and then fails still satisfies the assertion inside
-# install_tool, so a tool that cannot actually run is published and reported installed anyway. This
-# is the check AGENTS.md rule 3 exists for: the hash proves what arrived, and this is supposed to
-# prove it runs. fake_install cannot reach this: it writes straight into the hash-named cache
-# directory and never calls install_tool, so reported_version never runs; fake_release drives the
-# real download-hash-extract-publish path against a fixture that reports the pinned version and
-# then exits 42, offline.
+# reported_version must check the tool's own exit status, since a pipeline reports tr's, or a binary that prints the pinned version then fails is published; fake_release, since fake_install never runs it.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2 42)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -1226,14 +1216,7 @@ else
 fi
 
 it "a partial cache directory does not wedge ensure"
-# publish_dir treats any existing destination as a finished, concurrent install and discards the
-# freshly downloaded, hash-verified staging instead of publishing into it. An interrupted publish, a
-# stray mkdir, or a cache layout change across versions all leave exactly this: a destination that
-# exists but holds no binary. ensure is documented to repair that, and today it cannot -- it dies
-# "install incomplete" and every retry repeats it. fake_install cannot exercise this: it writes the
-# binary straight to the hash-named directory and never calls install_tool, so publish_dir never
-# runs. fake_release is what makes install_tool's real download-hash-extract-publish path run
-# offline, against a fixture instead of the network.
+# A destination that exists without its binary is debris from an interrupted publish, so ensure must clear it and publish rather than die "install incomplete"; fake_release, since fake_install never runs publish_dir.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -1308,8 +1291,7 @@ else
 fi
 
 it "an unremovable partial directory fails loudly instead of nesting the staging"
-# publish_dir's chmod -R u+w cannot restore search permission it was never asked to add, so the debris
-# survives rm -rf, and mv would nest the staging inside it, since macOS has no mv -T.
+# chmod -R u+w cannot restore a search bit it was never asked to add, so the debris survives rm -rf and a bare mv would nest the staging inside it, since macOS has no mv -T.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -1868,8 +1850,7 @@ else
 fi
 
 it "ensure blames an unreadable ancestor honestly, not a cache that was never removed"
-# An untraversable ancestor must be named as a permission failure, not a removed cache; the mkdir
-# shim flips it only at the lock attempt, after install_tool's earlier -x check.
+# An untraversable ancestor must read as a permission failure, not a removed cache; the plant flips it at the lock mkdir because a pre-chmod would fail install_tool's earlier -x check instead.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
@@ -1985,7 +1966,7 @@ fake_receipt() {
 # or truncated extraction is a harness fault, not a result, so it stops the run.
 #
 # publish_dir consults neither entry_verified nor a receipt: its winner rule is bare executable
-# existence, deliberately, after three antagonist rounds fought over exactly this -- a mismatch is
+# existence, deliberately -- a mismatch is
 # surfaced by install_tool's own deeper pass before publish_dir is ever reached, never repaired by
 # publish_dir itself, so a live binary is never cleared out from under a concurrent reader. That
 # keeps with_lock and publish_dir the whole call graph; neither reaches sha256_file, receipt_file,
@@ -2005,8 +1986,7 @@ extract_fns() {
 }
 
 it "ensure refuses a binary that no longer matches its receipt, rather than reinstalling over it"
-# A concurrent exec of the same hash path must never see it vanish, so ensure refuses and tells the
-# human how to recover instead of touching the entry.
+# A concurrent exec of the same hash path must never see it vanish, so ensure refuses and names how to recover instead of touching the entry.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -2133,15 +2113,14 @@ else
 fi
 
 it "check is not blocked by an entry that predates receipts"
-# The incident guard from CONTRIBUTING.md's "When a fix changes behaviour on upgrade": verify_tool/check stay
-# existence-only, so a receiptless legacy entry must pass check without waiting for ensure to re-touch it.
+# Per CONTRIBUTING.md's "When a fix changes behaviour on upgrade", check stays existence-only, so a receiptless legacy entry must pass it before any ensure re-touches it.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A" # no receipt: exactly what a pre-receipt release left behind
 expect_ok "$r" check
 
 it "publish_dir never clears an entry whose binary exists"
-# Inverted after the design correction above: publish_dir no longer repairs a mismatched-receipt
+# publish_dir never repairs a mismatched-receipt
 # winner in place -- that destroy-then-republish is exactly what opened the ENOENT window for a
 # concurrent repo (see "two repos sharing one cache: a legacy upgrade must not break a concurrent
 # exec" below). The winner rule is executable-presence alone now, same as before receipts existed; a
@@ -2442,9 +2421,8 @@ if [ "$_rc" -eq 0 ]; then
 elif ! printf '%s' "$_out" | grep -F -q "$_lockdir"; then
     fail "the lock failure was reported without naming swiftlint's lock: $_out"
 elif [ ! -f "$_fmt_receipt" ]; then
-    # The diagnostic records swiftformat's entry and lock state, to tell contention from an unrelated mkdir failure.
+    # Reached on the regression, or on swiftformat's own uncontended lock mkdir failing under load; the entry and lock state in the message tell the two apart.
     fail "ensure stopped at swiftlint's lock instead of continuing: swiftformat was never reached, no receipt recorded (swiftformat entry: $(ls -la "$r/.cache/swiftformat" 2>&1 | tr '\n' ';'); its lock: $([ -d "$r/.cache/swiftformat/$SHA_B.lock" ] && echo present || echo absent)): $_out"
-# swiftformat's own backfill line is the evidence it was reached, and no ok line may appear on this red run.
 elif ! printf '%s' "$_out" | grep -F -q "swiftformat 0.61.1: recorded a receipt for the existing entry"; then
     fail "ensure's own output shows no sign swiftformat was reached after swiftlint's lock failure: $_out"
 elif printf '%s' "$_out" | grep -q '^\[grubstake\] ok ('; then
@@ -2554,8 +2532,7 @@ rm -rf "$_lockdir" 2>/dev/null
 printf '\ncache integrity: shared cache\n'
 
 it "two repos sharing one cache: a legacy upgrade must not break a concurrent exec"
-# Repo A execs the shared binary for the whole of repo B's ensure, and the catch is probabilistic,
-# so a green run shows only that this run hit no destroy-in-place window.
+# Repo A execs the shared binary throughout repo B's ensure; the catch is probabilistic, so a green run shows only that this run hit no destroy-in-place window.
 a=$(new_repo)
 b=$(new_repo)
 _shared="$ROOT/shared-cache.$$"
@@ -2778,12 +2755,7 @@ pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
 expect_says_fail "unknown tool: swiftlint|x" "$r" path 'swiftlint|x'
 
 it "path rejects a tool name that known_tools' regex check would silently let through"
-# known_tools | grep -qw "$1" treats the name as a basic regular expression, so a "." in
-# "swift.int" matches any character and passes the guard meant to reject it. Nothing must be
-# pinned under a name grep -qw would also match against "swift.int" (that includes "swiftlint"
-# itself, since pin_field's own lookup is grep -E "^$1[[:space:]]"), or path finds a pin, calls
-# tool_url, and dies there instead -- accidentally closing over the guard's own job with the
-# wrong evidence. periphery is pinned instead so path's guard is what has to reject this alone.
+# A regex match in is_known_tool would pass "swift.int", and a pinned swiftlint would let tool_url's own "unknown tool" death pass this test anyway, so only periphery is pinned.
 r=$(new_repo)
 pins "$r" "periphery 3.7.4 $SHA_A $SHA_A"
 _out=$(gs "$r" path swift.int)
@@ -2925,8 +2897,7 @@ _v=$("$r/target.sh" version 2>/dev/null)
 [ "$_v" = "$(gs "$(new_repo)" version)" ] && pass || fail "the shim did not replace the target (got '$_v')"
 
 it "the legacy handoff verb replaces the script and stops, without running the replacement"
-# The verb must replace the target and stop without running it. The replacement is a copy of $0, so
-# the marker lives in the invoking script, gated on an "ensure" argument only the auto-ensure supplies.
+# The replacement is a copy of $0, so the marker lives in the invoking script, gated on an "ensure" argument only an auto-ensure would supply.
 r=$(new_repo)
 _fn="$(sed -n '/^cmd_legacy_replace() {/,/^}/p' "$GS")"
 printf '%s\n' "$_fn" | grep -q '^cmd_legacy_replace() {$' \
@@ -3242,8 +3213,7 @@ else pass; fi
 chmod -R u+w "$r" 2>/dev/null
 
 it "a race loser's staging cleanup that rm cannot finish is reported in grubstake's voice, not raw rm stderr"
-# A loser whose staging rm cannot finish must report it in grubstake's voice; lock_pause_shim holds
-# the loser at its lock while the winner publishes, and the plant makes the loser's staging half-unremovable.
+# The winner branch needs a real race, since install_tool skips publish once the binary exists: lock_pause_shim holds the loser at its lock while the winner publishes, and the plant half-locks the loser's staging.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -3353,8 +3323,7 @@ elif [ -d "$r/t.lock" ]; then
 else pass; fi
 
 it "a signal landing while write_receipt holds the lock does not strand it"
-# A signal while write_receipt holds the lock must still release it; mv_pause_shim holds the
-# receipt rename so the kill lands with the lock held, and the orphaned shim is reaped.
+# exec makes $! grubstake.sh itself, so the kill lands while mv_pause_shim holds the receipt rename under the lock; the orphaned shim is then killed.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
@@ -3407,9 +3376,7 @@ fi
 rm -rf "$_lockdir" 2>/dev/null
 
 it "a signal landing while publish_dir holds the lock does not nest the staging install_tool's own trap names"
-# with_lock must restore install_tool's own trap rather than clobber it, or a signal mid-publish
-# leaves the staging it names; this test cannot also catch a stranded lock, which the write_receipt
-# test covers; mv_pause_shim is gated on the publish destination.
+# with_lock must restore install_tool's trap rather than clobber it, or a signal mid-publish leaves the staging it names; the lock check below separately catches a with_lock with no trap.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -3504,7 +3471,7 @@ top=$(printf '0.2.0\n0.10.0\n0.9.9\n' | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3n
 # tag -- alongside three well-formed releases, including the classic double-digit trap (0.10.0 above
 # 0.9.9 lexically fails, numerically it must not). Unfiltered, "1.2.3-beta" sorts on key1=1, which
 # outranks every 0.x release below it, and a leading non-numeric field reads as 0 -- exactly the
-# wrong-sort the issue describes, and exactly what grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' exists to prevent
+# wrong sort, and exactly what grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' exists to prevent
 # before either site's sort ever sees these values.
 git_tags_shim() {
     mkdir -p "$1" || fixture_die "cannot create the git shim dir"
@@ -4446,9 +4413,7 @@ done
 [ -z "$_bad" ] && pass || fail "is_known_hook_hash does not recognize the current embedded hash for:$_bad"
 
 it "two concurrent installs against the same refresh-eligible repo do not race each other's tmp"
-# Two installs pinned together at the hooksPath write by git_pause_shim must neither corrupt each
-# other's hook tmp files nor leak a raw tool error; hooksPath is unset each iteration so every round
-# reaches that write; the hook-tmp half is a natural race, so a clean run proves only itself.
+# git_pause_shim forces the hooksPath-write collision every round, but the hook-tmp race before it is natural, so a clean run proves only itself.
 r=$(new_repo)
 _shims="$(mktemp -d "$ROOT/no-net-concurrent-install.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
 printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' >"$_shims/curl"
@@ -4709,8 +4674,7 @@ else
 fi
 
 it "a repository path containing the discriminator's own match text does not turn a git permission denial into contention"
-# With GIT_DIR exported, git names the full config path, so a repository path containing "File
-# exists" must not read as contention; GIT_DIR is exported into install's own environment.
+# An exported GIT_DIR makes git's lock error carry the repository path, so a path containing "File exists" must still read as a permission failure, not contention.
 r="$ROOT/gitdir-collision.$$/File exists.repo"
 mkdir -p "$r" || fixture_die "cannot create $r"
 (cd "$r" && git init -q .) || fixture_die "git init failed in $r"
@@ -5750,11 +5714,7 @@ else
 fi
 
 it "post-commit stays quiet on a poisoned LATEST cache rather than comparing it against a well-formed CURRENT"
-# #71's sharper case: LATEST is filtered by grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' when the background
-# refresh writes it, but read back raw from the cache file with no re-validation, so a poisoned or
-# stale cache carries anything into the same unguarded comparison. This is worse than scenario 1: the
-# advisory below would name a version no tag filter could ever have produced, not merely an
-# unvalidated-but-plausible one.
+# LATEST is read back raw from a writable cache, so post-commit must re-validate it before comparing, or a poisoned cache names a version no tag filter could have produced.
 r=$(new_hook_repo)
 latest_cache "$r" "99.0.0-dev"
 _c0=$(commits "$r")
@@ -6140,8 +6100,7 @@ else
 fi
 
 it "conflict markers introduced while add is still fetching are not merged into the rewrite"
-# Markers landing while add is fetching must be caught by the check add makes after taking its
-# lock; the curl shim writes them on its first call and snapshots the file.
+# Markers landing mid-fetch must be caught by the validation add repeats once it holds its lock; the curl shim writes them on its first call and snapshots the file for the byte compare.
 r=$(new_repo)
 _pins_path="$r/grubstake.tools"
 pins "$r" "periphery 3.7.4 $SHA_A $SHA_A"
@@ -6216,8 +6175,7 @@ fi
 # the same message either way, so the check test above covers the discriminating call site.
 
 it "add's pins lock fails fast naming the vanished directory, not a phantom holder"
-# A repo renamed away while add waits at its pins lock must fail fast naming the vanished directory;
-# the pause is narrowed to grubstake.tools.lock because install_tool's cache lock comes first.
+# A repo renamed away while add waits at its pins lock must fail fast naming the vanished directory; the pause matches grubstake.tools.lock since install_tool's cache lock comes first.
 r=$(new_repo)
 _sha=$(fake_release "$r" 1.0.0)
 # Under $ROOT, not $r: $r is renamed away below, and a shim (or counter) that moved with it would go unresolvable via PATH, silently hiding a retry instead of counting it.
@@ -6329,8 +6287,7 @@ else
 fi
 
 it "add blames an unreadable ancestor honestly, not a repository that was never removed"
-# An untraversable ancestor of the repo must read as a permission failure, not a removed repo; the
-# mkdir shim flips the gate only at the pins lock, after add's download.
+# An untraversable ancestor must read as a permission failure, not a removed repo; the gate is flipped at the grubstake.tools.lock mkdir, since a pre-chmod blocks the run itself and install_tool's cache lock comes first.
 r=$(new_gated_repo)
 _gate="$(dirname "$r")"
 fake_release "$r" 1.0.0 >/dev/null
@@ -6386,8 +6343,7 @@ else
 fi
 
 it "an unreadable pins file is left alone, not collapsed down to the one new pin"
-# `add` must never collapse an unreadable pins file to the one new pin; validate_pins' own read may
-# refuse first, so the grep-shim test below covers add's rewrite without that dependency.
+# validate_pins' own read may refuse an unreadable file before add's rewrite runs, so the grep-shim test below is what covers the rewrite itself.
 r=$(new_repo)
 pins "$r" "periphery 3.7.4 $SHA_A $SHA_A
 swiftformat 0.61.1 $SHA_B $SHA_B"
@@ -6420,9 +6376,7 @@ it "the first pin still lands when the pins file starts empty or absent"
 # along with the genuine failure it is meant to catch. Two distinct starting shapes: "absent"
 # exercises the header-line creation at add_one's own "[ -f \"\$_pins\" ] || printf ..."; "empty"
 # (an existing, zero-byte file) skips that write and is the shape the contract's own exception
-# ("unless the original genuinely had none") has to cover. Watched green on unfixed code, on
-# purpose: the "|| true" this issue removes exists to make exactly this case work, and this is the
-# regression guard that must stay green once the fix lands, not a defect this issue is proving.
+# ("unless the original genuinely had none") has to cover.
 _bad=""
 for _case in absent empty; do
     [ -z "$_bad" ] || break
@@ -6437,8 +6391,7 @@ done
 if [ -n "$_bad" ]; then fail "add over an $_bad"; else pass; fi
 
 it "a rewrite that silently drops unrelated pins is refused, not just one that cannot read the file"
-# The grep shim makes add's first rewrite grep select nothing, as a real empty match does, so only
-# the pin-count check can refuse the dropped pins; the sentinel proves the shim fired.
+# The grep shim makes add's rewrite grep exit 1 with no output, exactly as a real empty match does, so only the pin-count check can refuse; the sentinel proves the shim fired.
 r=$(new_repo)
 pins "$r" "periphery 3.7.4 $SHA_A $SHA_A
 swiftformat 0.61.1 $SHA_B $SHA_B"
@@ -6552,7 +6505,7 @@ else
 fi
 
 it "a signal after add_one releases its pins lock but before disarming its trap does not delete a successor's lock"
-# Simulates a second add's mkdir reclaiming $_lockdir between this run's own rmdir and disarm; guarded to fire once so a repeat rmdir on this same path does not re-signal the parent.
+# add_one must disarm before its rmdir: the shim reclaims $_lockdir as a successor would right after that rmdir and signals, firing once so a repeat rmdir does not re-signal.
 r=$(new_repo)
 fake_release "$r" 1.0.0 >/dev/null
 _lockdir="$r/grubstake.tools.lock"
@@ -7407,7 +7360,7 @@ wait_for_marker() {
 }
 
 it "a plain commit in an adopted repo never reaches the network for the post-commit refresh"
-# #137: asserting only that the stamp's second line came back empty proved nothing answered, which an offline machine also produces unfixed; the shim below proves no dial-out was even attempted.
+# #137: an empty stamp line is also what an offline machine produces, so only the remote-helper shim proves no dial-out was attempted.
 r=$(adopted_repo)
 _shim=$(remote_helper_shim)
 _lookup=$(lookup_shim)
@@ -7697,9 +7650,7 @@ _wf="$REPO/.github/workflows/network.yml"
 grep -qE '^[[:space:]]*workflow_dispatch:' "$_wf" && pass || fail "workflow_dispatch is not declared in $_wf"
 
 it "the release skill dispatches the network workflow only after the tagged commit is known, comparing headSha in that same step"
-# Order is the property, so the SHA capture ("git rev-parse HEAD") must precede the dispatch
-# ("gh workflow run <name>"); the literal word "headSha" must appear in the dispatch's own step. A
-# reworded enforcement sentence cannot be detected, so only the word's presence is pinned.
+# Anchored on commands, not step numbers or headings, which change: `git rev-parse HEAD` must precede `gh workflow run <name>`, and that step must say "headSha", which its --json flag alone still satisfies.
 _wf="$REPO/.github/workflows/network.yml"
 _skill="$REPO/.claude/skills/gst-release/SKILL.md"
 [ -f "$_wf" ] || fixture_die "cannot find $_wf"

@@ -4042,20 +4042,24 @@ fi
 it "install dies naming a core.hooksPath it cannot read, rather than exiting on git's raw status"
 # The stderr-only re-read on this branch is itself a fallible git invocation under set -eu; a bare
 # assignment failing here would exit on git's own raw status before the die message it exists to print.
-# Some git releases refuse this value during repository discovery and others only on the later read.
+# On a git that refuses this value during repository discovery, repo_root dies before the guard under test runs.
 r=$(new_repo)
 (cd "$r" && git config core.hooksPath "~nosuchuser/hooks") || fixture_die "cannot seed core.hooksPath in $r"
-_out=$(gs "$r" install)
-_rc=$?
-if [ "$_rc" -eq 0 ]; then
-    fail "install accepted a core.hooksPath it could not read: $_out"
-elif [ -d "$r/.githooks" ]; then
-    fail "install wrote .githooks before refusing: $_out"
+if ! (cd "$r" && git rev-parse --show-toplevel) >/dev/null 2>&1; then
+    printf '  skip  %s (this git refuses core.hooksPath during discovery)\n' "$CURRENT"
 else
-    case "$_out" in
-        *"~nosuchuser/hooks"*"cannot resolve the repository root"* | *"cannot read core.hooksPath"*"~nosuchuser/hooks"*) pass ;;
-        *) fail "install exited without naming the unreadable core.hooksPath: $_out" ;;
-    esac
+    _out=$(gs "$r" install)
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+        fail "install accepted a core.hooksPath it could not read: $_out"
+    elif [ -d "$r/.githooks" ]; then
+        fail "install wrote .githooks before refusing: $_out"
+    else
+        case "$_out" in
+            *"cannot read core.hooksPath"*"~nosuchuser/hooks"*) pass ;;
+            *) fail "install exited without naming the unreadable core.hooksPath: $_out" ;;
+        esac
+    fi
 fi
 
 it "install and doctor relay git's own reason when git cannot read the repository"
@@ -5968,20 +5972,24 @@ it "doctor names a core.hooksPath it cannot read instead of grading it as unset"
 # ~nosuchuser/hooks fails git's own user-dir expansion (rc 128, not rc 1 for unset) -- doctor's own
 # read discarded every nonzero status, which graded that failure the same as .githooks. #148 makes a
 # read failure a reported problem, so doctor now fails here too, rather than passing while unable to say so.
-# Some git releases refuse this value during repository discovery and others only on the later read.
+# On a git that refuses this value during repository discovery, repo_root dies before the guard under test runs.
 r=$(new_repo)
 (cd "$r" && git config core.hooksPath "~nosuchuser/hooks") || fixture_die "cannot seed core.hooksPath in $r"
-_out=$(gs "$r" doctor)
-_rc=$?
-if [ "$_rc" -eq 0 ]; then
-    fail "doctor exited 0 despite failing to read core.hooksPath: $_out"
+if ! (cd "$r" && git rev-parse --show-toplevel) >/dev/null 2>&1; then
+    printf '  skip  %s (this git refuses core.hooksPath during discovery)\n' "$CURRENT"
 else
-    case "$_out" in
-        *"hooksPath  (unset)"*) fail "doctor graded an unreadable core.hooksPath as unset: $_out" ;;
-        *"not installed"* | *"DRIFTED"*) fail "doctor graded hooks despite failing to read core.hooksPath: $_out" ;;
-        *"~nosuchuser/hooks"*"cannot resolve the repository root"* | *"cannot read core.hooksPath"*"~nosuchuser/hooks"*) pass ;;
-        *) fail "doctor did not name the unreadable core.hooksPath: $_out" ;;
-    esac
+    _out=$(gs "$r" doctor)
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+        fail "doctor exited 0 despite failing to read core.hooksPath: $_out"
+    else
+        case "$_out" in
+            *"hooksPath  (unset)"*) fail "doctor graded an unreadable core.hooksPath as unset: $_out" ;;
+            *"not installed"* | *"DRIFTED"*) fail "doctor graded hooks despite failing to read core.hooksPath: $_out" ;;
+            *"cannot read core.hooksPath"*"~nosuchuser/hooks"*) pass ;;
+            *) fail "doctor did not name the unreadable core.hooksPath: $_out" ;;
+        esac
+    fi
 fi
 
 it "doctor grades an absolute hooksPath naming its own directory as adopted"

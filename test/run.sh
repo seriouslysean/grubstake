@@ -3373,7 +3373,7 @@ done
 if [ -z "$_bad" ]; then pass; else fail "$_bad"; fi
 
 it "with_lock restores or clears the caller's trap before releasing the lock, so a second signal landing mid-release cannot delete a lock a successor has since taken"
-# INT, not TERM, is the reclaim signal: dash and bash both defer a second, identical signal while already running that signal's own trap, which would hide this exact ordering defect under a same-signal reclaim.
+# INT, not TERM, is the reclaim signal: bash defers a second, identical signal while that signal's own trap runs, which hides this ordering defect under a same-signal reclaim.
 # armed exercises with_lock's restore branch (arm_cleanup); none exercises its clear branch (disarm_cleanup) -- a defect confined to either branch alone reads as a pass under the other.
 _bad=""
 for _mode in armed none; do

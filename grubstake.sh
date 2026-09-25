@@ -1532,7 +1532,7 @@ below_floor() {
 release_tags() {
     GIT_TERMINAL_PROMPT=0 \
         git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 \
-        ls-remote --tags --refs "$GRUBSTAKE_REPO" 'v*' 2>/dev/null \
+        ls-remote --tags --refs "$GRUBSTAKE_REPO" 'v*' \
         | awk '{print $2}' | sed 's|refs/tags/v||' \
         | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
         | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr

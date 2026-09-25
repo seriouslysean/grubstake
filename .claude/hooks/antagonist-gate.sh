@@ -1,6 +1,7 @@
 #!/bin/sh
-# Stop hook: the antagonist gate. Blocks the turn from ending until an adversarial pass has
-# run over what the turn touched, per AGENTS.md 26.
+# Stop hook: the antagonist gate. Blocks the turn from ending until an adversarial pass has run
+# over what changed in $CLAUDE_PROJECT_DIR, per AGENTS.md 26; no other worktree of the repository
+# is read.
 #
 # Scope is mechanical rather than semantic, because a script cannot judge what a change meant:
 # touching grubstake.sh, .githooks/, .claude/hooks/, or a test/*.sh file needs

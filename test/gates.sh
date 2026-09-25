@@ -296,12 +296,12 @@ esac
 it "a shell path needing quoting still trips the scope check"
 # A path git must quote (a literal space) breaks an anchor that expects the raw path at column 0.
 rm -f "$MARKER" "$BLOCKS"
-mkdir -p "$R/hooks"
-printf 'x\n' >"$R/hooks/new hook.sh"
-(cd "$R" && git add "hooks/new hook.sh")
+mkdir -p "$R/.githooks"
+printf 'x\n' >"$R/.githooks/new hook"
+(cd "$R" && git add ".githooks/new hook")
 out=$(gate)
-(cd "$R" && git reset -q -- "hooks/new hook.sh")
-rm -rf "$R/hooks"
+(cd "$R" && git reset -q -- ".githooks/new hook")
+rm -rf "$R/.githooks"
 case "$out" in
     *'"decision":"block"'*gst-shell-critic*) pass ;;
     *) fail "got: $out" ;;

@@ -1,6 +1,5 @@
 # Shared by the antagonist gate and receipt hooks, and sourced rather than executed.
-# These are Claude Code hooks: hooks/ at the repo root is shipped product for consuming
-# repos, and this directory is development policy for this one. Keep them apart.
+# These are Claude Code hooks for developing this repo; the git hooks grubstake ships are embedded in grubstake.sh.
 
 # Field extraction good enough for the flat hook payload, whose values carry no quotes.
 json_field() { sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1; }

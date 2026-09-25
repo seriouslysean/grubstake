@@ -3,7 +3,7 @@
 # run over what the turn touched, per AGENTS.md 26.
 #
 # Scope is mechanical rather than semantic, because a script cannot judge what a change meant:
-# touching grubstake.sh, hooks/, .githooks/, .claude/hooks/, or a test/*.sh file needs
+# touching grubstake.sh, .githooks/, .claude/hooks/, or a test/*.sh file needs
 # gst-shell-critic, a gh issue/pr/release write in the transcript needs gst-leak-auditor, and
 # anything else passes untouched.
 #
@@ -36,7 +36,7 @@ transcript=$(printf '%s' "$INPUT" | json_field transcript_path)
 # need_kinds names the receipt kind(s) the marker must carry; a kind missing there is not a satisfied need.
 need=""
 need_kinds=""
-if changed_paths | grep -qE '^(grubstake\.sh$|hooks/|\.githooks/|test/[^/]*\.sh$|\.claude/hooks/)'; then
+if changed_paths | grep -qE '^(grubstake\.sh$|\.githooks/|test/[^/]*\.sh$|\.claude/hooks/)'; then
     need="gst-shell-critic over the shell changes"
     need_kinds="$(reviewer_kind gst-shell-critic)"
 fi

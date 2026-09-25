@@ -8,4 +8,4 @@ Read `AGENTS.md` for the full rules and `CONTRIBUTING.md` for the workflow. High
 - Pins are exact versions verified by hash. Never resolve "latest" unprompted, never update a pin automatically, never commit or open a pull request on the user's behalf.
 - The commit path stays off the network, and being offline is a reason to stay quiet rather than to fail.
 - Replace files by renaming, and leave the old version working until the new one is verified.
-- `hooks/` at the repo root is shipped product downloaded into consuming repos, not development policy for this one; that lives in `.claude/`.
+- The git hooks grubstake ships are embedded in `grubstake.sh`; `.githooks/` holds this repo's installed copy of them plus its own leak-scan gates, and `.claude/` holds its development policy.

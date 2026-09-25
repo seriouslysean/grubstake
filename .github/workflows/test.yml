@@ -1,7 +1,7 @@
 name: test
 
 # The suite exists so a fix cannot silently break an earlier fix, which only holds if something
-# other than memory runs it. This is the merge gate: offline only, seconds, no network, so
+# other than memory runs it. This is the merge gate: offline only, no network, so
 # nothing green depends on GitHub being reachable. The download tier is network.yml, on tags.
 
 on:
@@ -16,7 +16,7 @@ jobs:
   test:
     name: test (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
-    # The suite takes about 1.5 minutes on the Linux runner and 3.5 on macOS; well past that means the run itself is stuck, not slow.
+    # The suite takes about 1.5 minutes on Linux and 3.5 on macOS; well past that means the run itself is stuck, not slow.
     timeout-minutes: 30
     strategy:
       # Both platforms report, because "it broke on the other one" is the answer worth having.

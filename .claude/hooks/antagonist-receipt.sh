@@ -56,8 +56,10 @@ msg_has() {
 # malformed payload carrying no tool_input.message at all, which reads the same as empty.
 [ -z "$MSG" ] && block "Return the work product: the result was empty."
 
-# The orchestrator deduplicates on rule ids, so output without them cannot be merged.
-check() { msg_has "$2" || msg_has "No findings." || block "$1 must return findings carrying its rule ids, or exactly: No findings."; }
+# The orchestrator deduplicates on rule ids, so output without them cannot be merged. A finding
+# line is "[SEVERITY] rule-id -- ..."; "] id-" anchors on that bracket, since the bare id is also
+# a loose substring of the header itself (e.g. "gst-leak-auditor." contains "leak-").
+check() { msg_has "] $2" || msg_has "No findings." || block "$1 must return findings carrying its rule ids, or exactly: No findings."; }
 
 # The header must open the message: a name only present mid-prose is a mention, not a completed
 # pass. The trailing \n is the literal two-byte JSON escape for a newline, not a real one.
@@ -100,7 +102,7 @@ if [ "$agent_type" = gst-leak-auditor ] && first_line_header gst-leak-auditor; t
     mint=1
     add_kind "$(reviewer_kind gst-leak-auditor)"
 fi
-if msg_has "Reviewer: gst-shell-reviewer."; then check gst-shell-reviewer "shell-"; fi
+if [ "$agent_type" = gst-shell-reviewer ] && msg_has "Reviewer: gst-shell-reviewer."; then check gst-shell-reviewer "shell-"; fi
 
 if [ "$mint" -eq 1 ]; then
     session=$(printf '%s' "$INPUT" | json_field session_id)

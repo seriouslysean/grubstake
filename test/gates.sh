@@ -122,6 +122,35 @@ case "$out" in
     *) fail "got: $out" ;;
 esac
 
+it "an auditor header and prose alone is refused, not passed on the header's own substring"
+# #181: the header "gst-leak-auditor." itself contains "leak-", so a bare rule-id search used to pass here.
+rm -f "$MARKER" "$BLOCKS"
+out=$(receipt gst-leak-auditor 'Antagonist: gst-leak-auditor.\nLooks fine to me.')
+case "$out" in
+    *'"decision":"block"'*'gst-leak-auditor must return findings'*)
+        if [ ! -f "$MARKER" ]; then pass; else fail "a receipt was minted"; fi
+        ;;
+    *) fail "got: $out" ;;
+esac
+
+it "a reviewer header and prose alone is refused, not passed on the header's own substring"
+# #181: the header "gst-shell-reviewer." itself contains "shell-", so a bare rule-id search used to pass here.
+rm -f "$MARKER" "$BLOCKS"
+out=$(receipt gst-shell-reviewer 'Reviewer: gst-shell-reviewer.\nLooks fine to me.')
+case "$out" in
+    *'"decision":"block"'*'gst-shell-reviewer must return findings'*) pass ;;
+    *) fail "got: $out" ;;
+esac
+
+it "a handback that merely names the reviewer's header is not held to the reviewer's own check"
+# The reviewer check belongs to the reviewer: another agent quoting its header is not held to it.
+rm -f "$MARKER" "$BLOCKS"
+out=$(receipt gst-implementer 'Implemented the fix per Reviewer: gst-shell-reviewer. guidance; ran the suite green.')
+case "$out" in
+    *'"decision":"block"'*) fail "got: $out" ;;
+    *) pass ;;
+esac
+
 it "an unavailable antagonist records an advisory skip rather than passing silently"
 rm -f "$BLOCKS"
 (cd "$R" && "$RCPT" --skip "none available") >/dev/null
@@ -340,7 +369,7 @@ if command -v python3 >/dev/null 2>&1; then
         fail "settings.json failed to parse"
     fi
 else
-    pass
+    printf '  skip  %s (python3 not found)\n' "$CURRENT"
 fi
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"

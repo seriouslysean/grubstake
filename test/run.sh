@@ -13,7 +13,6 @@
 set -u
 
 GS="$(cd "$(dirname "$0")/.." && pwd)/grubstake.sh"
-HOOKS="$(cd "$(dirname "$0")/.." && pwd)/hooks"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SUITE_PID=$$
 NETWORK=0
@@ -169,6 +168,11 @@ gs_rc() {
 }
 
 pins() { printf '# grubstake pins: name version sha256-darwin sha256-linux\n%s\n' "$2" >"$1/grubstake.tools"; }
+
+# The begin/end marker lines are the extraction interface shared with grubstake.sh, and install strips them, so they must never reach an installed hook.
+extract_embedded_hook() {
+    sed -n "/^# gst-embedded-hook-begin: $1\$/,/^# gst-embedded-hook-end: $1\$/p" "$GS" | sed '1d;$d'
+}
 
 # A cache entry as install_tool publishes one: a directory named by the pinned archive hash,
 # holding a binary that reports the pinned version. Nothing else; the path is the validity.
@@ -3368,12 +3372,14 @@ SHIM
             _instrc2=$?
             _hookfail=""
             for _h in pre-commit post-commit commit-msg; do
-                cmp -s "$r/.githooks/$_h" "$HOOKS/$_h" || _hookfail="$_hookfail $_h"
+                _emb="$(mktemp "$ROOT/old-client-hook.XXXXXX")" || fixture_die "cannot create a scratch file for $_h extraction"
+                extract_embedded_hook "$_h" >"$_emb"
+                cmp -s "$r/.githooks/$_h" "$_emb" || _hookfail="$_hookfail $_h"
             done
             if [ "$_instrc2" -ne 0 ]; then
                 fail "v$_tag: after update, the new install exited $_instrc2: $_instout2"
             elif [ -n "$_hookfail" ]; then
-                fail "v$_tag: after update, these hooks are not byte-identical to hooks/:$_hookfail"
+                fail "v$_tag: after update, these hooks are not byte-identical to the embedded copy:$_hookfail"
             else
                 pass
             fi
@@ -3808,18 +3814,12 @@ else
 fi
 
 it "post-commit's own tag comparison excludes the same malformed shapes, not just grubstake.sh's copy"
-# hooks/post-commit runs its own inline copy of the filter-then-sort pipeline; it is not a call into
-# grubstake.sh, so the release_tags test above says nothing about this one. Extracted from
-# hooks/post-commit itself, byte for byte, for the same reason as above. The extraction is asserted to
-# actually contain the version filter, not just be non-empty: the sed range's end pattern
-# ("head -1)$") matches twice in this file (this pipeline and the later CURRENT-vs-LATEST comparison,
-# which has no filter in front of it and is out of scope here -- see the report), so a change nearby
-# that shifted the range without breaking it outright would otherwise go unnoticed. This pipeline ends
-# in "| head -1", so it reports the single winner rather than the full filtered list.
+# post-commit runs its own inline copy of the filter-then-sort pipeline, so it is extracted from the
+# embedded hook and checked to contain the version filter.
 r=$(new_repo)
 _shim="$r/git-shim"
 git_tags_shim "$_shim"
-_snippet="$(sed -n '/^        latest=$(git -c http.lowSpeedLimit/,/head -1)$/p' "$HOOKS/post-commit")"
+_snippet="$(extract_embedded_hook post-commit | sed -n '/^        latest=$(git -c http.lowSpeedLimit/,/head -1)$/p')"
 [ -n "$_snippet" ] || fixture_die "extract post-commit's latest= pipeline: nothing matched (reformatted?)"
 printf '%s\n' "$_snippet" | grep -qF "grep -E '^[0-9]+\\.[0-9]+\\.[0-9]+\$'" \
     || fixture_die "extract post-commit's latest= pipeline: the version filter is missing from the extraction (reformatted?)"
@@ -4133,15 +4133,6 @@ else
     pass
 fi
 
-# The gst-embedded-hook-begin/end: <name> marker lines are the extraction interface this test and
-# grubstake.sh's own install share, so renaming or reformatting either side breaks both silently.
-# grubstake.sh must strip both marker lines when it writes the installed hook: if they reach
-# .githooks/pre-commit, the installed file no longer matches hooks/pre-commit byte for byte, and
-# the drift test below would then flag every clean install as drifted forever.
-extract_embedded_hook() {
-    sed -n "/^# gst-embedded-hook-begin: $1\$/,/^# gst-embedded-hook-end: $1\$/p" "$GS" | sed '1d;$d'
-}
-
 it "install accepts the absolute path to its own hooks directory and leaves the value as it found it"
 # git resolves core.hooksPath the same way whether it is spelled as an absolute path or as
 # ".githooks" itself (git help config, core.hooksPath) -- refusing the absolute spelling of this
@@ -4409,33 +4400,15 @@ extract_hook_hash_fns() {
     sed -n '/^known_hook_hashes() {/,/^}/p;/^is_known_hook_hash() {/,/^}/p' "$GS"
 }
 
-it "the embedded copy of each hook in grubstake.sh cannot drift from hooks/"
-# hooks/ is the reviewable source; grubstake.sh must ship its own verbatim copy so install needs no
-# network. Two copies of the same ~105 lines is exactly how they silently diverge, which is what
-# this test would catch. Unlike extract_fns below, an empty extraction here is not a harness
-# fault: a hook missing from grubstake.sh must fail this test, not abort the run, since a missing
-# embedded copy is exactly the drift this test exists to catch.
-#
-# cmp, not a $(...) string compare: command substitution strips trailing newlines from both sides,
-# which would let an embedded copy missing (or carrying an extra) trailing newline compare equal
-# and pass a test named for byte identity.
+it "this repo's own installed hooks cannot drift from the embedded copy"
+# install only refreshes .githooks/ when run, so an embedded edit would otherwise leave the hooks this repo runs a version behind.
 _bad=""
 for _hook in pre-commit post-commit commit-msg; do
-    _got="$(mktemp "$ROOT/embedded.XXXXXX")" || fixture_die "cannot create a scratch file for $_hook extraction"
+    _got="$(mktemp "$ROOT/installed-drift.XXXXXX")" || fixture_die "cannot create a scratch file for $_hook extraction"
     extract_embedded_hook "$_hook" >"$_got"
-    cmp -s "$_got" "$HOOKS/$_hook" || _bad="$_bad $_hook"
+    cmp -s "$_got" "$REPO/.githooks/$_hook" || _bad="$_bad $_hook"
 done
-[ -z "$_bad" ] && pass || fail "embedded copy differs from (or is missing for) hooks/:$_bad"
-
-it "this repo's own installed hooks cannot drift from hooks/"
-# Dogfooding puts a third copy of each hook in .githooks/, committed. install refreshes it, but
-# nothing re-runs install on its own, so an edit to hooks/ would leave the copy this repo actually
-# executes a version behind without a sound.
-_bad=""
-for _hook in pre-commit post-commit commit-msg; do
-    cmp -s "$HOOKS/$_hook" "$REPO/.githooks/$_hook" || _bad="$_bad $_hook"
-done
-[ -z "$_bad" ] && pass || fail ".githooks/ differs from (or is missing) hooks/:$_bad -- re-run ./grubstake.sh install"
+[ -z "$_bad" ] && pass || fail ".githooks/ differs from (or is missing) the embedded copy:$_bad -- re-run ./grubstake.sh install"
 
 it "install adopts a repo with no network access"
 # Shadowing curl, rather than trusting this sandbox's real reachability (which has open egress to
@@ -5072,8 +5045,11 @@ new_hook_repo() {
         && git commit -q -m baseline) || fixture_die "cannot seed a commit in $_hr"
     deny_transports "$_hr"
     mkdir -p "$_hr/.githooks" || fixture_die "cannot create $_hr/.githooks"
-    cp "$HOOKS/pre-commit" "$HOOKS/post-commit" "$_hr/.githooks/" \
-        || fixture_die "cannot copy hooks into $_hr"
+    # An empty extraction exits 0, and an empty hook would let every commit through, so emptiness is a fixture fault.
+    extract_embedded_hook pre-commit >"$_hr/.githooks/pre-commit" && [ -s "$_hr/.githooks/pre-commit" ] \
+        || fixture_die "cannot write pre-commit into $_hr"
+    extract_embedded_hook post-commit >"$_hr/.githooks/post-commit" && [ -s "$_hr/.githooks/post-commit" ] \
+        || fixture_die "cannot write post-commit into $_hr"
     chmod +x "$_hr/.githooks/pre-commit" "$_hr/.githooks/post-commit" \
         || fixture_die "cannot make the hooks executable in $_hr"
     (cd "$_hr" && git config core.hooksPath .githooks) \
@@ -6036,10 +6012,7 @@ it "post-commit stays quiet on a malformed CURRENT rather than comparing it agai
 # filter in front of it, unlike the two sort sites that select LATEST in the first place. CURRENT is
 # whatever the installed script's own "version" verb prints, so a dev/pre-release build with a
 # non-numeric suffix reaches this comparison unvalidated. A real hook invocation reaches this cleanly:
-# new_hook_repo copies the shipped hooks/post-commit verbatim, and latest_cache writes the exact
-# cache line the hook reads. NOTES.md, not a .swift path: staging Swift would send pre-commit into
-# its own "check" call, whose output lands in the same combined "$_out" hook_commit returns and
-# could mask or fake the very "available" line this test greps for.
+# new_hook_repo copies the embedded post-commit verbatim; NOTES.md avoids pre-commit's own check output, which could mask the "available" line this test greps for.
 r=$(new_hook_repo)
 sed -i.bak 's/^GRUBSTAKE_VERSION=.*/GRUBSTAKE_VERSION="0.5.0-dev"/' "$r/grubstake.sh" && rm -f "$r/grubstake.sh.bak"
 latest_cache "$r" 9.9.9
@@ -6183,17 +6156,7 @@ else
 fi
 
 it "doctor reports a hook that has drifted from grubstake's copy"
-# ADOPTING says install writes hooks once and leaves them alone, so a fix landing in hooks/ (like
-# #29) never reaches an already-adopted repo through update. doctor is the only place left that can
-# surface the gap. new_hook_repo is used here rather than `grubstake.sh install`: unshimmed,
-# install reaches the real network in this sandbox, and shimmed (as in the offline-install test
-# above) it dies before writing anything -- neither seeds a hook to corrupt. Copying hooks/ by hand,
-# the way new_hook_repo already does for the rest of this section, is the offline equivalent.
-#
-# Compares clean output against drifted output rather than grepping the drifted output alone for
-# "pre-commit": doctor prints a status line per hook, so a healthy repo's own "pre-commit  ok" line
-# would satisfy a bare substring match and pass whether or not drift detection actually works.
-# Diffing against a known-clean baseline is what makes this specific to the corruption.
+# Diffs clean output against drifted output rather than grepping the drifted output alone for "pre-commit", since a healthy repo's own "pre-commit  ok" line would satisfy that bare substring match too.
 r=$(new_hook_repo)
 _clean=$(gs "$r" doctor)
 printf '# corrupted for test\n' >>"$r/.githooks/pre-commit"
@@ -6249,10 +6212,7 @@ else
 fi
 
 it "doctor still reports drift in a hook that carries grubstake's marker"
-# The ownership distinction #59 wants must not swallow real drift: a hook that IS the embedded
-# copy, then edited, still needs the existing DRIFTED remedy -- that report is correct today and
-# must survive the fix. new_hook_repo seeds the real hooks/pre-commit (marker and all), so
-# corrupting it in place keeps the marker but changes the bytes.
+# A hook that IS the embedded copy, then edited, still needs the existing DRIFTED remedy: new_hook_repo seeds the embedded pre-commit verbatim (marker and all), so corrupting it in place keeps the marker but changes the bytes.
 r=$(new_hook_repo)
 printf '# corrupted for test\n' >>"$r/.githooks/pre-commit"
 _out=$(gs "$r" doctor)
@@ -6384,18 +6344,7 @@ else
 fi
 
 it "a reworded hook header would make doctor mistake real drift for a hand-off"
-# cmd_doctor's ownership discriminator is `grep -q "^# grubstake <hook>"` against the installed
-# file. That line is ordinary prose in hooks/pre-commit and hooks/post-commit, not a declared
-# sentinel -- nothing marks it as machine-read. A plausible reword of it (e.g. "grubstake's
-# pre-commit gate.") would silently flip doctor from reporting a drifted-but-still-grubstake's hook
-# to reporting "not grubstake's; hands off" for every repo that installed this hook, since the
-# marker doctor looks for would simply no longer be there. Changing the shipped hook bytes to carry
-# a declared sentinel instead would trigger the manual hook-refresh ceremony in every consuming
-# repo, so this constraint is enforced here, at development time, rather than at runtime.
-#
-# Extracted from grubstake.sh rather than hardcoded a second time here, so the mirror failure --
-# cmd_doctor's own grep pattern drifting instead of hooks/'s prose -- fails this test too; a
-# hardcoded copy would only ever catch one direction of the coupling.
+# cmd_doctor's ownership discriminator, grep -q "^# grubstake <hook>" against the installed file, is ordinary prose in the embedded hooks rather than a declared sentinel, so it is extracted from grubstake.sh here rather than hardcoded, catching drift in either direction.
 _raw="$(grep -Fo '"^# grubstake $_hook"' "$GS")"
 _pat="${_raw#\"}"
 _pat="${_pat%\"}"
@@ -6405,7 +6354,7 @@ else
     _bad=""
     for _hook in pre-commit post-commit commit-msg; do
         _want="${_pat%\$_hook}$_hook"
-        grep -q "$_want" "$HOOKS/$_hook" 2>/dev/null || _bad="$_bad $_hook"
+        extract_embedded_hook "$_hook" | grep -q "$_want" || _bad="$_bad $_hook"
     done
     [ -z "$_bad" ] && pass || fail "missing doctor's ownership marker line ('# grubstake <hook>'):$_bad"
 fi

@@ -8,8 +8,8 @@ Adopt this repo the way an adopting repo does, once per clone.
 ./grubstake.sh install
 ```
 
-`hooks/` is the reviewable source that `install` copies into `.githooks/`, never this repo's own
-hook directory, so nothing under `hooks/` runs here until `install` has been run. The leak scan
+The hooks `install` writes into `.githooks/` are embedded in `grubstake.sh`; change a hook there,
+append its new hash to `known_hook_hashes`, and run `install` to refresh `.githooks/`. The leak scan
 hangs off the same extension points every consumer uses: `.githooks/pre-commit.d/scan-for-leaks`
 over tracked files, and `.githooks/commit-msg.d/scan-for-leaks` over the message itself, which a
 scan of tracked files cannot see.

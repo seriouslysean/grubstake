@@ -261,7 +261,6 @@ selftest
 
 # Space-separated on purpose: shellcheck and shfmt below split this into one argument per file.
 SH_FILES="grubstake.sh
-hooks/commit-msg hooks/post-commit hooks/pre-commit
 .githooks/commit-msg .githooks/post-commit .githooks/pre-commit
 .githooks/commit-msg.d/scan-for-leaks .githooks/pre-commit.d/scan-for-leaks
 test/run.sh test/gates.sh test/scan-for-leaks.sh test/lint.sh

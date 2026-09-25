@@ -660,7 +660,7 @@ verify_tool() {
 }
 
 # ---------------------------------------------------------------------------- hooks
-# hooks/ is the reviewable source; install and doctor read these copies so neither needs the network.
+# install and doctor read these embedded copies, so neither needs the network.
 # Quoted heredocs because an expanded `$` here would corrupt the hook the test compares byte for byte.
 
 embedded_hook() {
@@ -1562,7 +1562,7 @@ below_floor() {
 
 # Release tags, newest first. No mutable "latest" pointer.
 # Reverse must be per-key (nr); a trailing -r is ignored when key flags are present.
-# Prompt suppressed and the transfer bounded the same way hooks/post-commit's own lookup is, since
+# Prompt suppressed and the transfer bounded the same way the post-commit hook's own lookup is, since
 # this runs synchronously on a command a human is waiting on, not backgrounded like that one; ssh is
 # left to whatever core.sshCommand the user has configured (git-config(1)), since a person runs this update, not a hook.
 release_tags() {

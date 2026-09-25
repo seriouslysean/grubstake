@@ -32,14 +32,21 @@ sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 # ---------------------------------------------------------------------------- signal cleanup
 
 # A trap with no exit resumes the interrupted script once cleanup runs; the signal case disarms EXIT before exiting, so a caught signal never runs the same cleanup twice.
+# _cleanup mirrors what is armed because with_lock composes onto it, and dash cannot read a trap back through $(trap).
+# Assigned here, never inherited: with_lock turns _cleanup into trap code, so an exported value must not reach it.
+_cleanup=""
 arm_cleanup() {
+    _cleanup="$1"
     # shellcheck disable=SC2064
     trap "$1" EXIT
     # shellcheck disable=SC2064
     trap "trap - EXIT; $1; exit 1" HUP INT TERM
 }
 
-disarm_cleanup() { trap - EXIT HUP INT TERM; }
+disarm_cleanup() {
+    _cleanup=""
+    trap - EXIT HUP INT TERM
+}
 
 usage() {
     cat <<'USAGE'
@@ -346,73 +353,67 @@ entry_verified() {
 }
 
 # mkdir is the portable atomic lock. flock(1) is not present on macOS.
-with_lock() {
-    # A nested call would clobber this call's own _lk/_wl_saved globals (no `local` in POSIX sh); no caller nests today, so a re-entry dies loud rather than silently losing a saved trap.
-    [ -z "${_wl_active:-}" ] || die "with_lock: called re-entrantly, nesting is not supported"
-    _lk="$1"
-    shift
-    _w=0
+# $2 completes the vanished-parent warning, since only the caller knows what owns that directory. Warns and returns 1; how loud a failure is stays the caller's call.
+lock_acquire() {
+    _la_lk="$1"
+    _la_w=0
     while :; do
         # The cause comes from mkdir's own words, not a second [ -d ] test taken afterwards: that
         # test answers "does the parent still exist," which a read-only parent (EACCES) passes same
         # as genuine contention, and an unreadable ancestor fails same as a parent actually removed.
         # LC_ALL=C: the discriminator below reads mkdir's own message, so it has to stay in the
         # language it was written against, the same convention #85 uses for git's own message.
-        _mkerr="$(LC_ALL=C mkdir "$_lk" 2>&1 >/dev/null)" && break
+        _la_err="$(LC_ALL=C mkdir "$_la_lk" 2>&1 >/dev/null)" && return 0
         # Anchored to the end, not a bare substring: the lock path is interpolated into this very
         # message, and an unanchored match lets a path that happens to contain "File exists" (or the
         # ENOENT text) collide with mkdir's own trailing reason instead of reading it.
-        case "$_mkerr" in
+        case "$_la_err" in
             *": File exists") : ;;
             *": No such file or directory")
-                warn "$_lk: its directory is gone, most likely a concurrent clean removed the cache mid-install"
+                warn "$_la_lk: its directory is gone, most likely $2"
                 return 1
                 ;;
             *)
-                warn "cannot create lock: $_mkerr"
+                warn "cannot create lock: $_la_err"
                 return 1
                 ;;
         esac
-        _w=$((_w + 1))
-        # Acquisition failure is the caller's to scope; with_lock never decides how loud it is.
-        if [ "$_w" -gt 50 ]; then
-            warn "cache entry locked by another run: $_lk (stale? rmdir it)"
+        _la_w=$((_la_w + 1))
+        if [ "$_la_w" -gt 50 ]; then
+            warn "$_la_lk: locked by another run (stale? rmdir it)"
             return 1
         fi
         sleep 0.1 2>/dev/null || sleep 1
     done
-    _wl_active=1
-    # Captured via a plain redirect, not $(trap): dash resets a subshell's own trap table, so
-    # command substitution reads this back empty even with a trap already armed in this shell.
-    _wl_savefile="$(mktemp "${TMPDIR:-/tmp}/grubstake-trap.XXXXXX")" || {
-        warn "$_lk: cannot save the caller's trap state, refusing to hold this lock unsafely"
-        rmdir "$_lk" 2>/dev/null || true
-        _wl_active=""
-        return 1
-    }
-    # A redirect failure here is fatal to the whole process under dash (a special builtin's own redirection error is unconditionally fatal there), not something an if around it can catch.
-    trap >"$_wl_savefile" 2>/dev/null
-    # A swallowed read failure here would read as "caller had no trap" and restore nothing.
-    if ! _wl_saved="$(cat "$_wl_savefile" 2>/dev/null)"; then
-        warn "$_lk: cannot read back the caller's trap state, refusing to hold this lock unsafely"
-        rm -f "$_wl_savefile" 2>/dev/null || true
-        rmdir "$_lk" 2>/dev/null || true
-        _wl_active=""
-        return 1
+}
+
+with_lock() {
+    # A nested call would clobber this call's own _lk/_wl_prev globals (no `local` in POSIX sh); no caller nests today, so a re-entry dies loud rather than silently losing the caller's cleanup.
+    [ -z "${_wl_active:-}" ] || die "with_lock: called re-entrantly, nesting is not supported"
+    _lk="$1"
+    shift
+    # Built before the lock is taken, so the window between acquiring it and arming its release is builtins only.
+    _wl_prev="${_cleanup:-}"
+    _wl_rel="rmdir $(sq "$_lk") 2>/dev/null || true"
+    if [ -n "$_wl_prev" ]; then
+        _wl_restore="arm_cleanup $(sq "$_wl_prev")"
+        # Released before the caller's cleanup, which set -e would abort on failure; EXIT is cleared again since arm_cleanup re-arms it with that same cleanup.
+        _wl_exit="$_wl_restore; trap - EXIT; $_wl_rel; $_wl_prev"
+    else
+        _wl_restore="disarm_cleanup"
+        _wl_exit="$_wl_restore; $_wl_rel"
     fi
-    rm -f "$_wl_savefile" 2>/dev/null || true
-    # Commands passed here must warn and return, never exit or die: the EXIT trap below only releases the lock, it does not restore this trap.
-    # Restoring (or clearing, with no caller trap) always runs first below, so no instruction boundary is ever left with neither this trap nor the caller's armed.
-    trap '
-        if [ -n "$_wl_saved" ]; then eval "$_wl_saved"; else trap - EXIT HUP INT TERM; fi
-        rmdir "$_lk" 2>/dev/null || true
-        exit 1
-    ' HUP INT TERM
-    trap 'rmdir "$_lk" 2>/dev/null || true' EXIT
+    lock_acquire "$_lk" "a concurrent clean removed the cache mid-install" || return 1
+    _wl_active=1
+    # Both traps restore (or clear) before the release, so a second signal can never rmdir a lock another run has since taken; the caller's cleanup still runs once.
+    # shellcheck disable=SC2064
+    trap "$_wl_restore; $_wl_rel; exit 1" HUP INT TERM
+    # shellcheck disable=SC2064
+    trap "$_wl_exit" EXIT
     # `cmd; rc=$?` does not survive set -e: the shell exits at cmd and never reaches the rmdir.
     if "$@"; then _rc=0; else _rc=$?; fi
     # Same restore-first order as the signal handler: disarming before releasing would let a signal here rmdir a second time, after another run may have already reclaimed the path.
-    if [ -n "$_wl_saved" ]; then eval "$_wl_saved"; else trap - EXIT HUP INT TERM; fi
+    if [ -n "$_wl_prev" ]; then arm_cleanup "$_wl_prev"; else disarm_cleanup; fi
     rmdir "$_lk" 2>/dev/null || true
     _wl_active=""
     return $_rc
@@ -436,8 +437,8 @@ publish_dir() {
         else
             chmod -R u+w "$2" 2>/dev/null || true
             rm -rf "$2"
-            # rm -rf can no-op on an immutable file, and a die here would exit past with_lock's
-            # rmdir and leak the lock, so both failures warn and return for the caller to fail on.
+            # rm -rf can no-op on an immutable file, and a die here would end the whole run rather
+            # than fail this one tool, so both failures warn and return for the caller to fail on.
             [ ! -e "$2" ] || {
                 warn "$3: cannot clear partial $2 (remove it by hand and retry)"
                 return 1
@@ -497,24 +498,9 @@ install_tool() {
             if [ "$_rver" = "$_ver" ]; then
                 return 0
             fi
-            # A stale receipt line is not license to trust the pin's claim unchecked -- the one path that could otherwise relabel a receipt to a version the binary was never shown to be.
-            assert_reported_version "$_bin" "$_tool" "$_ver" "$_dest" || return 1
-            # The binary genuinely reports the pinned version -- only the receipt's version line was
-            # stale -- so this rewrites it in place rather than downloading: publish_dir would discard
-            # a fresh download here anyway, since this entry's own executable already makes it the
-            # winner, so nothing built from that download would ever actually land.
-            _bsha="$(hashed_or_empty "$_bin")"
-            if [ -z "$_bsha" ]; then
-                # A failed or empty hash must never fail the run, the same rule the sibling branch and fresh publish both hold.
-                warn "$_tool: entry records version ${_rver:-nothing}, pinned $_ver, but could not be hashed to correct the receipt"
-            elif with_lock "$_dest.lock" write_receipt "$_dest" "$_bsha" "$_ver"; then
-                log "$_tool: entry recorded version ${_rver:-nothing}, updated the receipt to pinned $_ver"
-            else
-                # Scoped like the mismatch branch above: the entry is never touched, only the run is flagged.
-                warn "$_tool: entry records version ${_rver:-nothing}, pinned $_ver, but the receipt could not be updated"
-                return 1
-            fi
-            return 0
+            # Only the version line is stale, so it is re-recorded in place rather than downloaded:
+            # publish_dir would discard a fresh download here anyway, since this entry's own
+            # executable already makes it the winner, so nothing built from it would ever land.
         else
             _rf="$(receipt_file "$_dest")"
             if [ -f "$_rf" ] && [ "$(sed -n 1p "$_rf" 2>/dev/null)" = "receipt 1" ]; then
@@ -529,23 +515,24 @@ install_tool() {
             # No receipt, or a header this script does not recognize: predates receipts, or was
             # written by a version that will. Record one against what is already there, offline and
             # in place -- it is the same trust the entry already had, now with a baseline to drift from.
-            assert_reported_version "$_bin" "$_tool" "$_ver" "$_dest" || return 1
-            _bsha="$(hashed_or_empty "$_bin")"
-            if [ -z "$_bsha" ]; then
-                # A hash that failed or came back empty must never be recorded: a legacy entry with no
-                # receipt is still usable, and a broken one would leave the next run nothing to self-heal from.
-                warn "$_tool: could not hash $_bin to record a receipt (leaving it as-is)"
-            elif with_lock "$_dest.lock" write_receipt "$_dest" "$_bsha" "$_ver"; then
-                log "$_tool $_ver: recorded a receipt for the existing entry"
-            else
-                # A read-only parent or a full disk must not turn an already-usable entry into a
-                # forced reinstall; the tool ran before this and still does.
-                # Only the run is flagged; the entry is left exactly as it was.
-                warn "$_tool: could not record a receipt for $_dest (leaving it as-is)"
-                return 1
-            fi
-            return 0
         fi
+        # Asserted before recording on both paths: a stale receipt line is no more license than a missing one to relabel a binary to a version it was never shown to report.
+        assert_reported_version "$_bin" "$_tool" "$_ver" "$_dest" || return 1
+        _bsha="$(hashed_or_empty "$_bin")"
+        if [ -z "$_bsha" ]; then
+            # A hash that failed or came back empty must never be recorded: the entry is still usable
+            # as it is, and a broken receipt would leave the next run nothing to self-heal from.
+            warn "$_tool: could not hash $_bin to record a receipt (leaving it as-is)"
+        elif with_lock "$_dest.lock" write_receipt "$_dest" "$_bsha" "$_ver"; then
+            log "$_tool $_ver: recorded a receipt for the existing entry"
+        else
+            # A read-only parent or a full disk must not turn an already-usable entry into a
+            # forced reinstall; the tool ran before this and still does.
+            # Only the run is flagged; the entry is left exactly as it was.
+            warn "$_tool: could not record a receipt for $_dest (leaving it as-is)"
+            return 1
+        fi
+        return 0
     fi
 
     # Refused before any network call; $4 overrides the remedy for a caller that is itself ensure.
@@ -1073,31 +1060,8 @@ add_one() {
     _pt="$_pins.$$.tmp"
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")" || die "cannot create a scratch directory under ${TMPDIR:-/tmp}"
     arm_cleanup "rm -rf $(sq "$_tmp")"
-    # mkdir is the portable atomic lock. Two agents adding pins otherwise write from stale reads.
-    _waited=0
-    while :; do
-        # The cause comes from mkdir's own words, not a second [ -d ] test taken afterwards: that
-        # test answers "does the parent still exist," which a read-only parent (EACCES) passes same
-        # as genuine contention, and an unreadable ancestor fails same as a parent actually removed.
-        # LC_ALL=C: the discriminator below reads mkdir's own message, so it has to stay in the
-        # language it was written against, the same convention #85 uses for git's own message.
-        _mkerr="$(LC_ALL=C mkdir "$_lock" 2>&1 >/dev/null)" && break
-        # Anchored to the end, not a bare substring: the lock path is interpolated into this very
-        # message, and an unanchored match lets a path that happens to contain "File exists" (or the
-        # ENOENT text) collide with mkdir's own trailing reason instead of reading it.
-        case "$_mkerr" in
-            *": File exists") : ;;
-            *": No such file or directory")
-                die "$_lock: its directory is gone, most likely the repository was removed mid-add"
-                ;;
-            *)
-                die "cannot create lock: $_mkerr"
-                ;;
-        esac
-        _waited=$((_waited + 1))
-        [ "$_waited" -gt 50 ] && die "grubstake.tools is locked by another run ($_lock)"
-        sleep 0.1 2>/dev/null || sleep 1
-    done
+    # Two agents adding pins otherwise write from stale reads. Not with_lock: its `if "$@"` suspends set -e over the unguarded writes below, so a failed write would still print "pinned".
+    lock_acquire "$_lock" "the repository was removed mid-add" || die "$_tool@$_ver: not recorded (cannot lock grubstake.tools)"
     arm_cleanup "rm -rf $(sq "$_tmp") $(sq "$_pt") $(sq "$_lock")"
     # grubstake.tools is only known-good once this lock is held, even though install_tool already proved this spec's own bytes.
     validate_pins

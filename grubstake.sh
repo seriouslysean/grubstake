@@ -123,7 +123,7 @@ sha256_file() {
 }
 
 repo_root() {
-    git rev-parse --show-toplevel 2>/dev/null || die "not inside a git repository"
+    git rev-parse --show-toplevel || die "cannot resolve the repository root (git's reason is above)"
 }
 
 # ---------------------------------------------------------------------------- tool registry

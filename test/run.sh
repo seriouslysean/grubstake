@@ -1973,19 +1973,23 @@ fake_receipt() {
 # existence, deliberately -- a mismatch is
 # surfaced by install_tool's own deeper pass before publish_dir is ever reached, never repaired by
 # publish_dir itself, so a live binary is never cleared out from under a concurrent reader. That
-# keeps with_lock and publish_dir the whole call graph; neither reaches sha256_file, receipt_file,
+# keeps with_lock, the lock and trap helpers it calls (lock_acquire, sq, arm_cleanup,
+# disarm_cleanup), and publish_dir the whole call graph; none reaches sha256_file, receipt_file,
 # or entry_verified, so extracting those would carry dead weight into the generated script. Defined
 # here, ahead of every caller in the file (the update section's included), since the earliest of
 # those callers is the receipt tests just below.
 extract_fns() {
-    _fns="$(sed -n '/^with_lock() {/,/^}/p;/^publish_dir() {/,/^}/p' "$GS")"
-    for _f in with_lock publish_dir; do
+    # sq is a one-liner, so a /,/^}/ range on it would run on to the next function's close.
+    _fns="$(sed -n '/^sq() {.*}$/p;/^arm_cleanup() {$/,/^}/p;/^disarm_cleanup() {$/,/^}/p;/^lock_acquire() {$/,/^}/p;/^with_lock() {$/,/^}/p;/^publish_dir() {$/,/^}/p' "$GS")"
+    printf '%s\n' "$_fns" | grep -q '^sq() {.*}$' \
+        || fixture_die "extract_fns: no one-line 'sq() { ... }' in $GS (reformatted?)"
+    for _f in arm_cleanup disarm_cleanup lock_acquire with_lock publish_dir; do
         printf '%s\n' "$_fns" | grep -q "^$_f() {$" \
             || fixture_die "extract_fns: no '$_f() {' line in $GS (reformatted?)"
     done
-    # Neither function nests a line-anchored brace, so anything but one close each means a range ran on.
+    # No multi-line function here nests a line-anchored brace, so anything but one close each means a range ran on.
     _closes="$(printf '%s\n' "$_fns" | grep -c '^}$' | tr -d ' ')"
-    [ "$_closes" = 2 ] || fixture_die "extract_fns: $_closes closing braces, expected 2 (truncated)"
+    [ "$_closes" = 5 ] || fixture_die "extract_fns: $_closes closing braces, expected 5 (truncated)"
     printf '%s\n' "$_fns"
 }
 
@@ -2280,8 +2284,8 @@ else
     _rc2=$?
     if [ "$_rc2" -ne 0 ]; then
         fail "a second ensure over the now-corrected entry failed (rc $_rc2): $_out2"
-    elif printf '%s' "$_out2" | grep -qE "updated the receipt to pinned|entry records version"; then
-        fail "the version-mismatch warning repeated on a second ensure over an already-corrected entry: $_out2"
+    elif printf '%s' "$_out2" | grep -qE "record(ed)? a receipt"; then
+        fail "the receipt was re-recorded again on a second ensure over an already-corrected entry: $_out2"
     else
         pass
     fi
@@ -2410,6 +2414,7 @@ fi
 
 it "a lock failure on one tool stays scoped to that tool, instead of aborting ensure for the rest"
 # A lock that never frees fails only its own tool, so swiftformat, pinned second as a receiptless entry, must still get its receipt.
+# A stale receipt version and a missing receipt share one re-record path, so this one entry stands for both.
 r=$(new_repo)
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
 fake_install "$r" swiftformat 0.61.1 "$SHA_B"
@@ -2417,11 +2422,14 @@ pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A
 swiftformat 0.61.1 $SHA_B $SHA_B"
 _lockdir="$r/.cache/swiftlint/$SHA_A.lock"
 mkdir -p "$_lockdir" || fixture_die "cannot plant the stale lock"
+_lint_receipt="$r/.cache/swiftlint/$SHA_A/.grubstake-receipt"
 _fmt_receipt="$r/.cache/swiftformat/$SHA_B/.grubstake-receipt"
 _out=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
 _rc=$?
 if [ "$_rc" -eq 0 ]; then
     fail "ensure exited 0 despite a tool it could never lock: $_out"
+elif [ -e "$_lint_receipt" ]; then
+    fail "swiftlint's receipt was recorded despite its lock never being acquired: $(cat "$_lint_receipt" 2>/dev/null)"
 elif ! printf '%s' "$_out" | grep -F -q "$_lockdir"; then
     fail "the lock failure was reported without naming swiftlint's lock: $_out"
 elif [ ! -f "$_fmt_receipt" ]; then
@@ -2436,52 +2444,15 @@ else
 fi
 rm -rf "$_lockdir" 2>/dev/null
 
-it "a lock failure while correcting a stale receipt version is scoped to that tool, not fatal to the rest"
-# #67, the sibling site to the one above: a genuinely verified entry whose receipt just records an
-# older version than the pin takes the "correct the receipt version in place" branch (no download,
-# since the binary on disk already reports the pinned version -- see "a version-only receipt edit is
-# corrected in place, not re-fetched" above). If with_lock can never acquire this entry's own lock,
-# the correction must warn and flag the run rather than silently return 0 and let a stale version
-# label stand as if it had been fixed. fake_receipt anchors binary-sha256 to the binary fake_install
-# actually wrote, so entry_verified passes and this reaches the version-rewrite branch, never the
-# mismatch-warn branch above it (which fires on a *reported* version mismatch, not a stale label).
-# swiftformat is pinned second, as a plain receiptless legacy entry, so its receipt appearing is
-# unambiguous evidence ensure continued past swiftlint's stuck lock rather than stopping there.
-r=$(new_repo)
-fake_install "$r" swiftlint 0.63.2 "$SHA_A"
-fake_receipt "$r/.cache/swiftlint/$SHA_A" swiftlint 0.60.0
-fake_install "$r" swiftformat 0.61.1 "$SHA_B"
-pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A
-swiftformat 0.61.1 $SHA_B $SHA_B"
-_lockdir="$r/.cache/swiftlint/$SHA_A.lock"
-mkdir -p "$_lockdir" || fixture_die "cannot plant the stale lock"
-_receipt="$r/.cache/swiftlint/$SHA_A/.grubstake-receipt"
-_fmt_receipt="$r/.cache/swiftformat/$SHA_B/.grubstake-receipt"
-_out=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
-_rc=$?
-_rver="$(awk '/^version/{print $2}' "$_receipt" 2>/dev/null)"
-if [ "$_rc" -eq 0 ]; then
-    fail "ensure exited 0 despite a stale receipt it could never correct: $_out"
-elif [ "$_rver" != "0.60.0" ]; then
-    fail "the receipt's stale version was rewritten despite the lock never being acquired: $(cat "$_receipt" 2>/dev/null)"
-elif ! printf '%s' "$_out" | grep -F -q "$_lockdir"; then
-    fail "the lock failure was reported without naming swiftlint's lock: $_out"
-elif [ ! -f "$_fmt_receipt" ]; then
-    fail "ensure stopped at swiftlint's stuck receipt instead of continuing: swiftformat was never reached, no receipt recorded: $_out"
-else
-    pass
-fi
-rm -rf "$_lockdir" 2>/dev/null
-
 it "a lock failure on a cold install is scoped to that tool, and check runs its own full pass too"
-# #67's third site: the two tests above cover with_lock's own retry loop and the stale-receipt
-# rewrite, both reached through an entry that already has a binary on disk. Neither can reach the
+# #67's third site: the test above covers with_lock's own retry loop through the receipt re-record
+# path, reached through an entry that already has a binary on disk. That cannot reach the
 # cold-install branch, where fake_install's shortcut never runs at all: install_tool's early
 # "already installed" check only defers to with_lock once a real download has verified and staged
 # the archive, so the publish lock is the one this scenario needs a real (offline) install to reach.
 # swiftlint is pinned cold, served by fake_release/curl-shim, with its eventual publish lock
 # pre-planted so it never lands; swiftformat is pinned second as a plain receiptless legacy entry,
-# proving the install loop itself is scoped exactly as the sibling tests above already prove.
+# proving the install loop itself is scoped exactly as the sibling test above already proves.
 # A second, direct check with a third, never-installed tool proves check names every missing tool rather than stopping at the first.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
@@ -3328,6 +3299,34 @@ elif [ -d "$r/t.lock" ]; then
     fail "the lock survived a failing command"
 else pass; fi
 
+it "a locked command that exits still releases the lock when the caller's cleanup then fails"
+# The EXIT trap runs under set -e, so a failing caller cleanup ahead of the release would strand the lock; the log proves that cleanup ran, once.
+# The cleanup is armed before acquisition, so without the held marker a lock that was never taken would pass both checks below.
+r=$(new_repo)
+{
+    extract_fns
+    cat <<'INNER'
+die() { echo "$1" >&2; exit 1; }
+warn() { echo "WARN: $1" >&2; }
+exits() {
+    [ -d "$1" ] && echo held >>"$2"
+    exit 3
+}
+arm_cleanup "echo ran >>$(sq "$2"); false"
+with_lock "$1" exits "$1" "$3"
+INNER
+} >"$r/t.sh"
+(cd "$r" && sh -eu "$r/t.sh" "$r/t.lock" "$r/cleanup.log" "$r/held.log") >/dev/null 2>&1
+_held=$(grep -c '^held$' "$r/held.log" 2>/dev/null)
+_ran=$(grep -c '^ran$' "$r/cleanup.log" 2>/dev/null)
+if [ "${_held:-0}" -ne 1 ]; then
+    fail "the locked command ran ${_held:-0} times while holding the lock instead of once, so nothing here was proven"
+elif [ "${_ran:-0}" -ne 1 ]; then
+    fail "the caller's cleanup ran ${_ran:-0} times instead of once, so the locked command's exit was not exercised as intended"
+elif [ -d "$r/t.lock" ]; then
+    fail "the lock survived a locked command's exit because the caller's cleanup failed before the release"
+else pass; fi
+
 it "a signal landing while write_receipt holds the lock does not strand it"
 # exec makes $! grubstake.sh itself, so the kill lands while mv_pause_shim holds the receipt rename under the lock; the orphaned shim is then killed.
 r=$(new_repo)
@@ -3371,7 +3370,7 @@ else
     _count=$(wc -l <"$_counter" | tr -d ' ')
     if [ "$_rc2" -ne 0 ]; then
         fail "the follow-up ensure failed against a lock that should have been released by the trap: $_out2"
-    elif printf '%s' "$_out2" | grep -q "cache entry locked by another run"; then
+    elif printf '%s' "$_out2" | grep -q "locked by another run"; then
         fail "the follow-up ensure spun the retry budget and warned about a stale lock nobody holds: $_out2"
     elif [ "$_count" -ne 1 ]; then
         fail "the follow-up ensure attempted the lock $_count times instead of acquiring it on the first try ($(cat "$_counter")): $_out2"
@@ -3383,10 +3382,16 @@ rm -rf "$_lockdir" 2>/dev/null
 
 it "a signal landing while publish_dir holds the lock does not nest the staging install_tool's own trap names"
 # with_lock must restore install_tool's trap rather than clobber it, or a signal mid-publish leaves the staging it names; the lock check below separately catches a with_lock with no trap.
+# with_lock re-embeds that trap and its own lock path in its signal handler, so both carry a payload: the cache path breaks single quotes only, since a double quote would break mv_pause_shim's own quoting, and TMPDIR breaks double quotes too.
+# "||", not ";": the trap runs under set -e, so a payload behind a failing rmdir would never run and would prove nothing.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
-_dest="$r/.cache/swiftlint/$_sha"
+_sentinel="$r/SENTINEL"
+_cache="$r/cache' || touch '$_sentinel.cache'; echo '"
+_tmpdir="$r/tmp'; touch \"$_sentinel.tmp\"; echo '"
+mkdir -p "$_cache" "$_tmpdir" || fixture_die "cannot create the injection-payload cache and TMPDIR"
+_dest="$_cache/swiftlint/$_sha"
 _lockdir="$_dest.lock"
 _shim="$r/mv-shim"
 _reached="$r/reached"
@@ -3396,9 +3401,7 @@ mv_pause_shim "$_shim" "$_reached" "$_go" "$_dest"
     cd "$r" || exit 1
     PATH="$r/curl-shim:$_shim:$PATH"
     export PATH
-    GRUBSTAKE_CACHE="$r/.cache"
-    export GRUBSTAKE_CACHE
-    exec ./grubstake.sh ensure >"$r/out" 2>&1
+    exec env GRUBSTAKE_CACHE="$_cache" TMPDIR="$_tmpdir" ./grubstake.sh ensure >"$r/out" 2>&1
 ) &
 _bgpid=$!
 _w=0
@@ -3416,8 +3419,12 @@ if [ -f "$_reached.pid" ]; then
     kill -TERM "$(cat "$_reached.pid")" 2>/dev/null
     wait "$(cat "$_reached.pid")" 2>/dev/null
 fi
-if [ -d "$_staging" ]; then
+if [ -e "$_sentinel.cache" ] || [ -e "$_sentinel.tmp" ]; then
+    fail "the injected command ran: a SENTINEL was created via with_lock's signal handler: $(cat "$r/out" 2>/dev/null)"
+elif [ -d "$_staging" ]; then
     fail "the staging directory install_tool's own trap names was left behind: with_lock's fix must compose with that trap, not clobber it"
+elif [ -n "$(find "$_tmpdir" -name 'grubstake.*' 2>/dev/null)" ]; then
+    fail "the scratch directory install_tool's own trap names was left behind: $(find "$_tmpdir" -name 'grubstake.*' 2>/dev/null)"
 elif [ -d "$_lockdir" ]; then
     fail "the lock directory was stranded after the run was killed mid-publish"
 else
@@ -3425,17 +3432,8 @@ else
 fi
 rm -rf "$_lockdir" "$_staging" 2>/dev/null
 
-it "with_lock refuses a lock it cannot safely hold when it cannot save the caller's trap state"
-# with_lock's own trap composition needs somewhere to stash the caller's existing trap before
-# overwriting it (a plain redirect into a mktemp file, not command substitution -- dash resets a
-# subshell's own trap table, so "$(trap)" reads back empty even with one already armed). An
-# unwritable TMPDIR makes that mktemp fail, and with_lock refuses to hold a lock it could not make
-# safe to interrupt: it warns, releases the lock it had just acquired, and returns 1 -- the same
-# tool-scoped shape every other with_lock-adjacent failure already has (see the two signal tests
-# above and #67's sibling tests), not a die. Two legacy (receiptless) entries, both reaching
-# with_lock the cheapest way through write_receipt, prove this is genuinely per-tool and not a
-# one-and-done abort: both must be refused independently, in the same run, since a broken TMPDIR
-# does not clear itself between them.
+it "offline receipt recording succeeds with an unwritable TMPDIR"
+# STABILITY.md scopes TMPDIR to download and extraction scratch, so with_lock's receipt write must not need it; two legacy entries prove every lock taken in the run, not just the first, stays off it.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A
 swiftformat 0.61.1 $SHA_B $SHA_B"
@@ -3451,16 +3449,33 @@ chmod a-w "$_badtmp" || fixture_die "cannot make $_badtmp read-only"
 [ -w "$_badtmp" ] && fixture_die "chmod a-w did not make $_badtmp unwritable (running as root?)"
 _lockA="$r/.cache/swiftlint/$SHA_A.lock"
 _lockB="$r/.cache/swiftformat/$SHA_B.lock"
-_out=$(cd "$r" && TMPDIR="$_badtmp" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
+_out=$(cd "$r" && GRUBSTAKE_OFFLINE=1 TMPDIR="$_badtmp" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
 _rc=$?
-_warns=$(printf '%s\n' "$_out" | grep -c "cannot save the caller's trap state")
 chmod -R u+rwx "$_badtmp" 2>/dev/null
-if [ "$_rc" -eq 0 ]; then
-    fail "ensure exited 0 despite never being able to safely hold a lock: $_out"
-elif [ "$_warns" -ne 2 ]; then
-    fail "expected both tools refused per-tool (2 warns), got $_warns: $_out"
+if [ "$_rc" -ne 0 ]; then
+    fail "offline ensure could not record receipts with an unwritable TMPDIR (rc $_rc): $_out"
+elif [ ! -f "$r/.cache/swiftlint/$SHA_A/.grubstake-receipt" ] || [ ! -f "$r/.cache/swiftformat/$SHA_B/.grubstake-receipt" ]; then
+    fail "offline ensure exited 0 without recording a receipt for both legacy entries: $_out"
 elif [ -d "$_lockA" ] || [ -d "$_lockB" ]; then
-    fail "a lock directory was left behind despite with_lock refusing to hold it: $_out"
+    fail "a lock directory was left behind: $_out"
+else
+    pass
+fi
+
+it "an inherited _cleanup never becomes with_lock's trap"
+# with_lock composes _cleanup into trap code, so a value exported into the environment must never reach it.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+_sentinel="$r/SENTINEL"
+_out=$(cd "$r" && _cleanup="touch '$_sentinel'" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
+_rc=$?
+if [ -e "$_sentinel" ]; then
+    fail "an inherited _cleanup ran as trap code: $_out"
+elif [ "$_rc" -ne 0 ]; then
+    fail "ensure failed with an inherited _cleanup (rc $_rc): $_out"
+elif [ ! -f "$r/.cache/swiftlint/$SHA_A/.grubstake-receipt" ]; then
+    fail "ensure exited 0 without recording a receipt for the legacy entry: $_out"
 else
     pass
 fi
@@ -6148,70 +6163,12 @@ fi
 # add's half of the regex defect is not observable at the CLI: tool_url's literal case dies with
 # the same message either way, so the check test above covers the discriminating call site.
 
-it "add's pins lock fails fast naming the vanished directory, not a phantom holder"
-# A repo renamed away while add waits at its pins lock must fail fast naming the vanished directory; the pause matches grubstake.tools.lock since install_tool's cache lock comes first.
-r=$(new_repo)
-_sha=$(fake_release "$r" 1.0.0)
-# Under $ROOT, not $r: $r is renamed away below, and a shim (or counter) that moved with it would go unresolvable via PATH, silently hiding a retry instead of counting it.
-_shim="$ROOT/add-mkdir-shim.$$"
-_reached="$ROOT/add-reached.$$"
-_go="$ROOT/add-go.$$"
-_counter="$ROOT/add-count.$$"
-: >"$_counter" || fixture_die "cannot create the lock-count counter file $_counter"
-lock_pause_shim "$_shim" "$_reached" "$_go" '*grubstake.tools.lock'
-cat >"$_shim/plant" <<PLANT
-#!/bin/sh
-printf '%s\n' "\$*" >>"$_counter"
-PLANT
-chmod +x "$_shim/plant" || fixture_die "cannot make the lock-count plant script executable"
-(
-    cd "$r" || exit 1
-    PATH="$r/curl-shim:$_shim:$PATH"
-    export PATH
-    GRUBSTAKE_CACHE="$r/.cache"
-    export GRUBSTAKE_CACHE
-    exec ./grubstake.sh add swiftlint@1.0.0 >"$r/out" 2>&1
-) &
-_bgpid=$!
-_w=0
-while [ ! -f "$_reached" ]; do
-    _w=$((_w + 1))
-    [ "$_w" -gt 300 ] && fixture_die "add never reached its pins lock"
-    sleep 0.05 2>/dev/null || sleep 1
-done
-_trash="$ROOT/add-vanished-repo.$$"
-mv "$r" "$_trash" || fixture_die "cannot rename the repo directory away while add is paused at its lock"
-: >"$_go"
-wait "$_bgpid" 2>/dev/null
-_rc=$?
-_count=$(wc -l <"$_counter" | tr -d ' ')
-_out="$(cat "$_trash/out" 2>/dev/null)"
-if [ "$_rc" -eq 0 ]; then
-    fail "add exited 0 despite its own repo directory vanishing mid-run: $_out"
-elif [ "$_count" -ne 1 ]; then
-    fail "add attempted the pins lock $_count times instead of failing fast after one ($(cat "$_counter")): $_out"
-elif printf '%s' "$_out" | grep -q "locked by another run"; then
-    fail "misdiagnosed a vanished directory as another run holding the pins lock: $_out"
-elif ! printf '%s' "$_out" | grep -Eqi "gone|removed|disappear|vanish|no longer|does not exist"; then
-    fail "failed fast without naming the real cause: $_out"
-else
-    pass
-fi
-rm -f "$_reached" "$_go" "$_counter" 2>/dev/null
-chmod -R u+w "$_trash" 2>/dev/null
-rm -rf "$_trash" 2>/dev/null
-
-it "add's pins lock still reports a genuine holder when the directory is intact"
-# The other half of #68: the fix must not turn genuine contention into the same fast-fail. A
-# directory already sitting at grubstake.tools.lock before add ever runs, with the repo directory
-# left alone this time, makes add_one's mkdir fail every retry the same way a real concurrent
-# `add` would, for the same budget a genuinely stale lock costs -- no second process or pause shim
-# needed, the same static-plant technique #67's sibling lock test used. Exit and message alone do
-# not prove the retry budget was honestly exhausted rather than skipped (a "> 0" in place of the
-# real "> 50" would still exit non-zero and still say "locked by another run" on its very first
-# retry) -- a count of every real attempt is what actually distinguishes a full 51-attempt budget from a gutted one, and a shimmed sleep logging 50 calls of 0.1 proves the backoff itself is still there without paying for 50 real pauses.
+it "add takes its pins lock through lock_acquire and dies on contention without touching grubstake.tools"
+# lock_acquire's causes are proven through ensure's cache lock above; this proves add reaches that same loop (its full budget and its own warning) and then dies in add's own words.
 r=$(new_repo)
 fake_release "$r" 1.0.0 >/dev/null
+pins "$r" "periphery 3.7.4 $SHA_A $SHA_A"
+cp "$r/grubstake.tools" "$r/pins-before" || fixture_die "cannot snapshot the pins file"
 _lockdir="$r/grubstake.tools.lock"
 mkdir -p "$_lockdir" || fixture_die "cannot plant the stale pins lock"
 _shim="$(mktemp -d "$ROOT/lock-count.XXXXXX")" || fixture_die "cannot create the lock-count shim dir"
@@ -6223,42 +6180,24 @@ _out=$(cd "$r" && PATH="$_shim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" .
 _rc=$?
 _count=$(wc -l <"$_counter" | tr -d ' ')
 _slcount=$(wc -l <"$_sleeplog" | tr -d ' ')
-rm -rf "$_lockdir" 2>/dev/null
 if [ "$_rc" -eq 0 ]; then
     fail "add exited 0 despite a pins lock genuinely held by another run: $_out"
-elif ! printf '%s' "$_out" | grep -q "locked by another run"; then
-    fail "genuine contention was not reported as locked by another run: $_out"
+elif ! printf '%s\n' "$_out" | grep -qxF "[grubstake] $_lockdir: locked by another run (stale? rmdir it)"; then
+    fail "add did not report the contention in lock_acquire's own words: $_out"
+elif ! printf '%s\n' "$_out" | grep -qxF "[grubstake] swiftlint@1.0.0: not recorded (cannot lock grubstake.tools)"; then
+    fail "add did not die in its own words once lock_acquire failed: $_out"
 elif [ "$_count" -ne 51 ]; then
     fail "add attempted the pins lock $_count times instead of exhausting the full 51-attempt budget: $_out"
 elif [ "$_slcount" -ne 50 ] || grep -qv '^0\.1$' "$_sleeplog"; then
     fail "add's backoff slept $_slcount times instead of the full 50-sleep budget of 0.1 each: $_out"
+elif ! cmp -s "$r/pins-before" "$r/grubstake.tools"; then
+    fail "grubstake.tools changed although add never held its lock: $(cat "$r/grubstake.tools" 2>/dev/null)"
+elif [ ! -d "$_lockdir" ]; then
+    fail "add removed a pins lock it never held: $_out"
 else
     pass
 fi
-
-it "add fails fast on a permission-denied pins lock, not a five-second contention stall"
-# A read-only repo root fails the pins lock with EACCES, which must fail fast naming the permission failure.
-r=$(new_repo)
-fake_release "$r" 1.0.0 >/dev/null
-_shim="$(mktemp -d "$ROOT/lock-count.XXXXXX")" || fixture_die "cannot create the lock-count shim dir"
-_counter="$_shim/count"
-lock_count_shim "$_shim" "$_counter" '*grubstake.tools.lock'
-chmod 555 "$r" || fixture_die "cannot make $r read-only"
-_out=$(cd "$r" && PATH="$_shim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
-_rc=$?
-chmod 755 "$r" 2>/dev/null
-_count=$(wc -l <"$_counter" | tr -d ' ')
-if [ "$_rc" -eq 0 ]; then
-    fail "add exited 0 despite a permission-denied pins lock: $_out"
-elif [ "$_count" -ne 1 ]; then
-    fail "add attempted the pins lock $_count times instead of failing fast after one ($(cat "$_counter")): $_out"
-elif printf '%s' "$_out" | grep -qi "locked by another run"; then
-    fail "blamed a lock nobody held instead of the real permission failure: $_out"
-elif ! printf '%s' "$_out" | grep -qi "permission denied"; then
-    fail "did not carry the real cause (permission denied): $_out"
-else
-    pass
-fi
+rm -rf "$_lockdir" 2>/dev/null
 
 it "add blames an unreadable ancestor honestly, not a repository that was never removed"
 # An untraversable ancestor must read as a permission failure, not a removed repo; the gate is flipped at the grubstake.tools.lock mkdir, since a pre-chmod blocks the run itself and install_tool's cache lock comes first.
@@ -6478,16 +6417,39 @@ else
     pass
 fi
 
-it "a signal after add_one releases its pins lock but before disarming its trap does not delete a successor's lock"
-# add_one must disarm before its rmdir: the shim reclaims $_lockdir as a successor would right after that rmdir and signals, firing once so a repeat rmdir does not re-signal.
-r=$(new_repo)
-fake_release "$r" 1.0.0 >/dev/null
-_lockdir="$r/grubstake.tools.lock"
-_marker="$r/grubstake.tools.lock.fired"
-_shim="$r/rmdir-shim"
-mkdir -p "$_shim" || fixture_die "cannot create the rmdir shim dir"
-_realrmdir="$(command -v rmdir)" || fixture_die "no real rmdir on PATH to wrap"
-cat >"$_shim/rmdir" <<SHIM
+it "a signal right after a lock's release does not let its holder's trap delete a successor's lock"
+# Each holder must restore or disarm before its rmdir: the shim reclaims $_lockdir as a successor would right after that rmdir and signals, firing once so a repeat rmdir does not re-signal.
+# add_one's pins lock, then with_lock with a caller cleanup to restore (publish) and with none, so it clears (receipt).
+_bad=""
+for _case in add publish receipt; do
+    r=$(new_repo)
+    case "$_case" in
+        add)
+            fake_release "$r" 1.0.0 >/dev/null
+            _lockdir="$r/grubstake.tools.lock"
+            _cmd=add
+            _arg=swiftlint@1.0.0
+            ;;
+        publish)
+            _sha=$(fake_release "$r" 1.0.0)
+            pins "$r" "swiftlint 1.0.0 $_sha $_sha"
+            _lockdir="$r/.cache/swiftlint/$_sha.lock"
+            _cmd=ensure
+            _arg=""
+            ;;
+        receipt)
+            pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+            fake_install "$r" swiftlint 0.63.2 "$SHA_A"
+            _lockdir="$r/.cache/swiftlint/$SHA_A.lock"
+            _cmd=ensure
+            _arg=""
+            ;;
+    esac
+    _marker="$r/rmdir.fired"
+    _shim="$r/rmdir-shim"
+    mkdir -p "$_shim" || fixture_die "cannot create the rmdir shim dir"
+    _realrmdir="$(command -v rmdir)" || fixture_die "no real rmdir on PATH to wrap"
+    cat >"$_shim/rmdir" <<SHIM
 #!/bin/sh
 if [ "\$1" = "$_lockdir" ] && [ ! -e "$_marker" ]; then
     : > "$_marker"
@@ -6498,17 +6460,18 @@ if [ "\$1" = "$_lockdir" ] && [ ! -e "$_marker" ]; then
 fi
 exec "$_realrmdir" "\$@"
 SHIM
-chmod +x "$_shim/rmdir" || fixture_die "cannot make the rmdir shim executable"
-(cd "$r" && PATH="$r/curl-shim:$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 >"$r/out" 2>&1)
-if [ ! -f "$_marker" ]; then
-    fail "the rmdir shim never fired, so this proves nothing: $(cat "$r/out" 2>/dev/null)"
-elif [ -d "$_lockdir" ]; then
-    pass
-else
-    fail "a successor's lock (simulated) was deleted by add_one's own trap after the real lock was already released: $(cat "$r/out" 2>/dev/null)"
-fi
-rm -f "$_marker" 2>/dev/null
-rm -rf "$_lockdir" 2>/dev/null
+    chmod +x "$_shim/rmdir" || fixture_die "cannot make the rmdir shim executable"
+    (cd "$r" && PATH="$r/curl-shim:$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh "$_cmd" ${_arg:+"$_arg"} >"$r/out" 2>&1)
+    if [ ! -f "$_marker" ]; then
+        _bad="$_case: the rmdir shim never fired, so this proves nothing: $(cat "$r/out" 2>/dev/null)"
+    elif [ ! -d "$_lockdir" ]; then
+        _bad="$_case: a successor's lock (simulated) was deleted by the holder's own trap after the real lock was already released: $(cat "$r/out" 2>/dev/null)"
+    fi
+    rm -f "$_marker" 2>/dev/null
+    rm -rf "$_lockdir" 2>/dev/null
+    [ -z "$_bad" ] || break
+done
+if [ -z "$_bad" ]; then pass; else fail "$_bad"; fi
 
 it "a signal after add_one renames grubstake.tools into place does not let a killed run report success"
 # Deferred until the rename returns, a signal here must not let the run finish silently -- exit

@@ -29,7 +29,7 @@ nothing re-ran the earlier proofs and each fix was free to break an older one si
 Run the suite before you push, and again before you tag.
 
 ```sh
-test/run.sh              # offline, about 1.5 minutes on Linux and 3.5 on macOS
+test/run.sh              # offline; CI takes about 1.5 minutes on Linux and 3.5 on macOS
 test/run.sh --network    # also downloads real artifacts
 ```
 

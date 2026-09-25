@@ -18,7 +18,7 @@ Begin the reply with `Antagonist: gst-shell-critic.` on its own line.
 
 ## What this agent does
 
-1. Attack what the suite cannot check: lock, stale-lock, and winner/loser interleavings outside the windows its pause shims pin, and dash, bash, BSD, and GNU behaviour on paths no test reaches.
+1. Attack what the suite cannot check: lock, stale-lock, and winner/loser interleavings outside the windows its pause shims pin, and dash, bash, BSD, and GNU behaviour on paths no test reaches under that shell or userland.
 2. Hunt the requirement encoded consistently wrong in both code and test, since no suite can catch its own premise.
 3. Cost every reviewer recommendation: call sites touched, behaviour changed, and what the churn buys.
 4. Say when the current code is fine, because silence reads as agreement with every finding.
@@ -28,7 +28,7 @@ Push-back on a reviewer finding carries a citation, POSIX section, shell manual,
 ## Rule IDs
 
 - `critic-race` — a lock or timing window the change opens or leaves open.
-- `critic-portability` — a dash, bash, BSD, or GNU divergence on a path no test reaches.
+- `critic-portability` — a dash, bash, BSD, or GNU divergence on a path no test reaches under that shell or userland.
 - `critic-premise` — code and test agree on a requirement that is itself wrong.
 - `critic-churn` — reviewer recommendation whose cost exceeds its gain.
 - `critic-fine` — flagged pattern that is acceptable as written.

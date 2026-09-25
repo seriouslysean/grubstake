@@ -1,8 +1,8 @@
 name: test
 
 # The suite exists so a fix cannot silently break an earlier fix, which only holds if something
-# other than memory runs it. This is the merge gate: offline only, no network, so
-# nothing green depends on GitHub being reachable. The download tier is network.yml, on tags.
+# other than memory runs it. This is the merge gate, and the suite downloads nothing, so no test
+# result depends on GitHub being reachable. The download tier is network.yml.
 
 on:
   pull_request:

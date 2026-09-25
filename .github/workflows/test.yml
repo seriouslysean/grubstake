@@ -16,7 +16,7 @@ jobs:
   test:
     name: test (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
-    # The suite runs ~7 minutes locally; well past that means the run itself is stuck, not slow.
+    # The suite takes about 1.5 minutes on the Linux runner and 3.5 on macOS; well past that means the run itself is stuck, not slow.
     timeout-minutes: 30
     strategy:
       # Both platforms report, because "it broke on the other one" is the answer worth having.

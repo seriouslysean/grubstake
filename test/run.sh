@@ -673,16 +673,16 @@ else
 fi
 
 it "doctor on an unsupported arch reports fully, then fails, without a stray guard message leaking past its report"
-# Relies on the runner's environment leaving GRUBSTAKE_CACHE unset, since only then does cache_root's platform check run; the report must render in full and stderr-clean before doctor exits non-zero.
+# GRUBSTAKE_CACHE stays unset so cache_root's own platform check is what doctor reaches.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 _unameshim="$r/uname-shim"
 uname_arch_shim "$_unameshim"
 _fakehome="$r/fake-home"
 mkdir -p "$_fakehome" || fixture_die "cannot create the fake HOME dir"
-_out=$(cd "$r" && PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh doctor 2>/dev/null)
+_out=$(cd "$r" && env -u GRUBSTAKE_CACHE PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh doctor 2>/dev/null)
 _rc=$?
-_err=$(cd "$r" && PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh doctor 2>&1 1>/dev/null)
+_err=$(cd "$r" && env -u GRUBSTAKE_CACHE PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh doctor 2>&1 1>/dev/null)
 if [ "$_rc" -eq 0 ]; then
     fail "doctor exited 0 on an unsupported arch, now a reported problem: $_out"
 elif ! printf '%s\n' "$_out" | grep -q '^platform.*unsupported arch: aarch64'; then

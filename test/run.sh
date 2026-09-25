@@ -673,16 +673,16 @@ else
 fi
 
 it "doctor on an unsupported arch reports fully, then fails, without a stray guard message leaking past its report"
-# Relies on the runner's environment leaving GRUBSTAKE_CACHE unset, since only then does cache_root's platform check run; the report must render in full and stderr-clean before doctor exits non-zero.
+# GRUBSTAKE_CACHE stays unset so cache_root's own platform check is what doctor reaches.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 _unameshim="$r/uname-shim"
 uname_arch_shim "$_unameshim"
 _fakehome="$r/fake-home"
 mkdir -p "$_fakehome" || fixture_die "cannot create the fake HOME dir"
-_out=$(cd "$r" && PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh doctor 2>/dev/null)
+_out=$(cd "$r" && env -u GRUBSTAKE_CACHE PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh doctor 2>/dev/null)
 _rc=$?
-_err=$(cd "$r" && PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh doctor 2>&1 1>/dev/null)
+_err=$(cd "$r" && env -u GRUBSTAKE_CACHE PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh doctor 2>&1 1>/dev/null)
 if [ "$_rc" -eq 0 ]; then
     fail "doctor exited 0 on an unsupported arch, now a reported problem: $_out"
 elif ! printf '%s\n' "$_out" | grep -q '^platform.*unsupported arch: aarch64'; then
@@ -3768,7 +3768,7 @@ else
 fi
 
 it "bare update dies naming the repo when its tags cannot be resolved"
-# release_tags discards git's own stderr, so an unreachable repo reads as zero candidates, not a git error.
+# A nonexistent path fails git outright, so its own stderr is relayed ahead of grubstake's refusal.
 r=$(new_repo)
 _before="$r/before.sh"
 cp "$r/grubstake.sh" "$_before" || fixture_die "cannot snapshot $r/grubstake.sh"
@@ -3784,6 +3784,26 @@ else
         *"cannot resolve a release tag from $_badrepo"*) pass ;;
         *) fail "did not name the repo it could not resolve: $_out" ;;
     esac
+fi
+
+it "update relays git's own reason when git cannot read the repository"
+# The file name is the only part of git's refusal that no locale translates.
+_src=$(new_committed_repo)
+(cd "$_src" && git tag v1.3.0) || fixture_die "cannot tag $_src as a release source"
+r=$(new_repo)
+_before="$r/before.sh"
+cp "$r/grubstake.sh" "$_before" || fixture_die "cannot snapshot $r/grubstake.sh"
+printf '[core\n' >>"$r/.git/config" || fixture_die "cannot malform $r/.git/config"
+_out=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" GRUBSTAKE_REPO="file://$_src" ./grubstake.sh update 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "update exited 0 despite git being unable to read the repository: $_out"
+elif ! cmp -s "$_before" "$r/grubstake.sh"; then
+    fail "the running script was replaced despite git failing to read the repository"
+elif ! printf '%s' "$_out" | grep -qF ".git/config"; then
+    fail "update discarded git's own reason instead of naming .git/config: $_out"
+else
+    pass
 fi
 
 # ---------------------------------------------------------------------------- install

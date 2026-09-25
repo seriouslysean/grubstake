@@ -3327,6 +3327,120 @@ elif [ -d "$r/t.lock" ]; then
     fail "the lock survived a locked command's exit because the caller's cleanup failed before the release"
 else pass; fi
 
+it "with_lock's caller cleanup runs exactly once, and the lock is released, whether the locked command returns or is caught by a signal while it is held"
+# armed/none mirrors with_lock's two callers (publish composes a prior cleanup, write_receipt does not); RETURN plus each signal covers the normal-return and real-signal paths the "exits" test above does not, since that one only exercises EXIT via a literal exit.
+_bad=""
+for _mode in armed none; do
+    [ -z "$_bad" ] || break
+    for _sig in RETURN HUP INT TERM; do
+        [ -z "$_bad" ] || break
+        r=$(new_repo)
+        {
+            extract_fns
+            cat <<'INNER'
+die() { echo "$1" >&2; exit 1; }
+warn() { echo "WARN: $1" >&2; }
+waits() {
+    [ -d "$1" ] && echo held >>"$3"
+    case "$2" in
+        RETURN) return 3 ;;
+        *) kill -s "$2" $$ ;;
+    esac
+}
+INNER
+            [ "$_mode" = armed ] && printf 'arm_cleanup "echo ran >>%s"\n' "$r/cleanup.log"
+            printf 'with_lock %s waits %s %s %s\n' "$r/t.lock" "$r/t.lock" "$_sig" "$r/held"
+        } >"$r/t.sh"
+        _out=$(sh -eu "$r/t.sh" 2>&1)
+        _rc=$?
+        _heldn=$(grep -c '^held$' "$r/held" 2>/dev/null)
+        _ran=$(grep -c '^ran$' "$r/cleanup.log" 2>/dev/null)
+        if [ "${_heldn:-0}" -ne 1 ]; then
+            _bad="$_mode/$_sig: the locked section ran ${_heldn:-0} times while holding the lock instead of once, so nothing here was proven"
+        elif [ "$_sig" = RETURN ] && [ "$_rc" -ne 3 ]; then
+            _bad="$_mode/$_sig: with_lock exited $_rc instead of passing back the locked command's own 3: $_out"
+        elif [ "$_sig" != RETURN ] && [ "$_rc" -eq 0 ]; then
+            _bad="$_mode/$_sig: exited 0 despite a signal caught while holding the lock: $_out"
+        elif [ "$_mode" = armed ] && [ "${_ran:-0}" -ne 1 ]; then
+            _bad="$_mode/$_sig: the caller's cleanup ran ${_ran:-0} times instead of once: $_out"
+        elif [ "$_mode" = none ] && [ "${_ran:-0}" -ne 0 ]; then
+            _bad="$_mode/$_sig: a cleanup ran although the caller never armed one: $_out"
+        elif [ -d "$r/t.lock" ]; then
+            _bad="$_mode/$_sig: the lock survived: $_out"
+        fi
+    done
+done
+if [ -z "$_bad" ]; then pass; else fail "$_bad"; fi
+
+it "with_lock restores or clears the caller's trap before releasing the lock, so a second signal landing mid-release cannot delete a lock a successor has since taken"
+# INT, not TERM, is the reclaim signal: dash and bash both defer a second, identical signal while already running that signal's own trap, which would hide this exact ordering defect under a same-signal reclaim.
+# armed exercises with_lock's restore branch (arm_cleanup); none exercises its clear branch (disarm_cleanup) -- a defect confined to either branch alone reads as a pass under the other.
+_bad=""
+for _mode in armed none; do
+    [ -z "$_bad" ] || break
+    for _trigger in SIGNAL EXIT; do
+        [ -z "$_bad" ] || break
+        r=$(new_repo)
+        _lock="$r/t.lock"
+        _marker="$r/rmdir.fired"
+        _shim="$r/rmdir-shim"
+        mkdir -p "$_shim" || fixture_die "cannot create the rmdir shim dir"
+        _realrmdir="$(command -v rmdir)" || fixture_die "no real rmdir on PATH to wrap"
+        cat >"$_shim/rmdir" <<SHIM
+#!/bin/sh
+if [ "\$1" = "$_lock" ] && [ ! -e "$_marker" ]; then
+    : > "$_marker"
+    "$_realrmdir" "\$1"
+    mkdir "$_lock"
+    kill -s INT "\$PPID" 2>/dev/null
+    exit 0
+fi
+exec "$_realrmdir" "\$@"
+SHIM
+        chmod +x "$_shim/rmdir" || fixture_die "cannot make the rmdir shim executable"
+        {
+            extract_fns
+            if [ "$_trigger" = SIGNAL ]; then
+                cat <<'INNER'
+die() { echo "$1" >&2; exit 1; }
+warn() { echo "WARN: $1" >&2; }
+waits() {
+    [ -d "$1" ] && echo held >>"$2"
+    kill -s TERM $$
+}
+INNER
+            else
+                cat <<'INNER'
+die() { echo "$1" >&2; exit 1; }
+warn() { echo "WARN: $1" >&2; }
+exits() {
+    [ -d "$1" ] && echo held >>"$2"
+    exit 3
+}
+INNER
+            fi
+            [ "$_mode" = armed ] && printf 'arm_cleanup "echo ran >>%s"\n' "$r/cleanup.log"
+            if [ "$_trigger" = SIGNAL ]; then
+                printf 'with_lock %s waits %s %s\n' "$_lock" "$_lock" "$r/held"
+            else
+                printf 'with_lock %s exits %s %s\n' "$_lock" "$_lock" "$r/held"
+            fi
+        } >"$r/t.sh"
+        _out=$(PATH="$_shim:$PATH" sh -eu "$r/t.sh" 2>&1)
+        _heldn=$(grep -c '^held$' "$r/held" 2>/dev/null)
+        if [ ! -e "$_marker" ]; then
+            _bad="$_mode/$_trigger: the rmdir shim never fired, so this proves nothing: $_out"
+        elif [ "${_heldn:-0}" -ne 1 ]; then
+            _bad="$_mode/$_trigger: the locked section ran ${_heldn:-0} times instead of once, so nothing here was proven"
+        elif [ ! -d "$_lock" ]; then
+            _bad="$_mode/$_trigger: a successor's lock (simulated) was deleted by the holder's own trap after the real release: $_out"
+        fi
+        rm -f "$_marker" 2>/dev/null
+        rm -rf "$_lock" 2>/dev/null
+    done
+done
+if [ -z "$_bad" ]; then pass; else fail "$_bad"; fi
+
 it "a signal landing while write_receipt holds the lock does not strand it"
 # exec makes $! grubstake.sh itself, so the kill lands while mv_pause_shim holds the receipt rename under the lock; the orphaned shim is then killed.
 r=$(new_repo)
@@ -6509,6 +6623,58 @@ else
     pass
 fi
 rm -f "$_marker" 2>/dev/null
+
+it "a signal while add_one still holds its own pins lock exits nonzero and removes that lock exactly once"
+# add_one arms its cleanup directly around lock_acquire rather than composing through with_lock (see with_lock's own signal test above), so its critical section needs the same real-signal proof; the mv shim reuses the rename point the test above already pauses at, add_one's own last write while the lock is still held.
+_bad=""
+for _sig in HUP INT TERM; do
+    [ -z "$_bad" ] || break
+    r=$(new_repo)
+    fake_release "$r" 1.0.0 >/dev/null
+    _pins="$r/grubstake.tools"
+    _lockdir="$_pins.lock"
+    _marker="$r/mv.fired"
+    _rmlog="$r/rm.calls"
+    _shim="$r/mv-shim"
+    mkdir -p "$_shim" || fixture_die "cannot create the mv shim dir"
+    _realmv="$(command -v mv)" || fixture_die "no real mv on PATH to wrap"
+    _realrm="$(command -v rm)" || fixture_die "no real rm on PATH to wrap"
+    cat >"$_shim/mv" <<SHIM
+#!/bin/sh
+if [ "\$#" -eq 2 ] && [ "\$2" = "$_pins" ] && [ ! -e "$_marker" ]; then
+    : > "$_marker"
+    "$_realmv" "\$1" "\$2"
+    _rc=\$?
+    kill -s $_sig "\$PPID" 2>/dev/null
+    exit \$_rc
+fi
+exec "$_realmv" "\$@"
+SHIM
+    chmod +x "$_shim/mv" || fixture_die "cannot make the mv shim executable"
+    cat >"$_shim/rm" <<SHIM
+#!/bin/sh
+case " \$* " in
+    *" $_lockdir "*) printf '%s\n' "\$*" >>"$_rmlog" ;;
+esac
+exec "$_realrm" "\$@"
+SHIM
+    chmod +x "$_shim/rm" || fixture_die "cannot make the rm shim executable"
+    _out=$(cd "$r" && PATH="$r/curl-shim:$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
+    _rc=$?
+    _ran=$(wc -l <"$_rmlog" 2>/dev/null | tr -d ' ')
+    if [ ! -f "$_marker" ]; then
+        _bad="$_sig: the mv shim never fired, so this proves nothing: $_out"
+    elif [ "$_rc" -eq 0 ]; then
+        _bad="$_sig: add exited 0 after being signaled while still holding its pins lock: $_out"
+    elif [ "${_ran:-0}" -ne 1 ]; then
+        _bad="$_sig: add_one's cleanup removed the pins lock ${_ran:-0} times instead of once: $_out"
+    elif [ -d "$_lockdir" ]; then
+        _bad="$_sig: the pins lock survived the signal: $_out"
+    fi
+    rm -f "$_marker" 2>/dev/null
+    rm -rf "$_lockdir" 2>/dev/null
+done
+if [ -z "$_bad" ]; then pass; else fail "$_bad"; fi
 
 it "add refuses a version outside validate_pins' own grammar before ever calling curl"
 # #145: add never checked the version it was given against the grammar validate_pins enforces, so

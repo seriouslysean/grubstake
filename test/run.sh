@@ -4318,7 +4318,7 @@ fi
 it "install dies naming a core.hooksPath it cannot read, rather than exiting on git's raw status"
 # The stderr-only re-read on this branch is itself a fallible git invocation under set -eu; a bare
 # assignment failing here would exit on git's own raw status before the die message it exists to print.
-# Where git itself refuses this value during repository discovery, git's own message is what names it.
+# Some git releases refuse this value during repository discovery and others only on the later read, so either refusal must name it.
 r=$(new_repo)
 (cd "$r" && git config core.hooksPath "~nosuchuser/hooks") || fixture_die "cannot seed core.hooksPath in $r"
 _out=$(gs "$r" install)
@@ -4329,7 +4329,7 @@ elif [ -d "$r/.githooks" ]; then
     fail "install wrote .githooks before refusing: $_out"
 else
     case "$_out" in
-        *"~nosuchuser/hooks"*) pass ;;
+        *"~nosuchuser/hooks"*"cannot resolve the repository root"* | *"cannot read core.hooksPath"*"~nosuchuser/hooks"*) pass ;;
         *) fail "install exited without naming the unreadable core.hooksPath: $_out" ;;
     esac
 fi
@@ -6337,7 +6337,7 @@ it "doctor names a core.hooksPath it cannot read instead of grading it as unset"
 # ~nosuchuser/hooks fails git's own user-dir expansion (rc 128, not rc 1 for unset) -- doctor's own
 # read discarded every nonzero status, which graded that failure the same as .githooks. #148 makes a
 # read failure a reported problem, so doctor now fails here too, rather than passing while unable to say so.
-# Where git itself refuses this value during repository discovery, git's own message is what names it.
+# Some git releases refuse this value during repository discovery and others only on the later read, so either refusal must name it.
 r=$(new_repo)
 (cd "$r" && git config core.hooksPath "~nosuchuser/hooks") || fixture_die "cannot seed core.hooksPath in $r"
 _out=$(gs "$r" doctor)
@@ -6348,7 +6348,7 @@ else
     case "$_out" in
         *"hooksPath  (unset)"*) fail "doctor graded an unreadable core.hooksPath as unset: $_out" ;;
         *"not installed"* | *"DRIFTED"*) fail "doctor graded hooks despite failing to read core.hooksPath: $_out" ;;
-        *"~nosuchuser/hooks"*) pass ;;
+        *"~nosuchuser/hooks"*"cannot resolve the repository root"* | *"cannot read core.hooksPath"*"~nosuchuser/hooks"*) pass ;;
         *) fail "doctor did not name the unreadable core.hooksPath: $_out" ;;
     esac
 fi

@@ -22,9 +22,9 @@ the cache still is not a trust boundary -- only the pin checked at download is.
 Fetch the script and adopt the repo.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.3.1/grubstake.sh -o grubstake.sh
+curl -fsSL https://raw.githubusercontent.com/seriouslysean/grubstake/v1.3.2/grubstake.sh -o grubstake.sh
 chmod +x grubstake.sh
-./grubstake.sh version   # expect 1.3.1
+./grubstake.sh version   # expect 1.3.2
 ./grubstake.sh install
 ```
 

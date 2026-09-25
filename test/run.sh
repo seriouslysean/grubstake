@@ -3814,8 +3814,7 @@ else
 fi
 
 it "post-commit's own tag comparison excludes the same malformed shapes, not just grubstake.sh's copy"
-# post-commit runs its own inline copy of the filter-then-sort pipeline, so it is extracted from the
-# embedded hook and checked to contain the version filter.
+# The range's end pattern, head -1)$, also matches post-commit's later unfiltered newest= sort, so a non-empty extraction alone does not prove it holds the filter.
 r=$(new_repo)
 _shim="$r/git-shim"
 git_tags_shim "$_shim"

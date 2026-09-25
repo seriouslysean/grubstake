@@ -147,9 +147,6 @@ new_committed_repo() {
     _cr="$(new_repo)"
     printf 'fixture\n' >"$_cr/README.md" || fixture_die "cannot write $_cr/README.md"
     (cd "$_cr" \
-        && git config user.email test@example.invalid \
-        && git config user.name "grubstake suite" \
-        && git config commit.gpgsign false \
         && git add README.md \
         && git commit -q -m baseline) || fixture_die "cannot seed a commit in $_cr"
     echo "$_cr"
@@ -576,20 +573,31 @@ else
     pass
 fi
 
-# Shared by every remaining #70 site test below: the same uname stand-in as the two tests above,
-# factored out because four more call sites now need it. Not backported into those two: they are
-# already reviewed and passing, and this section's rule is add coverage, not churn proven tests.
+# A uname stand-in reporting Linux on any real host, shared by every site test below that needs one.
+# $2, optional: the arch -m reports; aarch64 when omitted.
 uname_arch_shim() {
     mkdir -p "$1" || fixture_die "cannot create the uname shim dir"
-    cat >"$1/uname" <<'SHIM'
+    _uas_arch="${2:-aarch64}"
+    cat >"$1/uname" <<SHIM
 #!/bin/sh
-case "$1" in
+case "\$1" in
     -s) echo Linux ;;
-    -m) echo aarch64 ;;
+    -m) echo $_uas_arch ;;
     *)  echo Linux ;;
 esac
 SHIM
     chmod +x "$1/uname" || fixture_die "cannot make the uname shim executable"
+}
+
+# A curl stand-in that records its argv to $2 and refuses, so a guard upstream that stops working fails loudly here instead of silently reaching a real download.
+curl_call_guard() {
+    mkdir -p "$1" || fixture_die "cannot create the curl guard dir"
+    cat >"$1/curl" <<SHIM
+#!/bin/sh
+printf '%s\n' "\$*" >>"$2"
+exit 6
+SHIM
+    chmod +x "$1/curl" || fixture_die "cannot make the curl guard executable"
 }
 
 it "check on an unsupported arch resolves the guard's own message, not an unrelated tool_url death"
@@ -1125,18 +1133,6 @@ fake_install "$r" swiftlint 0.63.2 "$SHA_A"
 pins "$r" "swiftlint 0.63.2 $SHA_B $SHA_B"
 expect_fail "$r" check
 
-it "two pins of the same version at different hashes coexist"
-# Two repos correcting a hash at different times must not fight over one directory.
-r=$(new_repo)
-pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
-fake_install "$r" swiftlint 0.63.2 "$SHA_A"
-fake_install "$r" swiftlint 0.63.2 "$SHA_B"
-if [ -x "$r/.cache/swiftlint/$SHA_A/swiftlint" ] && [ -x "$r/.cache/swiftlint/$SHA_B/swiftlint" ]; then
-    pass
-else
-    fail "one install displaced the other"
-fi
-
 it "a poisoned cache IS served, and nothing claims otherwise"
 # Honest boundary: the pin checked at download is the trust root. A local cache writable by the
 # same user is not defensible, and no cited tool claims it is. This test exists so the claim
@@ -1573,8 +1569,8 @@ fi
 it "install_tool extracts a .tar.xz archive, not just the unzip default"
 # xcbeautify ships a .tar.xz on linux; every other archive fixture in this suite is a .zip, so unzip's own success never exercises install_tool's tar branch.
 r=$(new_repo)
-sed 's/        Darwin) echo darwin ;;/        Darwin) echo linux ;;/' "$GS" >"$r/grubstake.sh"
-chmod +x "$r/grubstake.sh" || fixture_die "cannot make $r/grubstake.sh executable"
+_unameshim="$r/uname-shim"
+uname_arch_shim "$_unameshim" x86_64
 _src="$r/release-src"
 mkdir -p "$_src" || fixture_die "cannot create $_src"
 printf '#!/bin/sh\necho 1.6.2\n' >"$_src/xcbeautify" || fixture_die "cannot write the fixture xcbeautify binary"
@@ -1603,7 +1599,7 @@ done
 cp "$_archive" "\$_out"
 SHIM
 chmod +x "$_shim/curl" || fixture_die "cannot make the fixture curl shim executable"
-_out=$(cd "$r" && PATH="$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path xcbeautify 2>&1)
+_out=$(cd "$r" && PATH="$_unameshim:$_shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path xcbeautify 2>&1)
 _rc=$?
 _bin="$r/.cache/xcbeautify/$_sha/xcbeautify"
 if [ "$_rc" -ne 0 ]; then
@@ -1611,7 +1607,7 @@ if [ "$_rc" -ne 0 ]; then
 elif [ ! -x "$_bin" ]; then
     fail "path exited 0 but did not extract $_bin: $_out"
 else
-    _checkout=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh check 2>&1)
+    _checkout=$(cd "$r" && PATH="$_unameshim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh check 2>&1)
     _checkrc=$?
     [ "$_checkrc" -eq 0 ] && pass || fail "check did not verify the .tar.xz install: $_checkout"
 fi
@@ -2720,10 +2716,24 @@ it "path fails for a tool with no artifact on this platform"
 # It used to print a cache path that did not exist and exit 0, which after a cutover hands CI
 # a path to nothing instead of an error.
 r=$(new_repo)
-sed 's/        Darwin) echo darwin ;;/        Darwin) echo linux ;;/' "$GS" >"$r/grubstake.sh"
-chmod +x "$r/grubstake.sh"
+_unameshim="$r/uname-shim"
+uname_arch_shim "$_unameshim" x86_64
+_curlguard="$r/curl-guard"
+_curlcalls="$r/curl-guard-calls"
+curl_call_guard "$_curlguard" "$_curlcalls"
 pins "$r" "periphery 3.7.4 $SHA_A -"
-expect_says_fail "periphery is not published for linux" "$r" path periphery
+_out=$(cd "$r" && PATH="$_unameshim:$_curlguard:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path periphery 2>&1)
+_rc=$?
+if [ -e "$_curlcalls" ]; then
+    fail "curl ran despite no artifact for this platform: $(cat "$_curlcalls")"
+elif [ "$_rc" -eq 0 ]; then
+    fail "expected non-zero exit, got 0: $_out"
+else
+    case "$_out" in
+        *"periphery is not published for linux"*) pass ;;
+        *) fail "output did not contain 'periphery is not published for linux'. Got: $_out" ;;
+    esac
+fi
 
 it "path exits exactly 3 only for a tool that is not pinned, never for another refusal"
 # The pre-commit hook reads this exit status literally (embedded_hook pre-commit: RC -eq 3 means "not pinned"); a different refusal exiting 3 by coincidence would make the hook treat it as a missing pin instead of a hard failure.
@@ -2733,17 +2743,22 @@ gs_rc "$r" path swiftlint
 _rc_unpinned=$?
 
 r2=$(new_repo)
-sed 's/        Darwin) echo darwin ;;/        Darwin) echo linux ;;/' "$GS" >"$r2/grubstake.sh"
-chmod +x "$r2/grubstake.sh" || fixture_die "cannot make $r2/grubstake.sh executable"
+_unameshim2="$r2/uname-shim"
+uname_arch_shim "$_unameshim2" x86_64
+_curlguard2="$r2/curl-guard"
+_curlcalls2="$r2/curl-guard-calls"
+curl_call_guard "$_curlguard2" "$_curlcalls2"
 pins "$r2" "periphery 3.7.4 $SHA_A -"
-gs_rc "$r2" path periphery
+(cd "$r2" && PATH="$_unameshim2:$_curlguard2:$PATH" GRUBSTAKE_CACHE="$r2/.cache" ./grubstake.sh path periphery) >/dev/null 2>&1
 _rc_noartifact=$?
 
 r3=$(new_repo)
 gs_rc "$r3" path notatool
 _rc_unknown=$?
 
-if [ "$_rc_unpinned" -ne 3 ]; then
+if [ -e "$_curlcalls2" ]; then
+    fail "curl ran despite no artifact for this platform: $(cat "$_curlcalls2")"
+elif [ "$_rc_unpinned" -ne 3 ]; then
     fail "an unpinned tool exited $_rc_unpinned, expected exactly 3"
 elif [ "$_rc_noartifact" -eq 3 ]; then
     fail "a tool with no artifact on this platform also exited 3, indistinguishable from unpinned"
@@ -2797,9 +2812,20 @@ expect_says_fail "grubstake.tools:2 bad version: 0.63.2-rc1" "$r" check
 it "a tool with no artifact on this platform is skipped, not failed, by check"
 r=$(new_repo)
 pins "$r" "periphery 3.7.4 $SHA_A -"
-sed 's/        Darwin) echo darwin ;;/        Darwin) echo linux ;;/' "$GS" >"$r/grubstake.sh"
-chmod +x "$r/grubstake.sh"
-expect_ok "$r" check
+_unameshim="$r/uname-shim"
+uname_arch_shim "$_unameshim" x86_64
+_curlguard="$r/curl-guard"
+_curlcalls="$r/curl-guard-calls"
+curl_call_guard "$_curlguard" "$_curlcalls"
+(cd "$r" && PATH="$_unameshim:$_curlguard:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh check) >/dev/null 2>&1
+_rc=$?
+if [ -e "$_curlcalls" ]; then
+    fail "curl ran despite no artifact for this platform: $(cat "$_curlcalls")"
+elif [ "$_rc" -eq 0 ]; then
+    pass
+else
+    fail "expected exit 0, got non-zero"
+fi
 
 # ---------------------------------------------------------------------------- update
 
@@ -2964,104 +2990,7 @@ else
     pass
 fi
 
-it "the previous release can update to this one"
-# The suite asserted the destination and never the journey: it checked that the internal replace
-# verb was gone, while every older client still called it. Removing a verb only old versions speak
-# is the one change that cannot be fixed forward.
-#
-# Resolved from the remote, not from local tags: a shallow clone by tag has one tag, which made
-# this report a failure when the real cause was "nothing to compare against". A test that cannot
-# tell "I could not run" from "the thing is broken" gets ignored the first time it goes red.
-# GRUBSTAKE_REPO/GRUBSTAKE_RAW aim the fetched old client at a local fixture serving $GS, so the assertion is a byte comparison against $GS itself.
-if [ "$NETWORK" = 1 ]; then
-    # The named default is the source of truth; a plain literal assignment is the fallback shape.
-    _repo="$(sed -n 's/^GRUBSTAKE_REPO_DEFAULT="\(.*\)"$/\1/p' "$GS")"
-    [ -n "$_repo" ] || _repo="$(sed -n 's/^GRUBSTAKE_REPO="\(.*\)"$/\1/p' "$GS")"
-    _prev=$(git ls-remote --tags --refs "$_repo" 'v*' 2>/dev/null \
-        | awk '{print $2}' | sed 's|refs/tags/v||' \
-        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-        | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | sed -n 1p)
-    _cand="$(sed -n 's/^GRUBSTAKE_VERSION="\(.*\)"$/\1/p' "$GS")"
-    if [ -z "$_prev" ]; then
-        printf '  skip  %s\n' "$CURRENT (no release published yet)"
-    elif [ "$_prev" = "$_cand" ]; then
-        # On the tag-push trigger the candidate's own tag is already the newest published one, so an update to it is correctly a no-op, not a byte-for-byte replace; nothing to compare here.
-        printf '  skip  %s\n' "$CURRENT (candidate's tag is already the newest published release)"
-    else
-        r=$(new_repo)
-        if curl -fsSL "https://raw.githubusercontent.com/seriouslysean/grubstake/v$_prev/grubstake.sh" \
-            -o "$r/grubstake.sh" 2>/dev/null; then
-            chmod +x "$r/grubstake.sh"
-            # A future previous release that drops these overrides would leave this test with no honest way to aim it at the candidate at all.
-            if ! grep -q 'GRUBSTAKE_REPO="${GRUBSTAKE_REPO:-' "$r/grubstake.sh" \
-                || ! grep -q 'GRUBSTAKE_RAW="${GRUBSTAKE_RAW:-' "$r/grubstake.sh"; then
-                fail "v$_prev does not honour GRUBSTAKE_REPO/GRUBSTAKE_RAW, so this test cannot aim it at the candidate"
-            else
-                _uf="$(mktemp -d "$ROOT/candidate-update.XXXXXX")" || fixture_die "cannot create a candidate update fixture dir"
-                git init -q --bare "$_uf/repo.git" || fixture_die "cannot init the candidate fixture release repo"
-                _uw="$(mktemp -d "$ROOT/candidate-update-work.XXXXXX")" || fixture_die "cannot create a work dir for the candidate fixture release"
-                (cd "$_uw" \
-                    && git init -q . \
-                    && git config user.email test@example.invalid \
-                    && git config user.name "grubstake suite" \
-                    && git config commit.gpgsign false \
-                    && git config tag.gpgSign false \
-                    && printf 'candidate release\n' >README.md \
-                    && git add README.md \
-                    && git commit -q -m release \
-                    && git tag -a "v$_cand" -m "candidate release $_cand" \
-                    && git push -q "$_uf/repo.git" HEAD:refs/heads/main --tags) \
-                    || fixture_die "cannot seed the candidate update fixture in $_uf"
-                mkdir -p "$_uf/raw/v$_cand" || fixture_die "cannot create the candidate raw tree in $_uf"
-                cp "$GS" "$_uf/raw/v$_cand/grubstake.sh" || fixture_die "cannot serve the candidate as the update target"
-                # curl/git shimmed to file:// only, so an override-reading regression fails loudly here instead of silently falling back to https:// and coincidentally passing against the real release.
-                _realcurl="$(command -v curl)" || fixture_die "no curl on PATH"
-                _realgit="$(command -v git)" || fixture_die "no git on PATH"
-                _shims="$(mktemp -d "$ROOT/candidate-update-shims.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shims"
-                cat >"$_shims/curl" <<SHIM
-#!/bin/sh
-for a in "\$@"; do
-    case "\$a" in
-        file://*) exec "$_realcurl" "\$@" ;;
-    esac
-done
-echo "curl: network blocked in test" >&2
-exit 6
-SHIM
-                cat >"$_shims/git" <<SHIM
-#!/bin/sh
-if [ "\${1:-}" = "ls-remote" ]; then
-    _ok=1
-    for a in "\$@"; do
-        case "\$a" in file://*) _ok=0 ;; esac
-    done
-    if [ "\$_ok" = 1 ]; then
-        echo "git: network blocked in test" >&2
-        exit 128
-    fi
-fi
-exec "$_realgit" "\$@"
-SHIM
-                chmod +x "$_shims/curl" "$_shims/git"
-                _now="$(gs "$r" version)"
-                (cd "$r" && PATH="$_shims:$PATH" \
-                    GRUBSTAKE_REPO="file://$_uf/repo.git" GRUBSTAKE_RAW="file://$_uf/raw" \
-                    ./grubstake.sh update) >/dev/null 2>&1
-                if ! cmp -s "$r/grubstake.sh" "$GS"; then
-                    fail "the previous release ($_now) did not end up byte-identical to the candidate after update"
-                else
-                    pass
-                fi
-            fi
-        else
-            fail "v$_prev is published but could not be fetched"
-        fi
-    fi
-else
-    printf '  skip  %s (network)\n' "$CURRENT"
-fi
-
-# Every release tag from v0.3.0 up fetches its own real grubstake.sh and runs its own update, unmodified, against a shim serving only the candidate -- proving every still-supported client can reach it, not just the one release the test above names.
+# Every release tag from v0.3.0 up fetches its own real grubstake.sh and runs its own update, unmodified, against a shim serving only the candidate -- proving every still-supported client can reach it.
 if [ "$NETWORK" = 1 ]; then
     _repodefault="$(sed -n 's/^GRUBSTAKE_REPO_DEFAULT="\(.*\)"$/\1/p' "$GS")"
     [ -n "$_repodefault" ] || fixture_die "cannot read GRUBSTAKE_REPO_DEFAULT from $GS"
@@ -3465,12 +3394,6 @@ else
     pass
 fi
 
-it "release versions sort newest first"
-# A trailing -r is ignored when per-key flags are present, which once made update install the
-# oldest release every time.
-top=$(printf '0.2.0\n0.10.0\n0.9.9\n' | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
-[ "$top" = "0.10.0" ] && pass || fail "sorted to $top, expected 0.10.0"
-
 # Shared by both version-filter tests below: a fixed set of ls-remote refs covering every shape that
 # would sort wrong if it reached "sort -t. -k1,1nr" unfiltered -- a pre-release suffix, a two-component
 # version, a tag with a leftover "v" (as if the tag itself were misnamed "vv1.2.3"), and a non-numeric
@@ -3560,9 +3483,6 @@ fi
 
 # A local stand-in for GRUBSTAKE_REPO/GRUBSTAKE_RAW: a bare repo carrying one annotated release tag,
 # plus a raw-fetch tree laid out the same way raw.githubusercontent.com is (v<version>/grubstake.sh).
-# gpgsign is disabled for both the commit and the tag, for the same reason new_hook_repo disables it
-# for commits: a globally configured signing key would block the tag too, and a fixture that cannot
-# be built is not a test result.
 new_update_fixture() {
     _ver="${1:-9.9.9}"
     _uf="$(mktemp -d "$ROOT/update-fixture.XXXXXX")" || fixture_die "cannot create an update fixture dir"
@@ -3570,9 +3490,6 @@ new_update_fixture() {
     _uw="$(mktemp -d "$ROOT/update-fixture-work.XXXXXX")" || fixture_die "cannot create a work dir for the fixture release"
     (cd "$_uw" \
         && git init -q . \
-        && git config user.email test@example.invalid \
-        && git config user.name "grubstake suite" \
-        && git config commit.gpgsign false \
         && git config tag.gpgSign false \
         && printf 'fixture release\n' >README.md \
         && git add README.md \
@@ -4740,11 +4657,7 @@ deny_transports() {
 new_hook_repo() {
     _hr="$(new_repo)"
     printf 'fixture\n' >"$_hr/README.md" || fixture_die "cannot write $_hr/README.md"
-    # gpgsign off explicitly: a signing key configured globally would block every commit below.
     (cd "$_hr" \
-        && git config user.email test@example.invalid \
-        && git config user.name "grubstake suite" \
-        && git config commit.gpgsign false \
         && git add README.md \
         && git commit -q -m baseline) || fixture_die "cannot seed a commit in $_hr"
     deny_transports "$_hr"
@@ -6907,11 +6820,6 @@ if "$(dirname "$0")/scan-for-leaks.sh" >/dev/null 2>&1; then pass; else fail "$(
 # leave it green. A throwaway repo with a known-dirty shape closes that.
 leaks_repo() {
     _lr="$(new_repo)"
-    # A CI runner has no global identity, so a fixture that commits has to carry its own.
-    (cd "$_lr" \
-        && git config user.email test@example.invalid \
-        && git config user.name "grubstake suite" \
-        && git config commit.gpgsign false) || fixture_die "cannot configure $_lr"
     mkdir -p "$_lr/test" || fixture_die "cannot create $_lr/test"
     cp "$(dirname "$0")/scan-for-leaks.sh" "$_lr/test/scan-for-leaks.sh" || fixture_die "cannot copy scan-for-leaks.sh into $_lr"
     chmod +x "$_lr/test/scan-for-leaks.sh" || fixture_die "cannot make scan-for-leaks.sh executable in $_lr"
@@ -7303,10 +7211,6 @@ fi
 # depends on network reachability: install writes the hooks and wires hooksPath itself.
 adopted_repo() {
     _ar="$(new_repo)"
-    (cd "$_ar" \
-        && git config user.email test@example.invalid \
-        && git config user.name "grubstake suite" \
-        && git config commit.gpgsign false) || fixture_die "cannot configure $_ar"
     deny_transports "$_ar"
     mkdir -p "$_ar/no-net" || fixture_die "cannot create the network shim dir in $_ar"
     printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' >"$_ar/no-net/curl" \

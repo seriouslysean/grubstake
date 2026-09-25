@@ -4318,7 +4318,7 @@ fi
 it "install dies naming a core.hooksPath it cannot read, rather than exiting on git's raw status"
 # The stderr-only re-read on this branch is itself a fallible git invocation under set -eu; a bare
 # assignment failing here would exit on git's own raw status before the die message it exists to print.
-# Some git releases refuse this value during repository discovery and others only on the later read, so either refusal must name it.
+# Some git releases refuse this value during repository discovery and others only on the later read.
 r=$(new_repo)
 (cd "$r" && git config core.hooksPath "~nosuchuser/hooks") || fixture_die "cannot seed core.hooksPath in $r"
 _out=$(gs "$r" install)
@@ -4335,7 +4335,7 @@ else
 fi
 
 it "install and doctor relay git's own reason when git cannot read the repository"
-# git names the offending file in every locale, so that name is the assertion, not any wording of grubstake's own.
+# The file name is the only part of git's refusal that no locale translates.
 r=$(new_repo)
 printf '[core\n' >>"$r/.git/config" || fixture_die "cannot malform $r/.git/config"
 _out=$(gs "$r" install)
@@ -6337,7 +6337,7 @@ it "doctor names a core.hooksPath it cannot read instead of grading it as unset"
 # ~nosuchuser/hooks fails git's own user-dir expansion (rc 128, not rc 1 for unset) -- doctor's own
 # read discarded every nonzero status, which graded that failure the same as .githooks. #148 makes a
 # read failure a reported problem, so doctor now fails here too, rather than passing while unable to say so.
-# Some git releases refuse this value during repository discovery and others only on the later read, so either refusal must name it.
+# Some git releases refuse this value during repository discovery and others only on the later read.
 r=$(new_repo)
 (cd "$r" && git config core.hooksPath "~nosuchuser/hooks") || fixture_die "cannot seed core.hooksPath in $r"
 _out=$(gs "$r" doctor)

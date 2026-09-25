@@ -343,7 +343,7 @@ SHIM
 
 # Pauses "git" only on cmd_install's own hooksPath write ("git -C <root> config core.hooksPath
 # .githooks", five arguments exactly), never the read earlier in the same command ("git -C <root>
-# config --path --get core.hooksPath", six arguments, no value) -- pausing that one too would
+# config --show-scope --path --get core.hooksPath", seven arguments, no value) -- pausing that one too would
 # strand the caller before it ever reaches the call under test. Each paused invocation writes
 # "$_reached.$GST_LABEL", a label the caller sets per racer (GST_LABEL=1, GST_LABEL=2), not a pid:
 # measured directly against git's own lock (not through a full "install"), a poll-with-sleep
@@ -513,27 +513,7 @@ fi
 printf '\nplatform\n'
 
 it "a non-x86_64 Linux is refused by name, not silently installed as amd64"
-# platform()'s Linux branch dies "unsupported arch: $(uname -m)" when uname -m is not x86_64. Nothing
-# proved that guard fires: delete it and every existing test still passes, since none of them run on
-# anything but this sandbox's own real uname. A uname shim reporting Linux/aarch64 exercises it without
-# needing real aarch64 hardware. A curl that always fails keeps this offline and, more importantly,
-# keeps the discrimination copy below from quietly reaching this sandbox's real network egress to
-# GitHub once the guard is stripped.
-#
-# rc alone does not discriminate: `ensure` exits non-zero either way (a stripped guard still fails,
-# just later, when the real amd64 URL's download is blocked). Two properties depend on nothing but the
-# guard, so those are what is asserted: die() writes "unsupported arch: aarch64" to stderr
-# unconditionally, before anything downstream can lose track of its exit status; and tool_url never
-# returns a real linux URL, so "downloading" -- install_tool's own log line printed right before curl
-# ever runs -- never appears.
-#
-# Both are needed because platform() is always called nested inside another command substitution
-# (tool_url's own "$(platform)" argument), which discards its exit status: the actual reason the script
-# ends up non-zero here is tool_url separately dying on the resulting empty platform argument ("unknown
-# tool: swiftlint"), not platform()'s own die propagating directly. That coupling is a real, separate
-# defect (reported alongside this dispatch), not this test's to fix -- so this asserts only the two
-# guard-only properties above, never the incidental "unknown tool" line, message ordering, or how many
-# times "aarch64" happens to appear.
+# rc alone does not discriminate, since a guard-stripped run still fails at the blocked curl, which also keeps it off the network; only the guard names aarch64 and never logs "downloading".
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 _unameshim="$r/uname-shim"
@@ -564,17 +544,7 @@ else
 fi
 
 it "ensure on an unsupported arch fails with the guard's own error, not an empty-platform skip"
-# #70: install_tool's own "_plat=\"\$(platform)\"" (grubstake.sh:295) is a bare assignment, and
-# install_tool runs with errexit suspended for its whole body under cmd_ensure's own
-# "install_tool ... || _bad=1" (the same rule the arch-guard test above already relies on for
-# install_tool's callers) -- so platform()'s die is printed but its status is discarded there, $_plat
-# lands empty, and install_tool falls through to tool_url returning empty for "swiftlint:" (no such
-# case) and logs "swiftlint: not published for , skipping" as if this were a legitimate skip (the same
-# shape periphery's genuine linux gap uses) rather than a refusal. ensure still ends up non-zero today,
-# but only because cmd_check's own independent, later pass over the same tool fails separately (#67) --
-# a second, unrelated symptom, not this one being fixed. This fixture pins only swiftlint, so "not
-# published for" cannot be the legitimate periphery-on-linux message; widening the fixture to include a
-# tool with a genuine platform gap would make that assertion ambiguous.
+# install_tool must stop at the platform guard, and only swiftlint is pinned since periphery's genuine linux gap logs the same "not published for" line.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 _unameshim="$r/uname-shim"
@@ -607,7 +577,7 @@ else
 fi
 
 # Shared by every remaining #70 site test below: the same uname stand-in as the two tests above,
-# factored out because three more call sites now need it. Not backported into those two: they are
+# factored out because four more call sites now need it. Not backported into those two: they are
 # already reviewed and passing, and this section's rule is add coverage, not churn proven tests.
 uname_arch_shim() {
     mkdir -p "$1" || fixture_die "cannot create the uname shim dir"
@@ -623,14 +593,7 @@ SHIM
 }
 
 it "check on an unsupported arch resolves the guard's own message, not an unrelated tool_url death"
-# #70's remaining survey item at verify_tool: it now captures "_plat=\"\$(platform)\"" and checks it
-# directly, before ever calling tool_url -- unlike the #67-era shape (still in this branch's own git
-# history) that called tool_url with platform() nested as its own argument and only caught tool_url's
-# resulting "unknown tool" death after the fact. That earlier shape already turned check non-zero and
-# already printed "could not resolve for this platform", so a test asserting only those two properties
-# would have passed on the #67 shape too, proving nothing about whether tool_url's masking death still
-# fires alongside it. Discrimination proof (scratch copy of this repo's own committed HEAD, the #67-era
-# verify_tool, spliced in): watched failing -- see this dispatch's report.
+# verify_tool must resolve the platform before calling tool_url, so tool_url's own "unknown tool" death cannot stand in for the guard.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 _unameshim="$r/uname-shim"
@@ -652,13 +615,7 @@ else
 fi
 
 it "path on an unsupported arch fails with the guard's own message and prints no path"
-# #70's remaining survey item at cmd_path: "_url=\"\$(tool_url \"\$1\" \"\$_ver\" \"\$(platform)\")\""
-# nested platform() as tool_url's own argument, unguarded -- the same shape install_tool had before its
-# own fix, and the one shape in this file with no catch at all. A refusal that still reaches
-# tool_url's own "unknown tool" death is only accidentally non-zero; cmd_path's normal success path
-# ends in "echo \"\$_bin\"" on stdout, so a refusal that got there anyway would print a path alongside
-# whatever it died on. Discrimination proof (scratch copy of this repo's own committed HEAD, the
-# unfixed cmd_path, spliced in): watched failing -- see this dispatch's report.
+# `path` must refuse with the guard's own message and print nothing on stdout, since callers read stdout as the tool's path.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 _unameshim="$r/uname-shim"
@@ -683,7 +640,7 @@ else
 fi
 
 it "path refuses a relative GRUBSTAKE_CACHE instead of printing a relative path"
-# F17: only cmd_clean checked for a relative override, so every other command built and printed a relative path underneath it, breaking the absolute-path contract STABILITY.md documents for `path`.
+# `path` promises an absolute path, so a relative override is refused, not printed.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 mkdir -p "$r/cache/swiftlint/$SHA_A" || fixture_die "cannot create the relative-cache fixture dir"
@@ -700,7 +657,7 @@ else
 fi
 
 it "check reports cache_root's own refusal once, not a second, misleading not-installed line"
-# F17: verify_tool's "[ -x \"\$(tool_bin ...)\" ]" read a failed tool_bin as -x "", so cache_root's own refusal was followed by a second, misleading "not installed (run: grubstake ensure)" as if the tool had simply never been fetched.
+# A failed tool_bin must not read as `-x ""` and add a misleading not-installed line after cache_root's own refusal.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 _out=$(cd "$r" && GRUBSTAKE_CACHE="cache" ./grubstake.sh check 2>&1)
@@ -716,27 +673,7 @@ else
 fi
 
 it "doctor on an unsupported arch reports fully, then fails, without a stray guard message leaking past its report"
-# #70's remaining survey item at cmd_doctor covers two nestings. The header's own capture
-# ("_plat=\"\$(platform 2>&1)\"") redirects platform()'s stderr into the captured value, so a failure
-# there renders cleanly inside doctor's own "platform   ..." line instead of a blank field, and the
-# per-tool loop reuses that same captured value rather than re-embedding "$(platform)" per tool, so a
-# tool row reads "unsupported platform" instead of silently trying "n/a on " with an empty platform
-# name. Neither call site is reached with GRUBSTAKE_CACHE set (every other test in this file sets it),
-# so this test deliberately leaves it unset and points HOME at a scratch directory instead: only that
-# reaches cache_root's own "$(platform)" nesting -- doctor's sixth and last site, inside
-# "elif [ \"\$(platform)\" = darwin ]" -- which is a tested condition, so a failure there is swallowed
-# for control-flow purposes (cache_root quietly takes the linux branch) but platform()'s own die() still
-# writes to stderr unconditionally, unredirected, leaking a duplicate "[grubstake] unsupported arch"
-# line the header's own clean capture does not have.
-#
-# #148 makes an unsupported-platform row a reported problem, so doctor now exits 1 here rather than
-# 0; the report itself must still render in full and stay stderr-clean before that exit fires.
-#
-# This was watched failing directly against this branch's real grubstake.sh before cache_root's own
-# nesting was fixed here (a stray "[grubstake] unsupported arch" line leaking past doctor's clean
-# report) -- see this dispatch's report for that verbatim output. cache_root's fix landed on this same
-# branch while this dispatch was in progress, so this test is not proven via a scratch-copy mutation
-# the way the sibling test below is: the watched failure above already is that proof.
+# Relies on the runner's environment leaving GRUBSTAKE_CACHE unset, since only then does cache_root's platform check run; the report must render in full and stderr-clean before doctor exits non-zero.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 _unameshim="$r/uname-shim"
@@ -759,17 +696,7 @@ else
 fi
 
 it "clean on an unsupported arch refuses instead of silently no-oping on a fabricated cache path"
-# #70 critic finding: cmd_clean's own "_root=\"\$(cache_root)\"" is the same bare-assignment shape
-# every other site in this file had. cache_root itself reaches the sixth site (its own
-# "elif [ \"\$(platform)\" = darwin ]") only when GRUBSTAKE_CACHE is unset, same as the doctor test
-# above, so this reuses that fixture exactly: no GRUBSTAKE_CACHE, no XDG_CACHE_HOME, a scratch HOME.
-# Pre-fix, cache_root's own platform() failure is swallowed by the tested "elif" condition, so
-# cache_root falls through to the linux-shaped "${XDG_CACHE_HOME:-\$HOME/.cache}/grubstake" path built
-# from an arch it never actually confirmed, and cmd_clean's "[ -e \"\$_root\" ] || return 0" quietly
-# exits 0 since nothing was ever created at that fabricated path -- a clean that never ran, reporting
-# success. The fix (this branch's own "_root=\"\$(cache_root)\" || die ...") makes that refusal
-# explicit instead. Discrimination proof (scratch copy of this repo's own committed HEAD, the unfixed
-# cache_root and cmd_clean, spliced in): watched failing -- see this dispatch's report.
+# GRUBSTAKE_CACHE and XDG_CACHE_HOME stay unset so cache_root's own platform check is what clean reaches.
 r=$(new_repo)
 _unameshim="$r/uname-shim"
 uname_arch_shim "$_unameshim"
@@ -1090,8 +1017,8 @@ fi
 
 # dash's builtin echo is XSI: it interprets "\c" mid-argument as "stop output here", so validate_pins
 # and pin_sha piping a pins-file value through echo would silently truncate at "\c" and validate (or
-# resolve) the surviving prefix. Invoked with an explicit dash interpreter, not through the shebang,
-# because /bin/sh on this box is bash, which does not have this defect and so would not catch it.
+# resolve) the surviving prefix. Invoked with an explicit dash interpreter, since /bin/sh is not dash
+# on every machine.
 it "a keyed sha carrying a literal backslash-c is not silently truncated by dash's XSI echo"
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 darwin=$SHA_A linux=$SHA_A\cJUNK"
@@ -1255,14 +1182,7 @@ rm -f "$r/.cache/swiftlint/$SHA_A/swiftlint"
 expect_fail "$r" check
 
 it "an install does not verify when the archived binary itself exits nonzero"
-# reported_version's pipeline (tool | head | sed | tr) returns tr's exit status, not the tool's own.
-# A binary that prints the pinned version and then fails still satisfies the assertion inside
-# install_tool, so a tool that cannot actually run is published and reported installed anyway. This
-# is the check AGENTS.md rule 3 exists for: the hash proves what arrived, and this is supposed to
-# prove it runs. fake_install cannot reach this: it writes straight into the hash-named cache
-# directory and never calls install_tool, so reported_version never runs; fake_release drives the
-# real download-hash-extract-publish path against a fixture that reports the pinned version and
-# then exits 42, offline.
+# reported_version must check the tool's own exit status, since a pipeline reports tr's, or a binary that prints the pinned version then fails is published; fake_release, since fake_install never runs it.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2 42)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -1300,14 +1220,7 @@ else
 fi
 
 it "a partial cache directory does not wedge ensure"
-# publish_dir treats any existing destination as a finished, concurrent install and discards the
-# freshly downloaded, hash-verified staging instead of publishing into it. An interrupted publish, a
-# stray mkdir, or a cache layout change across versions all leave exactly this: a destination that
-# exists but holds no binary. ensure is documented to repair that, and today it cannot -- it dies
-# "install incomplete" and every retry repeats it. fake_install cannot exercise this: it writes the
-# binary straight to the hash-named directory and never calls install_tool, so publish_dir never
-# runs. fake_release is what makes install_tool's real download-hash-extract-publish path run
-# offline, against a fixture instead of the network.
+# A destination that exists without its binary is debris from an interrupted publish, so ensure must clear it and publish rather than die "install incomplete"; fake_release, since fake_install never runs publish_dir.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -1382,15 +1295,7 @@ else
 fi
 
 it "an unremovable partial directory fails loudly instead of nesting the staging"
-# publish_dir's debris-clearing branch chmods the destination writable before removing it, but
-# chmod cannot restore search (execute) permission it was never asked to add: chmod -R u+w on a
-# subdirectory with no execute bit changes that subdirectory's own mode but still cannot descend
-# into it, so whatever is inside stays exactly as unreachable as before. rm -rf then fails the same
-# way, for the same reason. Pre-fix, rm -rf's exit status does not survive the `if "$@"` inside
-# with_lock (see with_lock's own comment on that), the failure is swallowed, the destination still
-# exists, and `mv staging dest` -- which nests rather than errors when dest is an existing directory,
-# since there is no mv -T on macOS -- buries the freshly downloaded, hash-verified staging inside the
-# debris instead of the install ever failing loudly.
+# chmod -R u+w cannot restore a search bit it was never asked to add, so the debris survives rm -rf and a bare mv would nest the staging inside it, since macOS has no mv -T.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -1506,7 +1411,7 @@ it "a single quote in the cache path does not break the cleanup trap or leak the
 # the staging directory, holding the rejected binary, is never removed. Same version-mismatch shape
 # as the "does not leave a staging directory" test above; only the cache path differs. A broken trap
 # reports this as "Syntax error: Unterminated quoted string" under dash, or "unexpected EOF while
-# looking for matching `''" under bash-as-sh (what /bin/sh resolves to on this machine) -- both
+# looking for matching `''" under bash-as-sh -- both
 # patterns are checked, since either shell can run this script. The space-only case just above stays
 # green: it is the quote character itself that breaks a naive scheme, not the space. This test only
 # proves the trap does not error on the character; it does not prove no command runs -- see the
@@ -1924,14 +1829,7 @@ else
 fi
 
 it "ensure fails fast on a permission-denied lock, not a five-second contention stall"
-# #88: with_lock decides why its own "mkdir" failed by testing "[ -d "$_lkdir" ]" afterwards, which
-# answers "does the parent still exist," not "why did the write fail." A lock directory whose own
-# parent has lost its write bit fails mkdir with EACCES, but the parent is still perfectly readable
-# and traversable (555 keeps the execute bit), so "[ -d ]" reports true -- the same as ordinary
-# EEXIST contention -- and the retry loop spins its full budget before dying blaming a holder that
-# was never there. fake_install, not fake_release: this needs no download, only a legacy
-# (receiptless) entry that reaches with_lock through install_tool's own write_receipt call, the
-# cheapest path to the mkdir under test, same technique the vanished-cache-root test above uses.
+# A read-only lock parent fails mkdir with EACCES while staying traversable, so ensure must fail fast with that cause, not spin the contention budget.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
@@ -1956,17 +1854,7 @@ else
 fi
 
 it "ensure blames an unreadable ancestor honestly, not a cache that was never removed"
-# The other wrong diagnosis at the same site: "[ -d "$_lkdir" ]" is answering the existence
-# question from the lock's own parent, ".cache/<tool>", but an ancestor further up (".cache"
-# itself) can be the thing that becomes untraversable, which fails that existence test too --
-# indistinguishable, to with_lock, from the parent genuinely having been removed by a concurrent
-# clean (the #56 case the vanished-cache-root test above covers). Nothing was removed here; only a
-# permission bit changed. A static pre-chmod cannot isolate this cleanly: install_tool's own
-# "[ -x "$_bin" ]" check reads the identical ".cache" ancestor before with_lock ever runs, so
-# chmod'ing it up front just makes the tool look not-yet-installed and take an entirely different
-# path. Shimming "mkdir" to flip the permission the instant a "*.lock" path is attempted -- the same
-# match lock_pause_shim uses, since that mkdir shape is with_lock's alone -- lands the change after
-# the earlier check has already passed and right before the one under test.
+# An untraversable ancestor must read as a permission failure, not a removed cache; the plant flips it at the lock mkdir because a pre-chmod would fail install_tool's earlier -x check instead.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
@@ -1992,14 +1880,7 @@ else
 fi
 
 it "a cache path containing the discriminator's own match text does not turn a permission denial into contention"
-# Panel review on #88: the fix reads mkdir's own stderr and discriminates with "case ... in
-# *"File exists"*)", but that match is unanchored -- it fires if the substring appears ANYWHERE in
-# the captured text, and the captured text is mkdir's whole message, path included ("mkdir: <path>:
-# <reason>"). A cache rooted at a directory literally named "File exists.cache" makes every lock
-# path under it contain that text regardless of what actually went wrong, so a genuine permission
-# denial on the lock's own parent reads as contention again -- the exact defect this branch exists
-# to remove, reopened by the fix meant to close it. GRUBSTAKE_CACHE can point anywhere; it does not
-# need to live under the repo, so the collision text sits in the cache root itself here.
+# The discriminator must read mkdir's trailing reason, since the lock path itself can contain "File exists".
 r=$(new_repo)
 _cache="$ROOT/lock-collision.$$/File exists.cache"
 mkdir -p "$_cache/swiftlint/$SHA_A" || fixture_die "cannot create $_cache/swiftlint/$SHA_A"
@@ -2027,15 +1908,7 @@ else
 fi
 
 it "a cache path containing the discriminator's own match text still reports a genuinely vanished parent as gone, not locked"
-# The mirror the panel asked for: an over-broad fix that matches "File exists" anywhere, rather than
-# only where mkdir's own message actually reports it, can also misfire in the other direction. Here
-# the lock's parent is genuinely removed (mkdir's real message ends "No such file or directory"),
-# but the message still contains "File exists" too, purely because the collision text sits earlier
-# in the same string as the cache root's name -- an unanchored match on a case arm listed before the
-# ENOENT arm wins on substring presence alone, misreporting a real removal as a lock nobody held.
-# The existing mkdir-shim technique still applies: the shim removes the lock's own parent instead of
-# chmod'ing it, right before letting the real mkdir run, which is what actually produces a genuine
-# ENOENT (not read-only-directory noise) here.
+# A genuinely vanished parent must still read as removed when the path contains the discriminator's text.
 r=$(new_repo)
 _cache="$ROOT/lock-collision-gone.$$/File exists.cache"
 mkdir -p "$_cache/swiftlint/$SHA_A" || fixture_die "cannot create $_cache/swiftlint/$SHA_A"
@@ -2063,20 +1936,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------- cache integrity: receipts
-#
-# #47: publish_dir's winner branch is "[ -x dest/tool ]" alone, so a corrupted-but-executable dest
-# is trusted without ever re-reading what arrived. These tests are written against the receipt
-# design in #47/#2 before it exists: a three-line .grubstake-receipt ("receipt 1" / binary-sha256 /
-# version) staged before publish so it rides the atomic mv and is hardened read-only with the rest
-# of the entry.
-#
-# Design correction: the first receipt design repaired a mismatched or receiptless entry by
-# destroying it in place (rm -rf, then republish), which an antagonist pass showed briefly removes
-# the hash-named path -- a second repo sharing the same machine-wide cache and executing that path
-# saw ENOENT partway through, 9/40 iterations. publish_dir now only ever clears an entry with no
-# executable at all (debris, exactly as before receipts existed); a mismatch is install_tool's
-# refusal to make, never publish_dir's repair to attempt, and a legacy or skewed-format receipt is
-# written beside the existing binary in place, offline, never by destroying and redownloading it.
+# publish_dir never unlinks an entry whose binary exists; a receipt mismatch is refused by install_tool, and a legacy or unrecognized receipt is rewritten in place, offline.
 
 printf '\ncache integrity: receipts\n'
 
@@ -2110,7 +1970,7 @@ fake_receipt() {
 # or truncated extraction is a harness fault, not a result, so it stops the run.
 #
 # publish_dir consults neither entry_verified nor a receipt: its winner rule is bare executable
-# existence, deliberately, after three antagonist rounds fought over exactly this -- a mismatch is
+# existence, deliberately -- a mismatch is
 # surfaced by install_tool's own deeper pass before publish_dir is ever reached, never repaired by
 # publish_dir itself, so a live binary is never cleared out from under a concurrent reader. That
 # keeps with_lock and publish_dir the whole call graph; neither reaches sha256_file, receipt_file,
@@ -2130,14 +1990,7 @@ extract_fns() {
 }
 
 it "ensure refuses a binary that no longer matches its receipt, rather than reinstalling over it"
-# The original design repaired a mismatch by reinstalling over the existing entry: rm -rf the
-# destination, then mv a freshly downloaded copy into place. A second repo already resolved to that
-# path and executing it in a loop saw ENOENT in the gap between the two (an antagonist pass
-# reproduced it 9/40 iterations; see "two repos sharing one cache: a legacy upgrade must not break a
-# concurrent exec" below). Since the cache is machine-wide and another repo may be running this
-# exact binary right now, ensure now refuses and tells the human what to do instead of touching it.
-# fake_install cannot reach this: it never leaves a genuine receipt to mismatch, so fake_release
-# seeds a real one via a real (offline) install first.
+# A concurrent exec of the same hash path must never see it vanish, so ensure refuses and names how to recover instead of touching the entry.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -2264,20 +2117,14 @@ else
 fi
 
 it "check is not blocked by an entry that predates receipts"
-# The incident guard from CONTRIBUTING.md's "When a fix changes behaviour on upgrade": cache
-# verification once landed without accounting for existing caches carrying no digest, and the first
-# check after upgrading refused every commit until someone ran ensure. verify_tool/check stay
-# existence-only on purpose, so a receiptless legacy entry must pass check the moment this design
-# lands, not just after ensure re-touches it. This passes today; see the scratch proof in this
-# dispatch's report that a version requiring a receipt inside verify_tool makes it fail, per
-# AGENTS.md rule 14.
+# Per CONTRIBUTING.md's "When a fix changes behaviour on upgrade", check stays existence-only, so a receiptless legacy entry must pass it before any ensure re-touches it.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A" # no receipt: exactly what a pre-receipt release left behind
 expect_ok "$r" check
 
 it "publish_dir never clears an entry whose binary exists"
-# Inverted after the design correction above: publish_dir no longer repairs a mismatched-receipt
+# publish_dir never repairs a mismatched-receipt
 # winner in place -- that destroy-then-republish is exactly what opened the ENOENT window for a
 # concurrent repo (see "two repos sharing one cache: a legacy upgrade must not break a concurrent
 # exec" below). The winner rule is executable-presence alone now, same as before receipts existed; a
@@ -2396,7 +2243,7 @@ it "a version-only receipt edit is corrected in place, not re-fetched"
 # download and the warning would repeat, forever, on every single ensure. Now, when the binary still
 # matches its receipt and only the version line disagrees with the pin, the receipt is rewritten in
 # place instead -- no download at all, so no curl shim is put on PATH for the corrective run: any
-# attempt to reach one fails hard rather than silently reaching this sandbox's real network.
+# attempt to reach one fails hard rather than silently reaching a real network.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -2562,18 +2409,7 @@ else
 fi
 
 it "a lock failure on one tool stays scoped to that tool, instead of aborting ensure for the rest"
-# #67: with_lock's own retry loop calls die() directly when it can never acquire the lock -- both
-# the #56 vanished-parent fast-fail and the stale-lock timeout below it are a hard exit of the
-# whole process, regardless of how the caller structured its own error handling. Every other
-# install_tool failure mode instead warns, marks the run bad, and lets cmd_ensure continue to the
-# next tool (see "a receipt mismatch on one tool does not stop ensure from verifying the rest"
-# above) -- a lock failure is the one exception, pre-existing and untouched by #56, which only
-# improved the message on the way to the same die(). A directory already sitting at "<dest>.lock"
-# before ensure ever runs makes mkdir fail every retry the same way a real concurrent holder would,
-# no second process needed, for the same five-second budget a genuinely stale lock would cost.
-# swiftlint is pinned first, its lock is what's blocked, and swiftformat second as a plain
-# receiptless legacy entry that converges with no download, so its receipt appearing is unambiguous
-# evidence ensure reached it rather than dying at swiftlint.
+# A lock that never frees fails only its own tool, so swiftformat, pinned second as a receiptless entry, must still get its receipt.
 r=$(new_repo)
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
 fake_install "$r" swiftformat 0.61.1 "$SHA_B"
@@ -2589,18 +2425,8 @@ if [ "$_rc" -eq 0 ]; then
 elif ! printf '%s' "$_out" | grep -F -q "$_lockdir"; then
     fail "the lock failure was reported without naming swiftlint's lock: $_out"
 elif [ ! -f "$_fmt_receipt" ]; then
-    # Seen to flake under a loaded machine (full-suite dash runs), never in isolation: nothing in
-    # this fixture pre-plants or contends for swiftformat's own "$SHA_B.lock", so its mkdir should
-    # always win on the first try. If it ever doesn't, this fixture cannot yet tell "genuinely
-    # contended" apart from "mkdir failed for an unrelated transient reason" -- with_lock's own
-    # `mkdir "$_lk" 2>/dev/null` discards the real errno either way -- so the diagnostic below is
-    # what the next occurrence needs to tell those apart, per AGENTS.md 15.
+    # Reached on the regression, or on swiftformat's own uncontended lock mkdir failing under load; the entry and lock state in the message tell the two apart.
     fail "ensure stopped at swiftlint's lock instead of continuing: swiftformat was never reached, no receipt recorded (swiftformat entry: $(ls -la "$r/.cache/swiftformat" 2>&1 | tr '\n' ';'); its lock: $([ -d "$r/.cache/swiftformat/$SHA_B.lock" ] && echo present || echo absent)): $_out"
-# The old evidence here was the ok line's presence, standing in for "check's own summary ran" --
-# 33ae543 makes that proof invalid, since ok now only prints on a fully green run and this one never
-# is. Direct output evidence that swiftformat's own backfill actually ran replaces it, without
-# leaning on the receipt-file check above alone; the inverse right after is the ratified contract
-# itself, the same one "a failing ensure never claims ok, even when every binary still verifies" checks.
 elif ! printf '%s' "$_out" | grep -F -q "swiftformat 0.61.1: recorded a receipt for the existing entry"; then
     fail "ensure's own output shows no sign swiftformat was reached after swiftlint's lock failure: $_out"
 elif printf '%s' "$_out" | grep -q '^\[grubstake\] ok ('; then
@@ -2656,13 +2482,7 @@ it "a lock failure on a cold install is scoped to that tool, and check runs its 
 # swiftlint is pinned cold, served by fake_release/curl-shim, with its eventual publish lock
 # pre-planted so it never lands; swiftformat is pinned second as a plain receiptless legacy entry,
 # proving the install loop itself is scoped exactly as the sibling tests above already prove.
-# The install loop being scoped is not the same claim as check's own pass being scoped: verify_tool
-# still dies outright on a missing binary today, and cmd_ensure calls verify_pinned after the
-# install loop, so that die is what kills the whole run before it ever reaches its own summary line. A
-# second, direct "check" invocation with a third tool that has no entry at all is what actually
-# discriminates that -- swiftformat's own binary exists either way, so it proves nothing about
-# whether check's loop can survive a missing one; xcbeautify's absence does, since it is only ever
-# reached if check's pass over swiftlint's absence did not just die.
+# A second, direct check with a third, never-installed tool proves check names every missing tool rather than stopping at the first.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 fake_install "$r" swiftformat 0.61.1 "$SHA_B"
@@ -2716,29 +2536,7 @@ rm -rf "$_lockdir" 2>/dev/null
 printf '\ncache integrity: shared cache\n'
 
 it "two repos sharing one cache: a legacy upgrade must not break a concurrent exec"
-# Reproduces the antagonist's finding directly: the design this replaces repaired a legacy entry by
-# destroying it (rm -rf) and republishing a freshly downloaded copy (mv), leaving the hash-named
-# path briefly absent. A second repo already resolved to that path and executing it in a loop saw
-# ENOENT partway through -- 9 of 40 iterations in the antagonist's run. The corrected design writes
-# the receipt beside the existing binary without ever unlinking it, so the path never goes missing.
-# Repo A's exec loop runs in the background for the whole span of repo B's ensure call (not just one
-# instant), so every iteration that lands inside that call has a chance to catch a destructive
-# window if one exists; a warm-up wait before B starts is what keeps a loop that has not gotten going
-# yet from proving nothing.
-#
-# The loop also runs a fixed minimum number of iterations regardless of how long repo B's ensure
-# call takes, so the sample size the pass/fail decision is based on is guaranteed by construction
-# rather than by how much wall clock a busy machine happened to grant it. The verdict is still a
-# check of the same failure-log file as before -- it is not a different kind of signal -- but the
-# loop makes that check on itself the instant it stops and hands the answer back through wait's
-# exit status, rather than leaving a separate process to re-open the file later at whatever moment
-# it happens to get scheduled.
-#
-# The catch is probabilistic, not guaranteed, per AGENTS.md 15: a single green run here does not
-# prove the window is closed, only that this run did not hit it. Reconstructing the design this
-# replaces and looping this fixture against it caught the destroy-in-place window 10/20 runs; the
-# same loop against the corrected design caught nothing in 15/15. A future regression back to
-# destroy-in-place is therefore likely, not certain, to show red on any given run.
+# Repo A execs the shared binary throughout repo B's ensure; the catch is probabilistic, so a green run shows only that this run hit no destroy-in-place window.
 a=$(new_repo)
 b=$(new_repo)
 _shared="$ROOT/shared-cache.$$"
@@ -2961,12 +2759,7 @@ pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_B"
 expect_says_fail "unknown tool: swiftlint|x" "$r" path 'swiftlint|x'
 
 it "path rejects a tool name that known_tools' regex check would silently let through"
-# known_tools | grep -qw "$1" treats the name as a basic regular expression, so a "." in
-# "swift.int" matches any character and passes the guard meant to reject it. Nothing must be
-# pinned under a name grep -qw would also match against "swift.int" (that includes "swiftlint"
-# itself, since pin_field's own lookup is grep -E "^$1[[:space:]]"), or path finds a pin, calls
-# tool_url, and dies there instead -- accidentally closing over the guard's own job with the
-# wrong evidence. periphery is pinned instead so path's guard is what has to reject this alone.
+# A regex match in is_known_tool would pass "swift.int", and a pinned swiftlint would let tool_url's own "unknown tool" death pass this test anyway, so only periphery is pinned.
 r=$(new_repo)
 pins "$r" "periphery 3.7.4 $SHA_A $SHA_A"
 _out=$(gs "$r" path swift.int)
@@ -2981,12 +2774,7 @@ else
 fi
 
 it "check names the pins-file line when a regex-matched tool name should be an outright rejection"
-# validate_pins carries its own tool-name guard, a call site neither the path test above nor add
-# can reach. Pinning "swift.int" directly and running check exercises it: today the guard lets
-# the line through, and the tool name is instead rejected several frames downstream inside
-# tool_url, whose bare die propagates out through set -e (see cmd_doctor's "assign, do not test"
-# comment) and prints a message with no grubstake.tools:N prefix at all -- so the file and line
-# responsible for the bad pin is never named.
+# validate_pins' own tool-name guard must name the grubstake.tools line for a regex-shaped name.
 r=$(new_repo)
 pins "$r" "swift.int 1.0.0 $SHA_A $SHA_A"
 _out=$(gs "$r" check)
@@ -3113,14 +2901,7 @@ _v=$("$r/target.sh" version 2>/dev/null)
 [ "$_v" = "$(gs "$(new_repo)" version)" ] && pass || fail "the shim did not replace the target (got '$_v')"
 
 it "the legacy handoff verb replaces the script and stops, without running the replacement"
-# cmd_legacy_replace copies the running script onto the target and, in the code this test exists
-# to catch, immediately execs "$_installed" ensure -- the same defect just fixed in cmd_update
-# above, running bytes before anyone has reviewed the diff. The replacement is a copy of $0 rather
-# than a fetch, so the marker has to live in the invoking script itself, gated on an "ensure"
-# argument: cmd_legacy_replace is called directly with (target, version), the way extract_fns'
-# callers do below, so that argument is never present on the first run -- only the auto-ensure
-# this test is watching for would supply it. log/die/cmd_legacy_replace come from $GS via sed, the
-# same technique extract_fns uses, so the real function body runs rather than a reimplementation.
+# The replacement is a copy of $0, so the marker lives in the invoking script, gated on an "ensure" argument only an auto-ensure would supply.
 r=$(new_repo)
 _fn="$(sed -n '/^cmd_legacy_replace() {/,/^}/p' "$GS")"
 printf '%s\n' "$_fn" | grep -q '^cmd_legacy_replace() {$' \
@@ -3438,25 +3219,7 @@ else pass; fi
 chmod -R u+w "$r" 2>/dev/null
 
 it "a race loser's staging cleanup that rm cannot finish is reported in grubstake's voice, not raw rm stderr"
-# #56: install_tool's own "with_lock ... publish_dir ..." call (the real call site, not the
-# fabricated one above) is bare -- no "|| die". cmd_ensure calls install_tool as
-# "install_tool ... || _bad=1", and a shell function called on the left of "||" runs with errexit
-# suspended for its whole body (POSIX 2.8.1 / bash's documented -e behavior for compound commands),
-# so the bare call's nonzero return does not stop the script at all: execution falls through to
-# install_tool's own "[ -x "$_bin" ]" completeness check, which passes because the winner's binary
-# is right there, and the run finishes by logging a false "installed". The user is left with rm's
-# unprefixed complaint sandwiched between two ordinary "[grubstake]" log lines, exit 0, and an
-# orphaned, half-removed staging directory still sitting in the cache. publish_dir's winner branch
-# has no error handling at all around its "rm -rf $1": unlike the debris branch a few lines below
-# it, which at least warns before returning 1, a cleanup failure here never gets a "[grubstake]"
-# line of its own. Reaching this needs a genuine race through the real call site: install_tool's
-# early "already installed" check means a fresh download only ever calls publish_dir once the binary
-# is confirmed absent, so the winner branch is unreachable except when a second install actually
-# wins in between. lock_pause_shim pauses the loser (B) at with_lock's own mkdir, right after B has
-# built and verified its staging but before it takes the lock, which is exactly the window a real
-# winner (A) needs to publish first; the plant script then makes B's own staging partially
-# unremovable the same way "an unremovable partial directory fails loudly instead of nesting the
-# staging" above does to a destination, before B is released to find A already there.
+# The winner branch needs a real race, since install_tool skips publish once the binary exists: lock_pause_shim holds the loser at its lock while the winner publishes, and the plant half-locks the loser's staging.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -3566,20 +3329,7 @@ elif [ -d "$r/t.lock" ]; then
 else pass; fi
 
 it "a signal landing while write_receipt holds the lock does not strand it"
-# #62: with_lock has no trap, so a signal between its mkdir and rmdir leaves the lock directory
-# behind. It stays latent until the same entry is locked again, which then spins the full retry
-# budget and warns about a lock nobody holds -- recoverable only by hand. A legacy (receiptless)
-# entry reaches with_lock the cheapest way, through write_receipt, with no download needed.
-# mv_pause_shim pauses write_receipt's own tmp-to-real rename, the last thing it does before
-# returning and letting with_lock rmdir the lock, so the process is killed with the lock genuinely
-# held. The specific pid, not its process group: the wrapped command here is write_receipt, a shell
-# function running in grubstake.sh's own process, not a separate one -- the only real child is the
-# shimmed mv itself, and "exec" replaces the backgrounded subshell with grubstake.sh outright, so
-# "$!" is grubstake.sh's own pid, no job-control or process-group games needed to reach it directly.
-# Confirmed in scratch first: with no trap in play, dash returns from a blocked wait() the instant
-# the signal lands rather than deferring until the child exits, leaving that child an orphan --
-# reaped explicitly below, since #64 is plain that backgrounding something and not reaping it is a
-# sampled result, not a real one.
+# exec makes $! grubstake.sh itself, so the kill lands while mv_pause_shim holds the receipt rename under the lock; the orphaned shim is then killed.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A"
@@ -3632,36 +3382,7 @@ fi
 rm -rf "$_lockdir" 2>/dev/null
 
 it "a signal landing while publish_dir holds the lock does not nest the staging install_tool's own trap names"
-# #62's other with_lock call site, and the one the contract calls out by name: install_tool already
-# arms its own trap over $_tmp and $_staging before this call (~450), so with_lock's own trap must
-# compose with that one -- save the caller's trap and restore it, rather than clobber it -- since
-# POSIX traps are per-signal per-shell and the wrapped command runs in the very same shell, not a
-# subshell.
-#
-# What this test actually guards, proven by scratch mutation rather than asserted on faith: a
-# with_lock that arms its own trap bare, with no save/restore of whatever the caller already had
-# armed (the naive, clobbering shape), makes this test fail with $_staging left behind -- verified
-# against a scratch copy with with_lock's save/restore deleted and its trap set to a plain
-# "rmdir $_lk" on EXIT HUP INT TERM. Against that mutation the run dies with "install incomplete"
-# and $_staging survives; against the composed fix it does not. That is the one thing this test can
-# tell apart, and the comment used to hedge on it before the mutation was actually run.
-#
-# It cannot cheaply also discriminate a stranded *lock*: the clobbering mutation above still frees
-# $_lk fine, because with_lock's own trap only ever has to do its own job (rmdir the lock it holds),
-# never the caller's -- clobbering the outer trap and still releasing the lock are independent
-# failures. Making this test also catch a stranded lock would need a with_lock that skips its own
-# rmdir on signal entirely, which is not a composition bug at all -- it is "no trap", the exact
-# defect the write_receipt test above already exists to catch. The two invariants are orthogonal by
-# construction, not by an accident of this fixture, so there is no cheap way to fold them into one
-# assertion here.
-#
-# A cold pin reaches this, served offline by fake_release/curl-shim; mv_pause_shim pauses the actual
-# publish rename ("mv $_staging $_dest"), gated on that exact destination so it never catches the
-# member rename that happens earlier inside staging on Linux (there the archived member is
-# "swiftlint-static", not "swiftlint", so that rename lands at a different destination than either
-# this one or the receipt's own tmp-to-real rename). $_staging is found by the same glob the #56
-# fixtures already use rather than assumed from "$_dest.staging.$!": exec makes that pid correct
-# under every shell tested so far, but the glob costs nothing and does not depend on it.
+# with_lock must restore install_tool's trap rather than clobber it, or a signal mid-publish leaves the staging it names; the lock check below separately catches a with_lock with no trap.
 r=$(new_repo)
 _sha=$(fake_release "$r" 0.63.2)
 pins "$r" "swiftlint 0.63.2 $_sha $_sha"
@@ -3756,7 +3477,7 @@ top=$(printf '0.2.0\n0.10.0\n0.9.9\n' | LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3n
 # tag -- alongside three well-formed releases, including the classic double-digit trap (0.10.0 above
 # 0.9.9 lexically fails, numerically it must not). Unfiltered, "1.2.3-beta" sorts on key1=1, which
 # outranks every 0.x release below it, and a leading non-numeric field reads as 0 -- exactly the
-# wrong-sort the issue describes, and exactly what grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' exists to prevent
+# wrong sort, and exactly what grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' exists to prevent
 # before either site's sort ever sees these values.
 git_tags_shim() {
     mkdir -p "$1" || fixture_die "cannot create the git shim dir"
@@ -3889,14 +3610,7 @@ else
 fi
 
 it "update replaces the script and stops, without running the fetched code"
-# GRUBSTAKE_REPO and GRUBSTAKE_RAW are env-overridable so update can be pointed at a local
-# fixture instead of the real grubstake repo.
-#
-# curl and git are shimmed to allow only file:// targets and to fail everything else outright,
-# rather than trusting this sandbox's real reachability. That keeps the test offline and fast
-# whether or not the override lands: unfixed, the hardcoded https:// targets get refused by the
-# shim instead of making a live call (or hanging, on a sandbox with no egress at all) before
-# release_tags gives up and update dies -- never reaching the fixture, let alone running it.
+# curl and git allow only file:// so the test stays offline whether or not the overrides are read.
 _realcurl="$(command -v curl)" || fixture_die "no curl on PATH"
 _realgit="$(command -v git)" || fixture_die "no git on PATH"
 _shims="$(mktemp -d "$ROOT/update-shims.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shims"
@@ -4435,10 +4149,7 @@ done
 [ -z "$_bad" ] && pass || fail ".githooks/ differs from (or is missing) the embedded copy:$_bad -- re-run ./grubstake.sh install"
 
 it "install adopts a repo with no network access"
-# Shadowing curl, rather than trusting this sandbox's real reachability (which has open egress to
-# GitHub -- v0.3.2/hooks/pre-commit already resolves there), is what makes this test fail today for
-# the right reason instead of passing by accident. A curl that always fails forces install down
-# exactly the path a genuinely offline developer takes.
+# A curl that always fails forces install down the path a genuinely offline developer takes.
 r=$(new_repo)
 _shims="$(mktemp -d "$ROOT/no-net.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
 printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' >"$_shims/curl"
@@ -4699,44 +4410,7 @@ done
 [ -z "$_bad" ] && pass || fail "is_known_hook_hash does not recognize the current embedded hash for:$_bad"
 
 it "two concurrent installs against the same refresh-eligible repo do not race each other's tmp"
-# Panel review reproduced two concurrent `install` runs corrupting each other 39/40 times under
-# dash: the refresh path (and the fresh-install path, for whichever hook does not exist yet) wrote
-# the current embedded copy to a single, predictable "$_dest.tmp" name shared by every concurrent
-# invocation of the same command against the same repo, so one process's write, chmod, or cleanup
-# could land on the other's in-flight temp file. The fix moves every write behind a uniquely-named,
-# trap-guarded mktemp beside the destination instead. post-commit is seeded fresh from a known
-# previous release before every iteration, so it is refresh-eligible every time; pre-commit starts
-# absent, so the first iteration also exercises the fresh-install race, and both concurrent
-# processes racing to create it land on the same bytes either way once "mv" wins for whichever one
-# gets there first.
-#
-# Two concurrent installs share more than the hook tmp name: both also race on git's own
-# ".git/config.lock" the same way when both reach the `git config core.hooksPath .githooks` write
-# at the end of the command -- one process's write can lose that race and surface git's own raw
-# "error: could not lock config file" instead of anything grubstake ever voices. That write is now
-# skipped once an equivalent hooksPath is already set (#139: install stopped rewriting a value that
-# already resolves to this repo's own .githooks), so each iteration below unsets core.hooksPath
-# first -- otherwise only the first of the five iterations would ever reach the write both racers
-# are pinned at, and the other four would prove nothing. Either race is the same class of defect
-# (an unguarded shared write two concurrent installs both make), so both are asserted as one
-# contract here -- "two concurrent installs must not corrupt each other or leak a raw tool error" --
-# with the failure message naming which one actually fired.
-#
-# A natural race, hoping two full "install" runs happen to reach the same call at the same
-# instant, is what the earlier version of this test relied on -- it caught the git-config race only
-# 1 run in 3 across sh/dash/env-i, which is not something to watch fail and trust. git_pause_shim
-# gives each racer a fixed point to stop at (the hooksPath write, the last shared-state write
-# `install` makes) and releases both together, so the collision this test exists to catch happens on
-# purpose instead of by luck. The hook-tmp write earlier in the same run is not pinned this way: it
-# already has its own isolated, 30/30-vs-0/30 discrimination proof (built at test-authoring time,
-# not part of this file), so here it rides along as a natural, unforced check on top of the forced
-# git-config collision -- same standing as the probabilistic catches elsewhere in this suite (see
-# "two repos sharing one cache" above): a clean run on this half proves nothing beyond itself, but a
-# red one is real.
-#
-# The reaped-loop discipline from #64 still applies to the handful of repeats below: nothing here is
-# sampled or left unreaped, and the loop stops at the first iteration that fails rather than
-# overwriting the evidence with a clean one that runs after it.
+# git_pause_shim forces the hooksPath-write collision every round, but the hook-tmp race before it is natural, so a clean run proves only itself.
 r=$(new_repo)
 _shims="$(mktemp -d "$ROOT/no-net-concurrent-install.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
 printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' >"$_shims/curl"
@@ -4847,16 +4521,7 @@ rm -f "$r/out1" "$r/out2" "$r/rc1" "$r/rc2"
 [ -z "$_bad" ] && pass || fail "$_bad"
 
 it "install fails fast with git's own error, not a lock nobody held, when .git itself is unwritable"
-# #85: the retry around the hooksPath write discards every attempt's stderr with "2>/dev/null", so
-# it cannot tell git losing a genuine lock race (retryable) apart from any other reason the write
-# failed (not retryable). A read-only .git is an ordinary way for that write to fail for a reason
-# that will never clear no matter how many times it is retried: chmod 555 leaves .githooks itself
-# writable (a sibling of .git, not inside it), so the hook loop still succeeds, and only the
-# hooksPath write -- which needs to create .git/config.lock -- hits EACCES. Verified directly
-# against git itself before writing this assertion: the real message is "could not lock config
-# file .git/config: Permission denied", never "File exists" (that text is reserved for a lock
-# already held, the case #85 says must still retry). Pre-fix this spins the full ~50-attempt
-# budget and then dies blaming "git kept losing the lock" -- true of no attempt that ran.
+# A read-only .git fails git's config lock with EACCES, which must fail fast with git's own words, not spin the lock budget.
 r=$(new_repo)
 _shims="$(mktemp -d "$ROOT/no-net-readonly-git.XXXXXX")" || fixture_die "cannot create a scratch dir for the network shim"
 printf '#!/bin/sh\necho "curl: network blocked in test" >&2\nexit 6\n' >"$_shims/curl"
@@ -5006,16 +4671,7 @@ else
 fi
 
 it "a repository path containing the discriminator's own match text does not turn a git permission denial into contention"
-# The with_lock/add_one collision above, at the third site the same panel round flagged: install's
-# own fix reads git's stderr and discriminates with "case ... in *": File exists")", anchored to the
-# end because the diff's own comment already names the counter-case -- an ambient GIT_DIR makes git
-# report the config file's full path instead of the usual plain ".git/config", so a repo whose path
-# contains "File exists" would otherwise collide with git's own trailing reason. Verified directly
-# before writing this: with plain "-C" alone (no GIT_DIR), git's message never carries the repo's
-# path at all, which is why the earlier panel round correctly found nothing to test here -- exporting
-# GIT_DIR is what actually makes the collision text reach the matched string. GIT_DIR has to be
-# exported into the same environment "install" runs in, not just handed to a standalone git call, to
-# prove this reaches the discriminator through the real invocation rather than a hand-picked one.
+# An exported GIT_DIR makes git's lock error carry the repository path, so a path containing "File exists" must still read as a permission failure, not contention.
 r="$ROOT/gitdir-collision.$$/File exists.repo"
 mkdir -p "$r" || fixture_die "cannot create $r"
 (cd "$r" && git init -q .) || fixture_die "git init failed in $r"
@@ -6055,11 +5711,7 @@ else
 fi
 
 it "post-commit stays quiet on a poisoned LATEST cache rather than comparing it against a well-formed CURRENT"
-# #71's sharper case: LATEST is filtered by grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' when the background
-# refresh writes it, but read back raw from the cache file with no re-validation, so a poisoned or
-# stale cache carries anything into the same unguarded comparison. This is worse than scenario 1: the
-# advisory below would name a version no tag filter could ever have produced, not merely an
-# unvalidated-but-plausible one.
+# LATEST is read back raw from a writable cache, so post-commit must re-validate it before comparing, or a poisoned cache names a version no tag filter could have produced.
 r=$(new_hook_repo)
 latest_cache "$r" "99.0.0-dev"
 _c0=$(commits "$r")
@@ -6422,14 +6074,7 @@ else
 fi
 
 it "conflict markers introduced while add is still fetching are not merged into the rewrite"
-# cmd_add calls validate_pins exactly once, before add_one ever fetches. add_one then downloads
-# both platform artifacts -- up to --max-time 300 each -- before it ever takes the pins lock and
-# rewrites grubstake.tools. Conflict markers landing in that window -- the same window a real
-# `git pull` mid-add would land in -- are validated by nothing: add_one's grep/sort/mv rewrite runs
-# over whatever is on disk when the lock is finally taken. The curl shim wraps fake_release's own
-# shim (rather than reimplementing its -o argv parsing) and, on its first call only, mutates
-# grubstake.tools and snapshots it to pins-mid-add at that instant -- so the assertion below is a
-# byte-for-byte compare against what the shim actually wrote, never a hand-maintained copy of it.
+# Markers landing mid-fetch must be caught by the validation add repeats once it holds its lock; the curl shim writes them on its first call and snapshots the file for the byte compare.
 r=$(new_repo)
 _pins_path="$r/grubstake.tools"
 pins "$r" "periphery 3.7.4 $SHA_A $SHA_A"
@@ -6504,26 +6149,7 @@ fi
 # the same message either way, so the check test above covers the discriminating call site.
 
 it "add's pins lock fails fast naming the vanished directory, not a phantom holder"
-# #68: add_one's pins lock is a hand-rolled "while ! mkdir" loop, the same shape with_lock had
-# before #56 -- mkdir cannot distinguish its parent being gone from another run genuinely holding
-# the lock, so if the directory holding grubstake.tools disappears between add's fetch loop and its
-# lock attempt, the loop spins the full ~5s retry budget and then blames a run that was never
-# there. The trigger is far-fetched (the repo's own working directory vanishing mid-add, not
-# something anything in normal use does), which is why this is filed for consistency with #56
-# rather than urgency -- but the fix is the same shape: check the parent inside the loop, fail
-# fast, name what actually happened.
-#
-# add's own network fetches happen before the lock (hashing every platform first), so
-# fake_release/curl-shim get add_one to the lock cheaply and offline. add now also installs before
-# it ever takes its own pins lock (#113), and install_tool's own cache-dir lock is mkdir-".lock" the
-# same shape, so lock_pause_shim is narrowed to grubstake.tools.lock specifically or it would pause
-# at install's lock instead. That narrowed pause is the deterministic point to rename the repo
-# directory away: renaming it does not disturb the already-running, already-exec'd grubstake.sh
-# process (the open script and its cwd survive a renamed-away directory entry same as any Unix
-# process would), but the lock's own path, computed once from script_dir() before the loop started,
-# no longer resolves once the real mkdir is finally allowed to run. The reached/go handshake files
-# live under $ROOT, one level above the repo, since the repo itself is what gets renamed out from
-# under this test.
+# A repo renamed away while add waits at its pins lock must fail fast naming the vanished directory; the pause matches grubstake.tools.lock since install_tool's cache lock comes first.
 r=$(new_repo)
 _sha=$(fake_release "$r" 1.0.0)
 # Under $ROOT, not $r: $r is renamed away below, and a shim (or counter) that moved with it would go unresolvable via PATH, silently hiding a retry instead of counting it.
@@ -6611,13 +6237,7 @@ else
 fi
 
 it "add fails fast on a permission-denied pins lock, not a five-second contention stall"
-# #88, add_one's own copy of the with_lock gap: "[ -d "$_lockdir" ]" (=the repo root itself here,
-# since the pins lock sits directly in it) only answers "does the parent still exist." A read-only
-# repo root fails add_one's own mkdir with EACCES while remaining perfectly traversable (555 keeps
-# the execute bit), so the existence test still reports true, the same as genuine EEXIST contention
-# -- the retry spins its full budget before dying blaming a holder that was never there. fake_release
-# is required here, not fake_install: add always downloads and hashes before it ever reaches its own
-# lock, so nothing short of a real (if fixture-served) fetch reaches the mkdir under test.
+# A read-only repo root fails the pins lock with EACCES, which must fail fast naming the permission failure.
 r=$(new_repo)
 fake_release "$r" 1.0.0 >/dev/null
 _shim="$(mktemp -d "$ROOT/lock-count.XXXXXX")" || fixture_die "cannot create the lock-count shim dir"
@@ -6641,24 +6261,7 @@ else
 fi
 
 it "add blames an unreadable ancestor honestly, not a repository that was never removed"
-# The other wrong diagnosis at add_one's site: an ancestor of the repo itself -- not the repo root,
-# which "[ -d "$_lockdir" ]" checks, but something above it -- can be the thing that becomes
-# untraversable, which fails that same existence test, indistinguishable to add_one from the #68
-# case (the repo directory genuinely renamed away mid-add) the vanished-directory test above covers.
-# Nothing was removed here; only a permission bit changed on a directory the repo sits inside.
-# new_gated_repo, not new_repo: the ancestor under test has to be a directory this suite controls
-# and nothing else shares, never $ROOT itself. A static pre-chmod on it does not isolate this
-# cleanly, though: with the ancestor already broken, the shell cannot even absolute-path back into
-# the repo to start the run, and a relative "./grubstake.sh" invocation sidesteps the break entirely
-# (script_dir()'s own "cd . && pwd" never needs to leave a cwd it is already validly inside). Same
-# fix as with_lock's equivalent test above: shim "mkdir" to flip the permission the instant the
-# pins-lock path is attempted, landing the change after add_one's own hash/download phase -- which
-# never touches the repo; the download lands in system $TMPDIR -- and right before the mkdir under
-# test, with grubstake.sh itself still reached via the repo's own absolute path throughout. Matched
-# on the full grubstake.tools.lock path, not a bare "*.lock)": add now installs before it takes its
-# own pins lock (#113), and install_tool's cache-dir lock under $r/.cache is mkdir-".lock" too, so an
-# unnarrowed match would flip the gate's permission at that earlier lock and test with_lock's own
-# message instead of add_one's.
+# An untraversable ancestor must read as a permission failure, not a removed repo; the gate is flipped at the grubstake.tools.lock mkdir, since a pre-chmod blocks the run itself and install_tool's cache lock comes first.
 r=$(new_gated_repo)
 _gate="$(dirname "$r")"
 fake_release "$r" 1.0.0 >/dev/null
@@ -6685,13 +6288,7 @@ else
 fi
 
 it "a repository path containing the discriminator's own match text does not turn a permission denial into contention"
-# add_one's mirror of the with_lock collision above: its own fix reads the identical unanchored
-# "case ... in *"File exists"*)" shape against mkdir's own message for "$_pins.lock", which sits
-# directly in the repo root -- so here the collision text has to be in the repo's own path, not a
-# separate cache root the way with_lock's equivalent test manages it. new_repo builds its own name
-# from a timestamp and pass/fail counters, with no hook to choose that name, so this is built
-# inline instead, mirroring new_repo()'s own steps (git init, copy grubstake.sh, create .cache) at a
-# chosen path -- the one part of this dispatch's fixtures new_repo could not carry as asked.
+# The pins lock sits in the repo root, so the collision text goes in the repo's own path, built inline because new_repo picks its own name.
 r="$ROOT/repo-collision.$$/File exists.repo"
 mkdir -p "$r" || fixture_die "cannot create $r"
 (cd "$r" && git init -q .) || fixture_die "git init failed in $r"
@@ -6720,20 +6317,7 @@ else
 fi
 
 it "an unreadable pins file is left alone, not collapsed down to the one new pin"
-# #96: add_one's own rewrite ends "grep -v ... > \"\$_pt\" || true" -- the "|| true" exists so an
-# empty pins file (grep selects nothing, exit 1) is not mistaken for failure, but it swallows a
-# genuine read failure the same way: $_pt stays empty, the new pin is appended to nothing, and the
-# mv installs a one-line pins file. Confirmed on disk, not just by exit status, per CLAUDE.md's own
-# rule that a fix verified once by hand is a fix the next change can break silently.
-#
-# ./grubstake.sh always execs via its own "#!/bin/sh" shebang, unaffected by which shell runs this
-# suite -- so all three of sh/dash/env-i test/run.sh reproduce this the same way here, because this
-# machine's own /bin/sh is bash: it runs the permission-denied read past validate_pins and reaches
-# add_one's rewrite. AGENTS.md says CI's /bin/sh is dash, and there validate_pins' own
-# "< \"\$_f\"" redirect aborts first with its own fatal error -- an accident of dash's harsher
-# redirection semantics, not a guard add_one owns -- so this specific fixture would likely pass on
-# CI for the wrong reason even unfixed. Test 3 below reproduces the same contract violation without
-# depending on that redirect at all, so it does not share this gap.
+# validate_pins' own read may refuse an unreadable file before add's rewrite runs, so the grep-shim test below is what covers the rewrite itself.
 r=$(new_repo)
 pins "$r" "periphery 3.7.4 $SHA_A $SHA_A
 swiftformat 0.61.1 $SHA_B $SHA_B"
@@ -6766,9 +6350,7 @@ it "the first pin still lands when the pins file starts empty or absent"
 # along with the genuine failure it is meant to catch. Two distinct starting shapes: "absent"
 # exercises the header-line creation at add_one's own "[ -f \"\$_pins\" ] || printf ..."; "empty"
 # (an existing, zero-byte file) skips that write and is the shape the contract's own exception
-# ("unless the original genuinely had none") has to cover. Watched green on unfixed code, on
-# purpose: the "|| true" this issue removes exists to make exactly this case work, and this is the
-# regression guard that must stay green once the fix lands, not a defect this issue is proving.
+# ("unless the original genuinely had none") has to cover.
 _bad=""
 for _case in absent empty; do
     [ -z "$_bad" ] || break
@@ -6783,16 +6365,7 @@ done
 if [ -n "$_bad" ]; then fail "add over an $_bad"; else pass; fi
 
 it "a rewrite that silently drops unrelated pins is refused, not just one that cannot read the file"
-# #96's second half: refuse any replacement with fewer pins than the original, not only ones caused
-# by an unreadable file. add_one's own rewrite line is grep -v -E "^$_tool[[:space:]]" "$_pins" |
-# grep -v '^$' > "$_pt" -- a grep shim intercepts only that exact invocation (double-quoted, so
-# [[:space:]] matches as literal text rather than expanding as a glob bracket expression in the
-# case pattern) and exits 1 with no output, the same shape a real grep -v takes when it genuinely
-# selects nothing, so this cannot be told apart from an ordinary empty match by anything short of
-# comparing pin counts. The pins file itself stays perfectly readable throughout, unlike the test
-# above -- proving the guard has to be a count check, not just a read-failure detector. A sentinel
-# file proves the shim actually fired, so this stays a real test rather than passing vacuously the
-# moment a fix changes the shape of the read.
+# The grep shim makes add's rewrite grep exit 1 with no output, exactly as a real empty match does, so only the pin-count check can refuse; the sentinel proves the shim fired.
 r=$(new_repo)
 pins "$r" "periphery 3.7.4 $SHA_A $SHA_A
 swiftformat 0.61.1 $SHA_B $SHA_B"
@@ -6906,7 +6479,7 @@ else
 fi
 
 it "a signal after add_one releases its pins lock but before disarming its trap does not delete a successor's lock"
-# F02: simulates a second add's mkdir reclaiming $_lockdir between this run's own rmdir and disarm; guarded to fire once so a repeat rmdir on this same path does not re-signal the parent.
+# add_one must disarm before its rmdir: the shim reclaims $_lockdir as a successor would right after that rmdir and signals, firing once so a repeat rmdir does not re-signal.
 r=$(new_repo)
 fake_release "$r" 1.0.0 >/dev/null
 _lockdir="$r/grubstake.tools.lock"
@@ -6938,7 +6511,7 @@ rm -f "$_marker" 2>/dev/null
 rm -rf "$_lockdir" 2>/dev/null
 
 it "a signal after add_one renames grubstake.tools into place does not let a killed run report success"
-# F02: deferred until the rename returns, a signal here must not let the run finish silently -- exit
+# Deferred until the rename returns, a signal here must not let the run finish silently -- exit
 # 0, "pinned" printed -- as if the kill never landed. Not "installed": install_tool now runs before
 # this rename (#113), so "installed" legitimately prints beforehand regardless of what happens to the
 # signal here; "pinned" is add_one's own last line, printed only once the rename and cleanup return.
@@ -7699,7 +7272,7 @@ else
 fi
 
 # A repo adopted the way an adopting repo adopts one, with curl shadowed so the fixture never
-# depends on this sandbox's reachability: install writes the hooks and wires hooksPath itself.
+# depends on network reachability: install writes the hooks and wires hooksPath itself.
 adopted_repo() {
     _ar="$(new_repo)"
     (cd "$_ar" \
@@ -7761,7 +7334,7 @@ wait_for_marker() {
 }
 
 it "a plain commit in an adopted repo never reaches the network for the post-commit refresh"
-# F16/#137: asserting only that the stamp's second line came back empty proved nothing answered, which an offline machine also produces unfixed; the shim below proves no dial-out was even attempted.
+# #137: an empty stamp line is also what an offline machine produces, so only the remote-helper shim proves no dial-out was attempted.
 r=$(adopted_repo)
 _shim=$(remote_helper_shim)
 _lookup=$(lookup_shim)
@@ -8051,31 +7624,7 @@ _wf="$REPO/.github/workflows/network.yml"
 grep -qE '^[[:space:]]*workflow_dispatch:' "$_wf" && pass || fail "workflow_dispatch is not declared in $_wf"
 
 it "the release skill dispatches the network workflow only after the tagged commit is known, comparing headSha in that same step"
-# Panel review on #86: a first version of this test only pinned that the skill names a dispatch of
-# the workflow SOMEWHERE, which is exactly what let a real bug through review -- the dispatch sat
-# right after the local run, before the version bump and the merge commit that follows it, so the
-# commit the dispatch proved was never the commit that ended up tagged. The gate would have gone
-# green on every release while proving nothing, the same hole #86 exists to close, rebuilt inside
-# its own fix. Presence was never the property that mattered; order is.
-#
-# Anchored on the two commands themselves, not on step numbers or heading prose (both legitimately
-# change; a step could be renamed or renumbered without the procedure regressing at all): the line
-# capturing the commit about to be tagged ("git rev-parse HEAD", the one place in this doc that
-# names the exact SHA a tag will point at) has to appear, in document order, before the line that
-# dispatches the workflow ("gh workflow run <name>"). A doc that reverts to dispatching before that
-# capture -- or drops the capture entirely -- fails here rather than only in production, on the
-# next release.
-#
-# Exactly two structural facts are pinned, and no more: the dispatch's position relative to the SHA
-# capture, and that the literal word "headSha" appears somewhere within the dispatch's own step (its
-# "## " heading through the next one). That second check cannot tell a genuine comparison apart from
-# the bare word surviving by accident -- the panel proved a doc that deletes every sentence enforcing
-# the comparison ("a headSha that is not the SHA from step 5 stops the release") while keeping the
-# `--json ...,headSha,...` flag in the command itself still passes, because the substring was never
-# going anywhere. Anchoring tighter, on enforcement phrasing, would fail on a legitimate reword of
-# that prose -- a test that breaks every time a sentence is improved is worse than one with an
-# honestly-scoped gap. What this catches is the comparison disappearing from the step entirely, not
-# the comparison losing its teeth while the word stays.
+# Anchored on commands, not step numbers or headings, which change: `git rev-parse HEAD` must precede `gh workflow run <name>`, and that step must say "headSha", which its --json flag alone still satisfies.
 _wf="$REPO/.github/workflows/network.yml"
 _skill="$REPO/.claude/skills/gst-release/SKILL.md"
 [ -f "$_wf" ] || fixture_die "cannot find $_wf"

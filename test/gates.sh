@@ -143,7 +143,7 @@ case "$out" in
 esac
 
 it "a shell-critic receipt does not satisfy a leak-auditor requirement"
-# F13/#137: the marker carried no reviewer kind, so any receipt on a matching digest and session cleared the gate whatever it had actually reviewed.
+# #137: a receipt must name its reviewer kind, or one on a matching digest and session would clear the gate whatever it had actually reviewed.
 rm -f "$MARKER" "$BLOCKS"
 receipt gst-shell-critic 'Antagonist: gst-shell-critic.\n\nNo findings.' >/dev/null
 out=$(gate "$T")

@@ -20,6 +20,7 @@ This agent is never told which repositories are private, because that list would
 - Issue bodies, PR bodies, and release notes: this audit is the only gate.
 - Commit messages: the shipped commit-msg spine refuses the two agent-session shapes on its own; in this repo the gate in `.githooks/commit-msg.d/` runs `test/scan-for-leaks.sh --message` over the message, so all five shapes are refused mechanically before the commit exists, and `--all` re-reads every message in history before a release. This audit judges only the meaning a shape cannot carry.
 - Tracked files: advisory only; `test/scan-for-leaks.sh` remains authoritative and its verdict wins.
+- Test results quoted in a body: confirm they cite an executed run at a named revision, and report any that do not as unverified. Never rerun the suite to check them.
 
 ## Rule IDs
 

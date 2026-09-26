@@ -7,7 +7,7 @@ allowed-tools: Read, Grep, Glob, Bash, Agent
 
 # Validate
 
-The panel behind the antagonist gate. Completing the critic or auditor pass mints the receipt the Stop hook in `.claude/settings.json` waits for.
+The panel behind the antagonist gate. A completed critic or auditor pass mints the receipt the Stop hook in `.claude/settings.json` waits for, and that receipt proves only that an antagonist of that kind finished while this checkout's change footprint had that digest. It records neither the scope the dispatch named nor changes in other worktrees (#191), so a green receipt is not proof of what was reviewed: the pull request body records each reviewer's actual outcome and the ref and scope it reviewed. `antagonist-receipt.sh --skip <reason>` records that no pass ran for the current footprint and why; it never represents a review that ran.
 
 ## 1. Resolve scope
 
@@ -30,7 +30,7 @@ Dispatch in order, since the critic optionally takes the reviewer's output as it
 1. `gst-shell-reviewer` with the scope and changed paths.
 2. `gst-shell-critic` with the same scope and the reviewer's findings.
 
-Deduplicate findings on rule id. Present survivors as `[SEVERITY] rule-id — sentence, citation`, worst first, and say which reviewer findings the critic killed and why. `No findings.` from both ends the panel.
+Deduplicate findings on rule id. Present survivors as `[SEVERITY] rule-id — sentence, citation`, worst first, and say which reviewer findings the critic killed and why. One pass per change. It is done when the change's acceptance criteria and required checks hold and each material in-scope objection is fixed or answered with a citation. An objection is material when it shows a causal path or trust-boundary exposure to a failure in supported use; it needs no past incident. A credible bug outside the change is logged, reusing an existing issue, not fixed here; an accepted limitation is recorded once in the pull request body; speculation is rejected, not filed. A fixup gets a focused critic pass over the correction and the behavior it affects, which mints the receipt for the fixed state.
 
 ## 4. Published prose
 
@@ -38,4 +38,4 @@ When the turn writes an issue, pull request, release, or commit message, dispatc
 
 ## 5. Report
 
-Suite result verbatim, surviving findings by rule id, and what was escalated to the user. Nothing else.
+Suite result verbatim, surviving findings by rule id, what was escalated to the user, and the review record for the pull request body: each reviewer, its outcome, and the ref and scope it reviewed. Nothing else.

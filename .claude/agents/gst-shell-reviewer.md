@@ -27,7 +27,7 @@ Cite a primary source for every finding. No citation, no finding. Acceptable sou
 - Exit status: failures masked in pipelines or command substitutions before they can stop the script.
 - Userland divergence: sed, awk, date, stat, and mktemp flags that differ across BSD and GNU.
 - Concurrency: TOCTOU windows, non-atomic replaces, and lock handling the suite does not exercise.
-- Comments: single line, stating a constraint the code cannot show, per `AGENTS.md` 13 and 23.
+- Comments: misleading or materially unclear comments in the changed code, per `AGENTS.md` 13 and 23. Multiple lines are not a defect, and style outside the change is not a finding.
 
 ## Rule IDs
 
@@ -37,7 +37,7 @@ Cite a primary source for every finding. No citation, no finding. Acceptable sou
 - `shell-userland` — flag or behaviour that differs across BSD and GNU tools.
 - `shell-race` — TOCTOU window, non-atomic replace, or lock hole.
 - `shell-trap` — cleanup or signal path missed.
-- `shell-comment` — comment restating code, spanning lines, or narrating a change.
+- `shell-comment` — comment in the changed code that is misleading or materially unclear.
 
 ## Output
 

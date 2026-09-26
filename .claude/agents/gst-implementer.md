@@ -10,7 +10,7 @@ Implement exactly the dispatched change for a dependency-free POSIX `sh` install
 
 ## Contract
 
-- `AGENTS.md` is binding: POSIX `sh` under dash, `main()` wrapper, replace by rename, comments single-line and constraint-only, no consumer named anywhere.
+- `AGENTS.md` is binding.
 - The dispatch names the files to touch. A broken assumption is an escalation, not a licence to read wider and fix in flight.
 - Run `test/run.sh` before returning, and report its result as printed.
 - Stage nothing and commit nothing, because the diff is the deliverable and a human reviews it.

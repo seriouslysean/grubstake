@@ -42,7 +42,8 @@ block() {
 # tool_response carries its own "message" key ("Report delivered..."), so a bare "message" search
 # would always be true; anchoring past tool_input's opening brace is what tells the two apart.
 TOOL_MSG='"tool_input"[[:space:]]*:[[:space:]]*{[[:space:]]*"message"[[:space:]]*:[[:space:]]*"'
-tool_msg() { printf '%s' "$INPUT" | sed -n "s/.*$TOOL_MSG\\([^\"]*\\).*/\\1/p"; }
+# The value runs to the first unescaped quote: \" and \\ inside it are escape pairs, so a quoted span in the report does not end it.
+tool_msg() { printf '%s' "$INPUT" | sed -n "s/.*$TOOL_MSG\\([^\"\\\\]*\\(\\\\.[^\"\\\\]*\\)*\\).*/\\1/p"; }
 MSG="$(tool_msg)"
 
 msg_has() {

@@ -137,6 +137,11 @@ grubstake knows how to install `swiftlint`, `swiftformat`, `xcbeautify`, and `pe
 
 `periphery` publishes no Linux build, so grubstake skips it there rather than failing the run.
 
+`periphery`'s upstream repository is archived, and 3.8.0 is the last release published there. The
+project continues as a commercial product, and grubstake installs only the archived open-source
+releases. An existing pin keeps working for as long as that release asset is served. There is no
+newer open-source version to move a pin to.
+
 ## Operating
 
 **Unadopt.** Run `./grubstake.sh clean` if the cached binaries should go. Move anything repo-owned

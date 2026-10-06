@@ -218,6 +218,51 @@ case "$out" in
     *) fail "a bare first-line header did not reach the output-discipline check: out=$out" ;;
 esac
 
+# #198: the report is a JSON string, so a quoted span inside it arrives as \" and must not end it.
+# In the single-quoted arguments below, \" and \\ are the literal JSON escapes the hook sees.
+it "an auditor report quoting a span before its finding line mints the receipt"
+rm -f "$MARKER" "$BLOCKS"
+out=$(receipt gst-leak-auditor 'Antagonist: gst-leak-auditor.\n\nPASS. The span \"x\" is fine.\n[LOW] leak-meaning — advisory')
+if [ -f "$MARKER" ] && [ -z "$out" ]; then pass; else fail "no receipt minted: out=$out"; fi
+
+it "an auditor report quoting a span before No findings. mints the receipt"
+rm -f "$MARKER" "$BLOCKS"
+out=$(receipt gst-leak-auditor 'Antagonist: gst-leak-auditor.\nThe span \"x\" is fine.\nNo findings.')
+if [ -f "$MARKER" ] && [ -z "$out" ]; then pass; else fail "no receipt minted: out=$out"; fi
+
+it "a shell-critic report quoting a span before its finding line mints the receipt"
+rm -f "$MARKER" "$BLOCKS"
+out=$(receipt gst-shell-critic 'Antagonist: gst-shell-critic.\nThe line \"set -u\" is fine.\n[MEDIUM] critic-quoting — advisory')
+if [ -f "$MARKER" ] && [ -z "$out" ]; then pass; else fail "no receipt minted: out=$out"; fi
+
+it "a header-only report containing a quote is still refused, even when tool_response carries a rule id"
+# The report must end at its own closing quote: reading on into tool_response would widen what passes.
+rm -f "$MARKER" "$BLOCKS"
+out=$(printf '{"session_id":"s1","hook_event_name":"PostToolUse","tool_name":"SubagentHandback","agent_type":"gst-leak-auditor","tool_input":{"message":"Antagonist: gst-leak-auditor.\\nThe span \\"x\\" is fine."},"tool_response":{"success":true,"message":"] leak-x No findings."}}' \
+    | (cd "$R" && "$RCPT"))
+case "$out" in
+    *'"decision":"block"'*'gst-leak-auditor must return findings'*)
+        if [ ! -f "$MARKER" ]; then pass; else fail "a receipt was minted"; fi
+        ;;
+    *) fail "got: $out" ;;
+esac
+
+it "a report ending in an escaped backslash is read to its own end, not into tool_response"
+rm -f "$MARKER" "$BLOCKS"
+out=$(printf '{"session_id":"s1","hook_event_name":"PostToolUse","tool_name":"SubagentHandback","agent_type":"gst-leak-auditor","tool_input":{"message":"Antagonist: gst-leak-auditor.\\nNo rule ids, path C:\\\\dir\\\\"},"tool_response":{"success":true,"message":"] leak-x No findings."}}' \
+    | (cd "$R" && "$RCPT"))
+case "$out" in
+    *'"decision":"block"'*'gst-leak-auditor must return findings'*)
+        if [ ! -f "$MARKER" ]; then pass; else fail "a receipt was minted"; fi
+        ;;
+    *) fail "got: $out" ;;
+esac
+
+it "a report with a finding line holding escaped backslashes mints the receipt"
+rm -f "$MARKER" "$BLOCKS"
+out=$(receipt gst-leak-auditor 'Antagonist: gst-leak-auditor.\n[LOW] leak-path — see C:\\dir\\ here')
+if [ -f "$MARKER" ] && [ -z "$out" ]; then pass; else fail "no receipt minted: out=$out"; fi
+
 it "stop_hook_active true exits quietly instead of re-blocking, and logs the pass"
 rm -f "$MARKER" "$BLOCKS" "$LOG"
 echo "# pokeStop" >>"$R/grubstake.sh"

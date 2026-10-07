@@ -176,6 +176,11 @@ naming this repo's own `.githooks`; the relative `.githooks` it writes resolves 
 
 The migration is in [ADOPTING.md](ADOPTING.md), which is written for an agent working through it.
 
+## Conventions
+
+How a repository lays out the scripts, hooks, CI, and lint configuration around grubstake is in
+[CONVENTIONS.md](CONVENTIONS.md). It is advisory, and nothing here checks a repository against it.
+
 ## Contributing
 
 The workflow is in [CONTRIBUTING.md](CONTRIBUTING.md), and the conventions the code holds itself to

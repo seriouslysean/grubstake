@@ -41,7 +41,7 @@ No arguments, or `-h`/`--help`/`help`, prints usage and exits 0.
   repository, fails it before any row prints. After those rows `doctor` also reports a conventions
   section covering a repository's scripts, hooks, version files, lint config, workflow action pins
   and, where `.agents/` exists, its agent-layer links. A convention that does not hold is reported
-  and does not change the exit status in this release. Whether a broken convention fails `doctor`
+  and does not change the exit status. Whether a broken convention fails `doctor`
   is not yet promised, so a later minor release may make it a failure.
 - Every command exits 0 on success and non-zero on any documented failure class. The specific
   non-zero value is not part of the contract; only zero-vs-nonzero may be relied on.

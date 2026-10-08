@@ -1223,12 +1223,13 @@ doctor_conventions() {
     else
         doctor_conv_row .swiftlint.yml ok
     fi
+    # SwiftFormat accepts the option as --swift-version and in any letter case, not only as --swiftversion.
     _dc_f="$_dc_root/.swiftformat"
     if [ ! -e "$_dc_f" ]; then
         doctor_conv_row .swiftformat missing
     elif ! cat "$_dc_f" >/dev/null 2>&1; then
         doctor_conv_row .swiftformat "cannot be read"
-    elif grep -Eq '^[[:space:]]*--swiftversion([[:space:]]|$)' "$_dc_f"; then
+    elif grep -Eiq '^[[:space:]]*--swift-?version([[:space:]]|$)' "$_dc_f"; then
         doctor_conv_row .swiftformat "sets --swiftversion (remove it; .swift-version is the one source)"
     else
         doctor_conv_row .swiftformat ok
@@ -1304,7 +1305,9 @@ doctor_conventions() {
         elif [ -n "$_dc_tracked" ]; then
             doctor_conv_row .codex/agents "holds tracked files (run: git rm -r --cached .codex/agents)"
         else
-            if git -C "$_dc_root" check-ignore -q .codex/agents/probe.toml 2>/dev/null; then _dc_rc=0; else _dc_rc=$?; fi
+            # core.excludesFile=/dev/null drops the user's personal excludes (that setting, and its default under
+            # XDG_CONFIG_HOME or ~/.config), which no other clone has. .git/info/exclude is still read.
+            if git -c core.excludesFile=/dev/null -C "$_dc_root" check-ignore -q .codex/agents/probe.toml 2>/dev/null; then _dc_rc=0; else _dc_rc=$?; fi
             case "$_dc_rc" in
                 0) doctor_conv_row .codex/agents ok ;;
                 1) doctor_conv_row .codex/agents "not ignored by git (add .codex/agents/ to .gitignore)" ;;

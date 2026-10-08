@@ -7179,7 +7179,7 @@ conv_done
 
 it "doctor flags a .swiftformat that sets --swiftversion, which .swift-version already owns"
 _bad=""
-for _c in '--indent 4\n--swiftversion 6.0\n' '--indent 4\n  --swiftversion 6.0\n' '--indent 4\n\t--swiftversion 6.0\n' '--indent 4\n--swiftversion\n' '--indent 4\n--swiftversion 6.0'; do
+for _c in '--indent 4\n--swiftversion 6.0\n' '--indent 4\n  --swiftversion 6.0\n' '--indent 4\n\t--swiftversion 6.0\n' '--indent 4\n--swiftversion\n' '--indent 4\n--swiftversion 6.0' '--indent 4\n--swift-version 6.0\n' '--indent 4\n--SwiftVersion 6.0\n'; do
     r=$(new_conv_repo)
     printf '%b' "$_c" >"$r/.swiftformat" || fixture_die "cannot write $r/.swiftformat"
     _out=$(gs "$r" doctor)
@@ -7187,9 +7187,9 @@ for _c in '--indent 4\n--swiftversion 6.0\n' '--indent 4\n  --swiftversion 6.0\n
 done
 conv_done
 
-it "doctor does not flag a .swiftformat that only mentions --swiftversion in a comment"
+it "doctor does not flag a .swiftformat that mentions --swiftversion only in a comment, or spells it --swift_version, which SwiftFormat rejects"
 _bad=""
-for _c in '# --swiftversion 6.0\n--indent 4\n' '--indent 4 # --swiftversion 6.0\n'; do
+for _c in '# --swiftversion 6.0\n--indent 4\n' '--indent 4 # --swiftversion 6.0\n' '# --swift-version 6.0\n--indent 4\n' '--indent 4\n--swift_version 6.0\n'; do
     r=$(new_conv_repo)
     printf '%b' "$_c" >"$r/.swiftformat" || fixture_die "cannot write $r/.swiftformat"
     _out=$(gs "$r" doctor)
@@ -7271,6 +7271,34 @@ conv_unpinned_workflow "$r/.github/workflows/deploy.yaml"
 _out=$(gs "$r" doctor)
 _bad=""
 conv_note "$_out" "workflow actions" "not pinned to a commit SHA: deploy.yaml:8 deploy.yaml:10"
+conv_done
+
+it "doctor lists unpinned actions from every .yml workflow before any .yaml one"
+# a.yaml sorts before z.yml, so only reading the .yml files first puts z.yml first.
+r=$(new_conv_repo)
+rm "$r/.github/workflows/ci.yml" || fixture_die "cannot remove $r/.github/workflows/ci.yml"
+cat >"$r/.github/workflows/z.yml" <<EOF || fixture_die "cannot write $r/.github/workflows/z.yml"
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: example-runner
+    steps:
+      - uses: example/action@v1
+EOF
+cat >"$r/.github/workflows/a.yaml" <<EOF || fixture_die "cannot write $r/.github/workflows/a.yaml"
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: example-runner
+    steps:
+      - run: ./scripts/validate.sh
+      - uses: example/action@v1
+EOF
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" "workflow actions" "not pinned to a commit SHA: z.yml:7 a.yaml:8"
 conv_done
 
 it "doctor treats a short, upper-case or over-long SHA as not pinned"
@@ -7391,57 +7419,70 @@ _bad=""
 conv_note "$_out" .codex/agents ok
 conv_done
 
+it "doctor flags .codex/agents when only a personal git exclude ignores it, not the repository's own rules"
+# A personal exclude exists on one machine only, so it cannot stand in for a rule every clone shares.
+r=$(new_conv_repo agents)
+rm "$r/.gitignore" || fixture_die "cannot remove $r/.gitignore"
+_xdg="$(mktemp -d "$ROOT/xdg.XXXXXX")" || fixture_die "no scratch directory for the personal exclude"
+mkdir "$_xdg/git" || fixture_die "cannot create $_xdg/git"
+printf '.codex/\n' >"$_xdg/git/ignore" || fixture_die "cannot write $_xdg/git/ignore"
+(XDG_CONFIG_HOME="$_xdg" && export XDG_CONFIG_HOME && git -C "$r" check-ignore -q .codex/agents/probe.toml) \
+    || fixture_die "the personal exclude in $_xdg does not ignore .codex/agents/probe.toml in $r; the fixture proves nothing"
+_out=$(XDG_CONFIG_HOME="$_xdg" && export XDG_CONFIG_HOME && gs "$r" doctor)
+_bad=""
+conv_note "$_out" .codex/agents "not ignored by git (add .codex/agents/ to .gitignore)"
+conv_done
+
 it "doctor reports an unreadable .swiftformat as cannot be read, never ok, and still exits 0"
-if [ "$(id -u)" -eq 0 ]; then
-    pass
-    printf '         (skipped: running as root, where chmod 000 does not stop a read)\n'
-else
-    r=$(new_conv_repo)
-    chmod 000 "$r/.swiftformat" || fixture_die "cannot make $r/.swiftformat unreadable"
-    [ ! -r "$r/.swiftformat" ] || fixture_die "chmod 000 did not take; the unreadable .swiftformat fixture proves nothing"
-    _out=$(gs "$r" doctor)
-    _rc=$?
-    _bad=""
-    [ "$_rc" -eq 0 ] || _bad="doctor exited $_rc"
-    conv_note "$_out" .swiftformat "cannot be read"
-    conv_done
-fi
+r=$(new_conv_repo)
+chmod 000 "$r/.swiftformat" || fixture_die "cannot make $r/.swiftformat unreadable"
+[ ! -r "$r/.swiftformat" ] || fixture_die "chmod 000 did not take on $r/.swiftformat (running as root?)"
+_out=$(gs "$r" doctor)
+_rc=$?
+_bad=""
+[ "$_rc" -eq 0 ] || _bad="doctor exited $_rc"
+conv_note "$_out" .swiftformat "cannot be read"
+conv_done
 
 it "doctor reports every other unreadable convention input as cannot be read, never ok"
-if [ "$(id -u)" -eq 0 ]; then
-    pass
-    printf '         (skipped: running as root, where chmod 000 does not stop a read)\n'
-else
-    _bad=""
-    for _f in .xcode-version .swiftlint.yml; do
-        r=$(new_conv_repo)
-        chmod 000 "$r/$_f" || fixture_die "cannot make $r/$_f unreadable"
-        [ ! -r "$r/$_f" ] || fixture_die "chmod 000 did not take on $r/$_f"
-        _out=$(gs "$r" doctor)
-        conv_note "$_out" "$_f" "cannot be read" "$_f"
-    done
+_bad=""
+for _f in .xcode-version .swiftlint.yml; do
     r=$(new_conv_repo)
-    chmod 000 "$r/.nvmrc" || fixture_die "cannot make $r/.nvmrc unreadable"
-    [ ! -r "$r/.nvmrc" ] || fixture_die "chmod 000 did not take on $r/.nvmrc"
+    chmod 000 "$r/$_f" || fixture_die "cannot make $r/$_f unreadable"
+    [ ! -r "$r/$_f" ] || fixture_die "chmod 000 did not take on $r/$_f (running as root?)"
     _out=$(gs "$r" doctor)
-    conv_note "$_out" "node version" "cannot be read" ".nvmrc"
-    r=$(new_conv_repo)
-    chmod 000 "$r/.github/workflows/ci.yml" || fixture_die "cannot make $r/.github/workflows/ci.yml unreadable"
-    [ ! -r "$r/.github/workflows/ci.yml" ] || fixture_die "chmod 000 did not take on $r/.github/workflows/ci.yml"
-    _out=$(gs "$r" doctor)
-    # The spec writes "cannot be read: <file>" without saying whether <file> is the bare name or the path, so only the name is pinned.
-    if conv_require "$_out" "ci.yml"; then
-        _cvgot="$(conv_text "$_out" "workflow actions")"
-        case "$_cvgot" in
-            "cannot be read: "*ci.yml) : ;;
-            *) _bad="${_bad}${_bad:+; }[ci.yml] workflow actions row: wanted 'cannot be read: ...ci.yml', got '${_cvgot:-<no row>}'" ;;
-        esac
-    fi
-    conv_done
+    conv_note "$_out" "$_f" "cannot be read" "$_f"
+done
+r=$(new_conv_repo)
+chmod 000 "$r/.nvmrc" || fixture_die "cannot make $r/.nvmrc unreadable"
+[ ! -r "$r/.nvmrc" ] || fixture_die "chmod 000 did not take on $r/.nvmrc (running as root?)"
+_out=$(gs "$r" doctor)
+conv_note "$_out" "node version" "cannot be read" ".nvmrc"
+r=$(new_conv_repo)
+chmod 000 "$r/.github/workflows/ci.yml" || fixture_die "cannot make $r/.github/workflows/ci.yml unreadable"
+[ ! -r "$r/.github/workflows/ci.yml" ] || fixture_die "chmod 000 did not take on $r/.github/workflows/ci.yml (running as root?)"
+_out=$(gs "$r" doctor)
+# Only the prefix and the file name are pinned here; the directory-as-workflow test below pins the whole text.
+if conv_require "$_out" "ci.yml"; then
+    _cvgot="$(conv_text "$_out" "workflow actions")"
+    case "$_cvgot" in
+        "cannot be read: "*ci.yml) : ;;
+        *) _bad="${_bad}${_bad:+; }[ci.yml] workflow actions row: wanted 'cannot be read: ...ci.yml', got '${_cvgot:-<no row>}'" ;;
+    esac
 fi
+conv_done
+
+it "doctor reports a directory named like a workflow file as cannot be read, not as a workflow with no unpinned action"
+r=$(new_conv_repo)
+rm "$r/.github/workflows/ci.yml" || fixture_die "cannot remove $r/.github/workflows/ci.yml"
+mkdir "$r/.github/workflows/dir.yml" || fixture_die "cannot create $r/.github/workflows/dir.yml"
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" "workflow actions" "cannot be read: dir.yml"
+conv_done
 
 it "doctor exits 0 when broken conventions are the only thing wrong"
-# Report-only in this release: a convention that does not hold must not turn into a failing exit.
+# Report-only: a convention that does not hold must not turn into a failing exit.
 r=$(new_conv_repo agents)
 rm "$r/scripts/lint.sh" || fixture_die "cannot remove $r/scripts/lint.sh"
 chmod -x "$r/.githooks/pre-push" || fixture_die "cannot strip the execute bit from $r/.githooks/pre-push"

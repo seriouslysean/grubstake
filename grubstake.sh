@@ -998,13 +998,45 @@ hook_has_marker() {
 known_hook_hashes() {
     case "$1" in
         pre-commit)
-            echo "330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797 dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062 6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888 971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307 861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d 1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8 1f1a0953e8ebe4bba4331251ca7d6a3da9f0c3ead68ff9285056fb94505a773f a1e18ebfe81064a0addf39ee74de7b477fc868d2c810679fdb486d27601a8c4b 7bbd9b3c1678aa93e9556c31a5ba1c660c617a71046429d8d879175900acc9a1 1b3c8ce3cef18d31a3e799a59a231b7260a62d06c78e8c63e02822f4ab0fee1a f5e2035b76358ce6d62907ac8ddf1eb2795bbf64c302a3e0165f036e0a0711f8 31a9331197189857d6d080cdb1d091b21b730838bb27b92cddc664b7a7c9336f"
+            cat <<'GST_HASHES_PRE_COMMIT'
+330d703d3b852c20014a2e6752a8d5128ce424b8c2f5a8518f17c0cf0821d88e
+cdf7925196ab575befe386141e4213da38b70b312f5362891dffe62939854797
+dd03e61a534e76544af5fa8d3a0c55ba184d36499d20e16955601f93814e2062
+6089721b6ef137d302069f78708066bea4657e627c27a29189e84fbbbbc4293f
+ebe69cdf167af9a5d99dd29ce7309ee27f2db6dab43fcd683567a3e9e382f888
+971b0e87abc438632ec6016f8dfae68d5005d82b896e29077083d22ca7011307
+861211d0851e978261811dba427d1cd183b223ed663ec9226fefa61d52a86f4d
+1e2592514ac38efc3e3d209947480f1705caa63407632236bf58268a247328e8
+1f1a0953e8ebe4bba4331251ca7d6a3da9f0c3ead68ff9285056fb94505a773f
+a1e18ebfe81064a0addf39ee74de7b477fc868d2c810679fdb486d27601a8c4b
+7bbd9b3c1678aa93e9556c31a5ba1c660c617a71046429d8d879175900acc9a1
+1b3c8ce3cef18d31a3e799a59a231b7260a62d06c78e8c63e02822f4ab0fee1a
+f5e2035b76358ce6d62907ac8ddf1eb2795bbf64c302a3e0165f036e0a0711f8
+31a9331197189857d6d080cdb1d091b21b730838bb27b92cddc664b7a7c9336f
+GST_HASHES_PRE_COMMIT
             ;;
         post-commit)
-            echo "2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7 eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec 90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494 3d5bdb2e6d05d6b4c5e4443f0e77788f71ba0d7e08e3c84935d7594e88af1660 3b8814f783d5bd3b16a61f3f944ff3e1ec783ec3873e3050fcd7c96e4d562029 1853474b3b0a7e201e1a9c4d401940d45ed22d61e4537e61a5fd05f7d69c3e2b 48acd0af42b634d7973a6122d44e07056a29c26183d4ecc88b196ad98aa7fc07 7a06a96c59e5dcb055f87bb83f0c8da7c956375e98ec4a337eb66a7b520f47e5"
+            cat <<'GST_HASHES_POST_COMMIT'
+2b69bf0dfa98548b803a713df67e9960fc5cde5b5a6371d77092570b91fee2d7
+eb391f8155e0d39f7eb7ec5dda831b5bd742eb1216859a398dcc437102a09dec
+90cbd6aec16527b36bd50ef6ef8d0684981242ca9e33a278348ae2a13b16e7fb
+c6004ada48d98b2a160aa7b0a8805cef409b1ede276fd41d70a95b69f495b494
+3d5bdb2e6d05d6b4c5e4443f0e77788f71ba0d7e08e3c84935d7594e88af1660
+3b8814f783d5bd3b16a61f3f944ff3e1ec783ec3873e3050fcd7c96e4d562029
+1853474b3b0a7e201e1a9c4d401940d45ed22d61e4537e61a5fd05f7d69c3e2b
+48acd0af42b634d7973a6122d44e07056a29c26183d4ecc88b196ad98aa7fc07
+7a06a96c59e5dcb055f87bb83f0c8da7c956375e98ec4a337eb66a7b520f47e5
+GST_HASHES_POST_COMMIT
             ;;
         commit-msg)
-            echo "9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9 85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421 e2b2336f9737cc37cbd9930ac623cea7e997a58551450d684a181b5bc7861e93 131bd0c2591df52a7d99ac7575c413a8b8b787d0a3991da41997aa4bea5df2d6 b9b2182062a44aa0db4fe2b7997f1cb1fa594d6fa74fe231116db48487d02eab 9bd927ffe89693c9f51e81da826604164ae972eb61dcfaa7876cfbef27be46f6"
+            cat <<'GST_HASHES_COMMIT_MSG'
+9681b8f5667e63d051ef1e35e6a8e170e7f0dab82d1d92d305d6aa1fe56286c9
+85cc714fee405129262889ed0b230b1a8355ed89f9055f9c4d0874be82bef421
+e2b2336f9737cc37cbd9930ac623cea7e997a58551450d684a181b5bc7861e93
+131bd0c2591df52a7d99ac7575c413a8b8b787d0a3991da41997aa4bea5df2d6
+b9b2182062a44aa0db4fe2b7997f1cb1fa594d6fa74fe231116db48487d02eab
+9bd927ffe89693c9f51e81da826604164ae972eb61dcfaa7876cfbef27be46f6
+GST_HASHES_COMMIT_MSG
             ;;
         *) die "unknown hook: $1" ;;
     esac
@@ -1014,7 +1046,21 @@ is_known_hook_hash() {
     # Assigned, not piped: known_hook_hashes' own die exits only the pipe's first stage, and grep on
     # the empty remainder it leaves behind returns 1 same as a genuine non-match, hiding the die.
     _khh="$(known_hook_hashes "$1")" || return 1
-    printf '%s\n' "$_khh" | tr ' ' '\n' | grep -qxF -e "$2"
+    printf '%s\n' "$_khh" | grep -qxF -e "$2"
+}
+
+# Called as a plain command, never under if, !, && or ||: set -e is ignored inside a function there, and a failed chmod or mv must still abort install.
+write_hook() {
+    _wh_hook="$1"
+    _wh_dest="$2"
+    _wh_verb="$3"
+    # mktemp beside the destination, not in $TMPDIR: mv across filesystems can silently stop being atomic.
+    _wh_tmp="$(mktemp "${_wh_dest%/*}/.$_wh_hook.XXXXXX")" || die "cannot create a temp file to $_wh_verb $_wh_hook"
+    arm_cleanup "rm -f $(sq "$_wh_tmp")"
+    embedded_hook "$_wh_hook" >"$_wh_tmp"
+    chmod +x "$_wh_tmp"
+    mv "$_wh_tmp" "$_wh_dest"
+    disarm_cleanup
 }
 
 # ---------------------------------------------------------------------------- commands
@@ -1565,13 +1611,7 @@ cmd_install() {
     for _hook in pre-commit post-commit commit-msg; do
         _dest="$_root/.githooks/$_hook"
         if [ ! -f "$_dest" ]; then
-            # mktemp beside $_dest, not in $TMPDIR: mv across filesystems can silently stop being atomic.
-            _hooktmp="$(mktemp "$_root/.githooks/.$_hook.XXXXXX")" || die "cannot create a temp file to install $_hook"
-            arm_cleanup "rm -f $(sq "$_hooktmp")"
-            embedded_hook "$_hook" >"$_hooktmp"
-            chmod +x "$_hooktmp"
-            mv "$_hooktmp" "$_dest"
-            disarm_cleanup
+            write_hook "$_hook" "$_dest" install
             log "$_hook: installed"
             continue
         fi
@@ -1603,12 +1643,7 @@ cmd_install() {
         if [ -n "$_installed_sha" ] && is_known_hook_hash "$_hook" "$_installed_sha"; then
             # The recorded constraint licenses re-upgrading any hook byte-identical to a known
             # previous copy, even a deliberate revert; removing the marker line is how to opt out.
-            _hooktmp="$(mktemp "$_root/.githooks/.$_hook.XXXXXX")" || die "cannot create a temp file to refresh $_hook"
-            arm_cleanup "rm -f $(sq "$_hooktmp")"
-            embedded_hook "$_hook" >"$_hooktmp"
-            chmod +x "$_hooktmp"
-            mv "$_hooktmp" "$_dest"
-            disarm_cleanup
+            write_hook "$_hook" "$_dest" refresh
             log "$_hook: refreshed to the current embedded copy"
         else
             warn "$_hook: differs from every known copy, left alone (repo-local edits are never overwritten)"

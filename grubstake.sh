@@ -1176,6 +1176,144 @@ cmd_path() {
     printf '%s\n' "$_bin"
 }
 
+doctor_conv_row() { printf '  %-22s %s\n' "$1" "$2"; }
+
+# Returns 0 when $1 holds exactly one non-blank line (blank: empty or whitespace only) and that line matches the ERE $2.
+doctor_conv_single_line() {
+    [ "$(grep -Evc '^[[:space:]]*$' "$1" || true)" = 1 ] || return 1
+    grep -Ev '^[[:space:]]*$' "$1" | grep -Eq "$2"
+}
+
+# Report only: nothing here calls die or sets _problem, and every command that can fail sits in a
+# condition, so a convention that does not hold, or an input that cannot be read, never ends doctor
+# before the remaining rows print. cat probes each input first because grep and awk are not
+# consistent about a directory.
+doctor_conventions() {
+    _dc_root="$1"
+    printf 'conventions  (reported only)\n'
+    for _dc_s in scripts/bootstrap.sh scripts/lint.sh scripts/validate.sh .githooks/pre-push; do
+        if [ ! -e "$_dc_root/$_dc_s" ]; then
+            doctor_conv_row "$_dc_s" missing
+        elif [ ! -x "$_dc_root/$_dc_s" ]; then
+            doctor_conv_row "$_dc_s" "not executable (run: chmod +x $_dc_s)"
+        else
+            doctor_conv_row "$_dc_s" ok
+        fi
+    done
+    if [ -e "$_dc_root/.swift-version" ]; then
+        doctor_conv_row .swift-version ok
+    else
+        doctor_conv_row .swift-version missing
+    fi
+    _dc_f="$_dc_root/.xcode-version"
+    if [ ! -e "$_dc_f" ]; then
+        doctor_conv_row .xcode-version missing
+    elif ! cat "$_dc_f" >/dev/null 2>&1; then
+        doctor_conv_row .xcode-version "cannot be read"
+    elif doctor_conv_single_line "$_dc_f" '^[0-9]+(\.[0-9]+){0,2}$'; then
+        doctor_conv_row .xcode-version ok
+    else
+        doctor_conv_row .xcode-version "must hold one version number"
+    fi
+    _dc_f="$_dc_root/.swiftlint.yml"
+    if [ ! -e "$_dc_f" ]; then
+        doctor_conv_row .swiftlint.yml missing
+    elif ! cat "$_dc_f" >/dev/null 2>&1; then
+        doctor_conv_row .swiftlint.yml "cannot be read"
+    else
+        doctor_conv_row .swiftlint.yml ok
+    fi
+    _dc_f="$_dc_root/.swiftformat"
+    if [ ! -e "$_dc_f" ]; then
+        doctor_conv_row .swiftformat missing
+    elif ! cat "$_dc_f" >/dev/null 2>&1; then
+        doctor_conv_row .swiftformat "cannot be read"
+    elif grep -Eq '^[[:space:]]*--swiftversion([[:space:]]|$)' "$_dc_f"; then
+        doctor_conv_row .swiftformat "sets --swiftversion (remove it; .swift-version is the one source)"
+    else
+        doctor_conv_row .swiftformat ok
+    fi
+    _dc_f="$_dc_root/.nvmrc"
+    if [ -e "$_dc_f" ]; then
+        if ! cat "$_dc_f" >/dev/null 2>&1; then
+            doctor_conv_row "node version" "cannot be read"
+        elif doctor_conv_single_line "$_dc_f" '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+            doctor_conv_row "node version" ok
+        else
+            doctor_conv_row "node version" ".nvmrc must hold an exact x.y.z"
+        fi
+    elif [ -e "$_dc_root/.node-version" ]; then
+        doctor_conv_row "node version" ".node-version found (use .nvmrc)"
+    else
+        doctor_conv_row "node version" n/a
+    fi
+    # The first unreadable file decides the row, so an unpinned line found before it is not reported.
+    _dc_seen=0
+    _dc_hits=""
+    _dc_unread=""
+    for _dc_f in "$_dc_root"/.github/workflows/*.yml "$_dc_root"/.github/workflows/*.yaml; do
+        # An unmatched glob stays literal, and a dangling link is a workflow file that cannot be read.
+        [ -e "$_dc_f" ] || [ -L "$_dc_f" ] || continue
+        _dc_seen=1
+        # LC_ALL=C keeps [0-9a-f] from matching upper-case hex under a locale with its own collation.
+        # The awk program uses no {n} intervals, which some mawk releases lack.
+        if cat "$_dc_f" >/dev/null 2>&1 && _dc_nums="$(LC_ALL=C awk '
+            /^[ \t]*(-[ \t]+)?uses:/ {
+                v = $0
+                sub(/^[ \t]*(-[ \t]+)?uses:[ \t]*/, "", v)
+                q = substr(v, 1, 1)
+                if (q == "\042" || q == "\047") {
+                    v = substr(v, 2)
+                    sub(q ".*", "", v)
+                } else {
+                    sub(/[ \t].*/, "", v)
+                }
+                if (substr(v, 1, 2) == "./" || substr(v, 1, 9) == "docker://") next
+                n = split(v, a, "@")
+                if (n < 2 || length(a[n]) != 40 || a[n] ~ /[^0-9a-f]/) print NR
+            }' "$_dc_f" 2>/dev/null)"; then
+            for _dc_n in $_dc_nums; do
+                _dc_hits="${_dc_hits:+$_dc_hits }${_dc_f##*/}:$_dc_n"
+            done
+        else
+            _dc_unread="${_dc_f##*/}"
+            break
+        fi
+    done
+    if [ -n "$_dc_unread" ]; then
+        doctor_conv_row "workflow actions" "cannot be read: $_dc_unread"
+    elif [ "$_dc_seen" = 0 ]; then
+        doctor_conv_row "workflow actions" n/a
+    elif [ -n "$_dc_hits" ]; then
+        doctor_conv_row "workflow actions" "not pinned to a commit SHA: $_dc_hits"
+    else
+        doctor_conv_row "workflow actions" ok
+    fi
+    if [ -d "$_dc_root/.agents" ]; then
+        if [ ! -L "$_dc_root/.claude/skills" ] || [ "$(readlink "$_dc_root/.claude/skills")" != ../.agents/skills ]; then
+            doctor_conv_row .claude/skills "not a symlink to ../.agents/skills"
+        elif [ ! -d "$_dc_root/.agents/skills" ]; then
+            doctor_conv_row .claude/skills "target .agents/skills is missing"
+        else
+            doctor_conv_row .claude/skills ok
+        fi
+        # Tracked is judged before ignored: an ignore rule does not untrack a file added before it, or with -f.
+        # The ignore check names a file path that need not exist, so a rule on the directory and a rule on its files both match it.
+        if ! _dc_tracked="$(git -C "$_dc_root" ls-files -- .codex/agents 2>/dev/null)"; then
+            doctor_conv_row .codex/agents "cannot be read"
+        elif [ -n "$_dc_tracked" ]; then
+            doctor_conv_row .codex/agents "holds tracked files (run: git rm -r --cached .codex/agents)"
+        else
+            if git -C "$_dc_root" check-ignore -q .codex/agents/probe.toml 2>/dev/null; then _dc_rc=0; else _dc_rc=$?; fi
+            case "$_dc_rc" in
+                0) doctor_conv_row .codex/agents ok ;;
+                1) doctor_conv_row .codex/agents "not ignored by git (add .codex/agents/ to .gitignore)" ;;
+                *) doctor_conv_row .codex/agents "cannot be read" ;;
+            esac
+        fi
+    fi
+}
+
 cmd_doctor() {
     validate_pins
     _root="$(repo_root)"
@@ -1323,6 +1461,7 @@ cmd_doctor() {
             _problem=1
         fi
     done
+    doctor_conventions "$_root"
     [ "$_problem" = 0 ] || return 1
 }
 

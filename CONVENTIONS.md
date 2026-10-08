@@ -3,16 +3,30 @@
 How an iOS repository that uses grubstake lays out what sits around it: its scripts, hooks, CI, and
 lint configuration. Written for an agent working in such a repository.
 
-This file is advisory. Nothing in grubstake checks a repository against it, and none of it is part
-of [STABILITY.md](STABILITY.md). Getting grubstake into a repository in the first place is
-[ADOPTING.md](ADOPTING.md).
+`./grubstake.sh doctor` checks the rules here that a script can check exactly, and reports each as
+a row in its conventions section. Run it in the repository to see where it stands. The checks ship
+in `grubstake.sh`, so they change when the repository updates grubstake and at no other time.
 
-A repository points its own instructions at this file at a release tag, never at `main`, so the
-conventions it follows change when it chooses:
+`doctor` reports those rows without failing on them. What it promises about that is in
+[STABILITY.md](STABILITY.md). Everything else in this file is advisory. Getting grubstake into a
+repository in the first place is [ADOPTING.md](ADOPTING.md).
 
-```
-https://github.com/seriouslysean/grubstake/blob/<tag>/CONVENTIONS.md
-```
+## What doctor checks
+
+| Row | Holds when |
+|---|---|
+| `scripts/bootstrap.sh`, `scripts/lint.sh`, `scripts/validate.sh`, `.githooks/pre-push` | The file exists and is executable. |
+| `.swift-version` | The file exists. |
+| `.xcode-version` | The file holds one version number. |
+| `.swiftlint.yml` | The file exists and can be read. |
+| `.swiftformat` | The file exists, can be read, and does not set the Swift version, as `--swiftversion` or `--swift-version`. |
+| `node version` | There is no node version file, or it is `.nvmrc` holding an exact `x.y.z`. |
+| `workflow actions` | Every `uses:` under `.github/workflows/` that names an action in another repository ends in a 40-character commit SHA. |
+| `.claude/skills` | It is a symlink to `../.agents/skills`, and that directory exists. |
+| `.codex/agents` | The repository's own ignore rules cover it, and nothing in it is tracked. |
+
+The last two rows print only where `.agents/` exists. The rest of this file is prose only: `doctor`
+does not read what a script does, how the CI job is laid out, or the lint and format baselines.
 
 ## Root files
 
@@ -148,6 +162,7 @@ jobs:
           path: ${{ env.GRUBSTAKE_CACHE }}
           key: grubstake-${{ runner.os }}-${{ hashFiles('grubstake.tools', 'grubstake.sh') }}
       - run: ./grubstake.sh ensure
+      - run: ./grubstake.sh doctor
       - run: scripts/lint.sh lint
       - run: scripts/lint.sh format-check
 ```
@@ -158,6 +173,7 @@ jobs:
 - **The cache key covers `grubstake.tools` and `grubstake.sh`, with no `restore-keys`.**
   [ADOPTING.md](ADOPTING.md) says why.
 - **`ensure` runs on every run**, a cache hit included.
+- **`doctor` runs after `ensure`**, and prints the conventions rows into the job's log.
 - **A repository with node-based gates** adds `actions/setup-node` with
   `node-version-file: .nvmrc`.
 
@@ -226,8 +242,8 @@ confined to one package running that package's tests alone.
 The one full local gate: what `pre-push` calls, and what "validated" means in the repository. A
 separate test script, where a repository has one, is a stage of it.
 
-- **Cheap stages first:** the Xcode floor, `scripts/lint.sh lint`, `scripts/lint.sh format-check`,
-  then the build, the tests, and any scans.
+- **Cheap stages first:** `./grubstake.sh doctor`, the Xcode floor, `scripts/lint.sh lint`,
+  `scripts/lint.sh format-check`, then the build, the tests, and any scans.
 - **Tools resolve at the repository root, before anything changes directory.**
 - **It builds into `.derivedData-local`**, which git ignores and both lint configurations exclude.
 
@@ -330,6 +346,19 @@ reporter: xcode
 There is no `--swiftversion` line. SwiftFormat takes the version from `.swift-version` when the
 option is absent, and ignores that file when it is present, which makes a second copy that can
 disagree with the first.
+
+## Agent layer
+
+For a repository that keeps agent definitions. One that has none skips this section.
+
+- **`.agents/` is the one source** for agents, skills, and tools. `.claude/` holds symlinks into
+  it, never copies: `.claude/skills` points at `../.agents/skills`.
+- **Generated Codex adapters are not committed.** `.codex/agents/` is in `.gitignore` and is
+  regenerated from `.agents/`, never edited by hand.
+- **Model and effort pins on an agent are optional.**
+- **A reviewer agent has no write or edit tool.** It keeps a shell only where it runs checks.
+- **Claude Code and Codex are the tools covered.**
+- **MCP servers are pinned to a version.**
 
 ## What each repository fills in
 

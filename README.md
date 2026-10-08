@@ -179,7 +179,8 @@ The migration is in [ADOPTING.md](ADOPTING.md), which is written for an agent wo
 ## Conventions
 
 How a repository lays out the scripts, hooks, CI, and lint configuration around grubstake is in
-[CONVENTIONS.md](CONVENTIONS.md). It is advisory, and nothing here checks a repository against it.
+[CONVENTIONS.md](CONVENTIONS.md). `./grubstake.sh doctor` reports install health, and then which
+of that file's checkable rules the repository follows. It reports those without failing on them.
 
 ## Contributing
 

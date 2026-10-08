@@ -6930,6 +6930,643 @@ else
     printf '\nadd, network  (skipped: pass --network to run)\n'
 fi
 
+# ---------------------------------------------------------------------------- doctor conventions
+
+printf '\ndoctor conventions\n'
+
+# #210: doctor reports how a repository lays out its scripts, hooks, CI and lint config. Every test
+# here requires the section header as well as its row, because "this row is not wrong" holds just as
+# well for a doctor that prints no section at all.
+CONV_HEADER='conventions  (reported only)'
+CONV_SCRIPTS='scripts/bootstrap.sh scripts/lint.sh scripts/validate.sh .githooks/pre-push'
+CONV_BASE_LABELS='scripts/bootstrap.sh|scripts/lint.sh|scripts/validate.sh|.githooks/pre-push|.swift-version|.xcode-version|.swiftlint.yml|.swiftformat|node version|workflow actions'
+CONV_AGENT_LABELS='.claude/skills|.codex/agents'
+CONV_SHA=0123456789abcdef0123456789abcdef01234567
+_cvlast=""
+
+# Every convention holds and the one pinned tool is installed with hooksPath unset, so doctor exits 0
+# on it today and the only variable in a test is the row it breaks. "agents" adds the agent layer.
+new_conv_repo() {
+    _cvr="$(new_repo)"
+    pins "$_cvr" "swiftlint 0.63.2 $SHA_A $SHA_A"
+    fake_install "$_cvr" swiftlint 0.63.2 "$SHA_A"
+    mkdir -p "$_cvr/scripts" "$_cvr/.githooks" "$_cvr/.github/workflows" \
+        || fixture_die "cannot create the convention directories in $_cvr"
+    for _cvf in $CONV_SCRIPTS; do
+        printf '#!/bin/sh\nexit 0\n' >"$_cvr/$_cvf" || fixture_die "cannot write $_cvr/$_cvf"
+        chmod +x "$_cvr/$_cvf" || fixture_die "cannot make $_cvr/$_cvf executable"
+    done
+    printf '6.0\n' >"$_cvr/.swift-version" || fixture_die "cannot write $_cvr/.swift-version"
+    printf '16.2\n' >"$_cvr/.xcode-version" || fixture_die "cannot write $_cvr/.xcode-version"
+    printf 'disabled_rules:\n  - todo\n' >"$_cvr/.swiftlint.yml" || fixture_die "cannot write $_cvr/.swiftlint.yml"
+    printf '%s\n' '--indent 4' '--maxwidth 120' >"$_cvr/.swiftformat" || fixture_die "cannot write $_cvr/.swiftformat"
+    printf '20.11.1\n' >"$_cvr/.nvmrc" || fixture_die "cannot write $_cvr/.nvmrc"
+    cat >"$_cvr/.github/workflows/ci.yml" <<EOF || fixture_die "cannot write $_cvr/.github/workflows/ci.yml"
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: example-runner
+    steps:
+      - uses: example/setup@$CONV_SHA
+      - run: ./scripts/validate.sh
+EOF
+    if [ "${1:-}" = agents ]; then
+        mkdir -p "$_cvr/.agents/skills" "$_cvr/.claude" || fixture_die "cannot create the agent layer in $_cvr"
+        ln -s ../.agents/skills "$_cvr/.claude/skills" || fixture_die "cannot link $_cvr/.claude/skills"
+        printf '.codex/agents/\n' >"$_cvr/.gitignore" || fixture_die "cannot write $_cvr/.gitignore"
+        [ "$(readlink "$_cvr/.claude/skills")" = ../.agents/skills ] \
+            || fixture_die "$_cvr/.claude/skills did not read back as ../.agents/skills"
+    fi
+    echo "$_cvr"
+}
+
+# Unpinned at lines 8 and 10, pinned at line 7.
+conv_unpinned_workflow() {
+    cat >"$1" <<EOF || fixture_die "cannot write $1"
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: example-runner
+    steps:
+      - uses: example/setup@$CONV_SHA
+      - uses: example/action@v1
+      - name: step
+        uses: example/other@main
+EOF
+}
+
+conv_has_header() { printf '%s\n' "$1" | grep -qxF "$CONV_HEADER"; }
+
+# Appends to $_bad and fails when the section is missing, so a test cannot pass on a doctor that prints none.
+conv_require() {
+    _cvlast="$1"
+    conv_has_header "$1" && return 0
+    _cvmsg="${2:+[$2] }no '$CONV_HEADER' section"
+    case "$_bad" in
+        *"$_cvmsg"*) : ;;
+        *) _bad="${_bad}${_bad:+; }$_cvmsg" ;;
+    esac
+    return 1
+}
+
+# The text of one row, after the header only, with the run of spaces after the label dropped.
+# Fixed-string matching: labels and texts carry dots, slashes and parentheses.
+conv_text() {
+    printf '%s\n' "$1" | awk -v l="$2" -v h="$CONV_HEADER" '
+        $0 == h { on = 1; next }
+        on && index($0, "  " l " ") == 1 {
+            s = substr($0, length(l) + 3)
+            sub(/^ +/, "", s)
+            print s
+            exit
+        }'
+}
+
+# The label of every indented line after the header, in order; a line no known label starts is "?".
+conv_labels() {
+    printf '%s\n' "$1" | awk -v all="$CONV_BASE_LABELS|$CONV_AGENT_LABELS" -v h="$CONV_HEADER" '
+        BEGIN { n = split(all, L, "|") }
+        $0 == h { on = 1; next }
+        on && /^  / {
+            hit = "?"
+            for (i = 1; i <= n; i++) if (index($0, "  " L[i] " ") == 1) { hit = L[i]; break }
+            print hit
+        }'
+}
+
+# conv_note <doctor output> <label> <wanted text> [tag]
+conv_note() {
+    conv_require "$1" "${4:-}" || return 0
+    _cvgot="$(conv_text "$1" "$2")"
+    [ "$_cvgot" = "$3" ] || _bad="${_bad}${_bad:+; }${4:+[$4] }$2 row: wanted '$3', got '${_cvgot:-<no row>}'"
+}
+
+# conv_order <doctor output> <label|label|...> [tag]: exactly these rows, in this order.
+conv_order() {
+    conv_require "$1" "${3:-}" || return 0
+    _cvgot="$(conv_labels "$1" | tr '\n' '|')"
+    _cvwant="$(printf '%s|' "$2")"
+    [ "$_cvgot" = "$_cvwant" ] || _bad="${_bad}${_bad:+; }${3:+[$3] }rows were [$_cvgot], wanted [$_cvwant]"
+}
+
+# conv_all_ok <doctor output> <label|label|...> [tag]
+conv_all_ok() {
+    conv_require "$1" "${3:-}" || return 0
+    while IFS= read -r _cvlabel; do
+        conv_note "$1" "$_cvlabel" ok "${3:-}"
+    done <<EOF
+$(printf '%s\n' "$2" | tr '|' '\n')
+EOF
+}
+
+# conv_after <doctor output> <grep pattern>: the section comes after the last line the pattern matches.
+conv_after() {
+    _cvh="$(printf '%s\n' "$1" | grep -nxF "$CONV_HEADER" | cut -d: -f1 | head -n 1)"
+    _cvt="$(printf '%s\n' "$1" | grep -n "$2" | cut -d: -f1 | tail -n 1)"
+    case "$_cvh:$_cvt" in
+        :* | *: | *[!0-9:]*) _bad="${_bad}${_bad:+; }could not find both the section header and a '$2' line to order them" ;;
+        *) [ "$_cvt" -lt "$_cvh" ] || _bad="${_bad}${_bad:+; }the section (line $_cvh) is not after the '$2' line ($_cvt)" ;;
+    esac
+}
+
+conv_done() {
+    if [ -z "$_bad" ]; then
+        pass
+    else
+        fail "$_bad
+$_cvlast"
+    fi
+}
+
+it "doctor grades a fully conventional repository ok on every convention row, in the documented order"
+r=$(new_conv_repo)
+_out=$(gs "$r" doctor)
+_rc=$?
+_bad=""
+[ "$_rc" -eq 0 ] || _bad="doctor exited $_rc"
+if conv_require "$_out"; then
+    conv_order "$_out" "$CONV_BASE_LABELS"
+    conv_all_ok "$_out" "$CONV_BASE_LABELS"
+    conv_after "$_out" ' installed$'
+fi
+conv_done
+
+it "doctor grades the agent-layer rows ok on a repository that wires .agents/ as documented"
+r=$(new_conv_repo agents)
+_out=$(gs "$r" doctor)
+_rc=$?
+_bad=""
+[ "$_rc" -eq 0 ] || _bad="doctor exited $_rc"
+if conv_require "$_out"; then
+    conv_order "$_out" "$CONV_BASE_LABELS|$CONV_AGENT_LABELS"
+    conv_all_ok "$_out" "$CONV_BASE_LABELS|$CONV_AGENT_LABELS"
+fi
+conv_done
+
+it "doctor reports a missing convention script instead of passing over it"
+# All four paths, each removed alone, so a remedy hardcoded to one path or a verdict shared by the four rows cannot pass.
+_bad=""
+for _s in $CONV_SCRIPTS; do
+    r=$(new_conv_repo)
+    rm "$r/$_s" || fixture_die "cannot remove $r/$_s"
+    _out=$(gs "$r" doctor)
+    for _o in $CONV_SCRIPTS; do
+        if [ "$_o" = "$_s" ]; then
+            conv_note "$_out" "$_o" missing "$_s removed"
+        else
+            conv_note "$_out" "$_o" ok "$_s removed"
+        fi
+    done
+done
+conv_done
+
+it "doctor reports a convention script without its execute bit, with the chmod that fixes it"
+_bad=""
+for _s in $CONV_SCRIPTS; do
+    r=$(new_conv_repo)
+    chmod -x "$r/$_s" || fixture_die "cannot strip the execute bit from $r/$_s"
+    _out=$(gs "$r" doctor)
+    for _o in $CONV_SCRIPTS; do
+        if [ "$_o" = "$_s" ]; then
+            conv_note "$_out" "$_o" "not executable (run: chmod +x $_o)" "$_s not executable"
+        else
+            conv_note "$_out" "$_o" ok "$_s not executable"
+        fi
+    done
+done
+conv_done
+
+it "doctor reports a missing version or lint config file instead of passing over it"
+_bad=""
+for _f in .swift-version .xcode-version .swiftlint.yml .swiftformat; do
+    r=$(new_conv_repo)
+    rm "$r/$_f" || fixture_die "cannot remove $r/$_f"
+    _out=$(gs "$r" doctor)
+    conv_note "$_out" "$_f" missing "$_f removed"
+done
+conv_done
+
+it "doctor rejects an .xcode-version that holds two versions"
+r=$(new_conv_repo)
+printf '16.2\n16.3\n' >"$r/.xcode-version" || fixture_die "cannot write $r/.xcode-version"
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" .xcode-version "must hold one version number"
+conv_done
+
+it "doctor rejects an .xcode-version that is not a plain version number"
+_bad=""
+for _c in 'latest\n' 'Xcode 16.2\n' '16.2.1.1\n' ''; do
+    r=$(new_conv_repo)
+    printf '%b' "$_c" >"$r/.xcode-version" || fixture_die "cannot write $r/.xcode-version"
+    _out=$(gs "$r" doctor)
+    conv_note "$_out" .xcode-version "must hold one version number" "${_c:-empty}"
+done
+conv_done
+
+it "doctor accepts the plain .xcode-version shapes a repository writes"
+# One to three numeric components, a missing final newline and trailing blank lines: none of these may be called a defect.
+_bad=""
+for _c in '16\n' '16.2\n' '16.2.1\n' '16.2' '16.2\n\n'; do
+    r=$(new_conv_repo)
+    printf '%b' "$_c" >"$r/.xcode-version" || fixture_die "cannot write $r/.xcode-version"
+    _out=$(gs "$r" doctor)
+    conv_note "$_out" .xcode-version ok "$_c"
+done
+conv_done
+
+it "doctor flags a .swiftformat that sets --swiftversion, which .swift-version already owns"
+_bad=""
+for _c in '--indent 4\n--swiftversion 6.0\n' '--indent 4\n  --swiftversion 6.0\n' '--indent 4\n\t--swiftversion 6.0\n' '--indent 4\n--swiftversion\n' '--indent 4\n--swiftversion 6.0' '--indent 4\n--swift-version 6.0\n' '--indent 4\n--SwiftVersion 6.0\n'; do
+    r=$(new_conv_repo)
+    printf '%b' "$_c" >"$r/.swiftformat" || fixture_die "cannot write $r/.swiftformat"
+    _out=$(gs "$r" doctor)
+    conv_note "$_out" .swiftformat "sets --swiftversion (remove it; .swift-version is the one source)" "$_c"
+done
+conv_done
+
+it "doctor does not flag a .swiftformat that mentions --swiftversion only in a comment, or spells it --swift_version, which SwiftFormat rejects"
+_bad=""
+for _c in '# --swiftversion 6.0\n--indent 4\n' '--indent 4 # --swiftversion 6.0\n' '# --swift-version 6.0\n--indent 4\n' '--indent 4\n--swift_version 6.0\n'; do
+    r=$(new_conv_repo)
+    printf '%b' "$_c" >"$r/.swiftformat" || fixture_die "cannot write $r/.swiftformat"
+    _out=$(gs "$r" doctor)
+    conv_note "$_out" .swiftformat ok "$_c"
+done
+conv_done
+
+it "doctor tells a repository with only a .node-version to use .nvmrc"
+r=$(new_conv_repo)
+rm "$r/.nvmrc" || fixture_die "cannot remove $r/.nvmrc"
+printf '20.11.1\n' >"$r/.node-version" || fixture_die "cannot write $r/.node-version"
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" "node version" ".node-version found (use .nvmrc)"
+conv_done
+
+it "doctor judges .nvmrc, not .node-version, when a repository has both"
+r=$(new_conv_repo)
+printf '20.11.1\n' >"$r/.node-version" || fixture_die "cannot write $r/.node-version"
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" "node version" ok
+conv_done
+
+it "doctor rejects an .nvmrc that is not an exact x.y.z"
+_bad=""
+for _c in '20\n' '20.11\n' 'lts/iron\n' '20.11.1\n20.11.2\n' ''; do
+    r=$(new_conv_repo)
+    printf '%b' "$_c" >"$r/.nvmrc" || fixture_die "cannot write $r/.nvmrc"
+    _out=$(gs "$r" doctor)
+    conv_note "$_out" "node version" ".nvmrc must hold an exact x.y.z" "${_c:-empty}"
+done
+conv_done
+
+it "doctor accepts an .nvmrc written as a plain x.y.z, with or without a v, a final newline or trailing blank lines"
+_bad=""
+for _c in 'v20.11.1\n' '20.11.1' '20.11.1\n\n'; do
+    r=$(new_conv_repo)
+    printf '%b' "$_c" >"$r/.nvmrc" || fixture_die "cannot write $r/.nvmrc"
+    _out=$(gs "$r" doctor)
+    conv_note "$_out" "node version" ok "$_c"
+done
+conv_done
+
+it "doctor reports node version n/a, not a defect, when the repository pins no node version"
+r=$(new_conv_repo)
+rm "$r/.nvmrc" || fixture_die "cannot remove $r/.nvmrc"
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" "node version" n/a
+conv_done
+
+it "doctor reports workflow actions n/a, not a defect, when there is no workflow file"
+# A workflows directory that holds no .yml or .yaml file is the same as no directory.
+_bad=""
+r=$(new_conv_repo)
+rm -r "$r/.github" || fixture_die "cannot remove $r/.github"
+_out=$(gs "$r" doctor)
+conv_note "$_out" "workflow actions" n/a "no .github"
+r=$(new_conv_repo)
+rm "$r/.github/workflows/ci.yml" || fixture_die "cannot remove $r/.github/workflows/ci.yml"
+printf 'notes\n' >"$r/.github/workflows/notes.txt" || fixture_die "cannot write $r/.github/workflows/notes.txt"
+_out=$(gs "$r" doctor)
+conv_note "$_out" "workflow actions" n/a "workflows holds no yaml"
+conv_done
+
+it "doctor names each workflow action not pinned to a commit SHA as file:line"
+r=$(new_conv_repo)
+conv_unpinned_workflow "$r/.github/workflows/ci.yml"
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" "workflow actions" "not pinned to a commit SHA: ci.yml:8 ci.yml:10"
+conv_done
+
+it "doctor reads a workflow with a .yaml extension"
+r=$(new_conv_repo)
+rm "$r/.github/workflows/ci.yml" || fixture_die "cannot remove $r/.github/workflows/ci.yml"
+conv_unpinned_workflow "$r/.github/workflows/deploy.yaml"
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" "workflow actions" "not pinned to a commit SHA: deploy.yaml:8 deploy.yaml:10"
+conv_done
+
+it "doctor lists unpinned actions from every .yml workflow before any .yaml one"
+# a.yaml sorts before z.yml, so only reading the .yml files first puts z.yml first.
+r=$(new_conv_repo)
+rm "$r/.github/workflows/ci.yml" || fixture_die "cannot remove $r/.github/workflows/ci.yml"
+cat >"$r/.github/workflows/z.yml" <<EOF || fixture_die "cannot write $r/.github/workflows/z.yml"
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: example-runner
+    steps:
+      - uses: example/action@v1
+EOF
+cat >"$r/.github/workflows/a.yaml" <<EOF || fixture_die "cannot write $r/.github/workflows/a.yaml"
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: example-runner
+    steps:
+      - run: ./scripts/validate.sh
+      - uses: example/action@v1
+EOF
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" "workflow actions" "not pinned to a commit SHA: z.yml:7 a.yaml:8"
+conv_done
+
+it "doctor treats a short, upper-case or over-long SHA as not pinned"
+r=$(new_conv_repo)
+cat >"$r/.github/workflows/ci.yml" <<EOF || fixture_die "cannot write $r/.github/workflows/ci.yml"
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: example-runner
+    steps:
+      - uses: example/short@0123456
+      - uses: example/upper@0123456789ABCDEF0123456789ABCDEF01234567
+      - uses: example/long@${CONV_SHA}0
+      - uses: example/exact@$CONV_SHA
+EOF
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" "workflow actions" "not pinned to a commit SHA: ci.yml:7 ci.yml:8 ci.yml:9"
+conv_done
+
+it "doctor does not flag local actions, docker images, or quoted SHA-pinned actions with a trailing comment"
+r=$(new_conv_repo)
+cat >"$r/.github/workflows/ci.yml" <<EOF || fixture_die "cannot write $r/.github/workflows/ci.yml"
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: example-runner
+    steps:
+      - uses: ./local-action
+      - uses: docker://example.invalid/image:1
+      - uses: "example/double@$CONV_SHA" # v1.0.0
+      - uses: 'example/single@$CONV_SHA'   # v1.0.0
+      - name: step
+        uses: example/keyed@$CONV_SHA # v2
+      # - uses: example/commented@v1
+EOF
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" "workflow actions" ok
+conv_done
+
+it "doctor flags .claude/skills that is a real directory instead of a link into .agents/skills"
+r=$(new_conv_repo agents)
+rm "$r/.claude/skills" || fixture_die "cannot remove $r/.claude/skills"
+mkdir "$r/.claude/skills" || fixture_die "cannot create $r/.claude/skills"
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" .claude/skills "not a symlink to ../.agents/skills"
+conv_done
+
+it "doctor flags .claude/skills linked anywhere but ../.agents/skills, even to a directory that exists"
+# Both targets resolve to a real directory, so only comparing the link text itself tells them from the right one.
+_bad=""
+for _k in parent absolute; do
+    r=$(new_conv_repo agents)
+    case "$_k" in
+        parent) _t=../.agents ;;
+        absolute) _t="$r/.agents/skills" ;;
+    esac
+    rm "$r/.claude/skills" || fixture_die "cannot remove $r/.claude/skills"
+    ln -s "$_t" "$r/.claude/skills" || fixture_die "cannot link $r/.claude/skills"
+    [ -d "$r/.claude/skills" ] || fixture_die "$_t does not resolve to a directory from $r/.claude"
+    _out=$(gs "$r" doctor)
+    conv_note "$_out" .claude/skills "not a symlink to ../.agents/skills" "$_k"
+done
+conv_done
+
+it "doctor flags .claude/skills when the link is right but .agents/skills is missing"
+# .agents/ itself stays, since the agent rows only print while it exists.
+r=$(new_conv_repo agents)
+rm -r "$r/.agents/skills" || fixture_die "cannot remove $r/.agents/skills"
+[ -d "$r/.agents" ] || fixture_die "$r/.agents is gone"
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" .claude/skills "target .agents/skills is missing"
+conv_done
+
+it "doctor flags .codex/agents when git does not ignore it"
+_bad=""
+r=$(new_conv_repo agents)
+rm "$r/.gitignore" || fixture_die "cannot remove $r/.gitignore"
+_out=$(gs "$r" doctor)
+conv_note "$_out" .codex/agents "not ignored by git (add .codex/agents/ to .gitignore)" "no .gitignore"
+r=$(new_conv_repo agents)
+printf '*.log\n' >"$r/.gitignore" || fixture_die "cannot write $r/.gitignore"
+_out=$(gs "$r" doctor)
+conv_note "$_out" .codex/agents "not ignored by git (add .codex/agents/ to .gitignore)" "unrelated rule only"
+conv_done
+
+it "doctor flags .codex/agents when it holds tracked files, ignored or not"
+# Tracked wins over ignored: an ignore rule does not untrack a file added before it, or with -f.
+_bad=""
+r=$(new_conv_repo agents)
+mkdir -p "$r/.codex/agents" || fixture_die "cannot create $r/.codex/agents"
+printf 'name = "helper"\n' >"$r/.codex/agents/helper.toml" || fixture_die "cannot write $r/.codex/agents/helper.toml"
+(cd "$r" && git add -f .codex/agents/helper.toml) || fixture_die "cannot track $r/.codex/agents/helper.toml"
+_out=$(gs "$r" doctor)
+conv_note "$_out" .codex/agents "holds tracked files (run: git rm -r --cached .codex/agents)" "ignored and tracked"
+r=$(new_conv_repo agents)
+rm "$r/.gitignore" || fixture_die "cannot remove $r/.gitignore"
+mkdir -p "$r/.codex/agents" || fixture_die "cannot create $r/.codex/agents"
+printf 'name = "helper"\n' >"$r/.codex/agents/helper.toml" || fixture_die "cannot write $r/.codex/agents/helper.toml"
+(cd "$r" && git add .codex/agents/helper.toml) || fixture_die "cannot track $r/.codex/agents/helper.toml"
+_out=$(gs "$r" doctor)
+conv_note "$_out" .codex/agents "holds tracked files (run: git rm -r --cached .codex/agents)" "unignored and tracked"
+conv_done
+
+it "doctor accepts .codex/agents ignored by a file rule, with an untracked file inside"
+# The ignore check probes a .toml path under .codex/agents, so a rule on the files counts as much as one on the directory.
+r=$(new_conv_repo agents)
+printf '.codex/agents/*.toml\n' >"$r/.gitignore" || fixture_die "cannot write $r/.gitignore"
+mkdir -p "$r/.codex/agents" || fixture_die "cannot create $r/.codex/agents"
+printf 'name = "helper"\n' >"$r/.codex/agents/helper.toml" || fixture_die "cannot write $r/.codex/agents/helper.toml"
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" .codex/agents ok
+conv_done
+
+it "doctor flags .codex/agents when only a personal git exclude ignores it, not the repository's own rules"
+# A personal exclude exists on one machine only, so it cannot stand in for a rule every clone shares.
+r=$(new_conv_repo agents)
+rm "$r/.gitignore" || fixture_die "cannot remove $r/.gitignore"
+_xdg="$(mktemp -d "$ROOT/xdg.XXXXXX")" || fixture_die "no scratch directory for the personal exclude"
+mkdir "$_xdg/git" || fixture_die "cannot create $_xdg/git"
+printf '.codex/\n' >"$_xdg/git/ignore" || fixture_die "cannot write $_xdg/git/ignore"
+(XDG_CONFIG_HOME="$_xdg" && export XDG_CONFIG_HOME && git -C "$r" check-ignore -q .codex/agents/probe.toml) \
+    || fixture_die "the personal exclude in $_xdg does not ignore .codex/agents/probe.toml in $r; the fixture proves nothing"
+_out=$(XDG_CONFIG_HOME="$_xdg" && export XDG_CONFIG_HOME && gs "$r" doctor)
+_bad=""
+conv_note "$_out" .codex/agents "not ignored by git (add .codex/agents/ to .gitignore)"
+conv_done
+
+it "doctor reports an unreadable .swiftformat as cannot be read, never ok, and still exits 0"
+r=$(new_conv_repo)
+chmod 000 "$r/.swiftformat" || fixture_die "cannot make $r/.swiftformat unreadable"
+[ ! -r "$r/.swiftformat" ] || fixture_die "chmod 000 did not take on $r/.swiftformat (running as root?)"
+_out=$(gs "$r" doctor)
+_rc=$?
+_bad=""
+[ "$_rc" -eq 0 ] || _bad="doctor exited $_rc"
+conv_note "$_out" .swiftformat "cannot be read"
+conv_done
+
+it "doctor reports every other unreadable convention input as cannot be read, never ok"
+_bad=""
+for _f in .xcode-version .swiftlint.yml; do
+    r=$(new_conv_repo)
+    chmod 000 "$r/$_f" || fixture_die "cannot make $r/$_f unreadable"
+    [ ! -r "$r/$_f" ] || fixture_die "chmod 000 did not take on $r/$_f (running as root?)"
+    _out=$(gs "$r" doctor)
+    conv_note "$_out" "$_f" "cannot be read" "$_f"
+done
+r=$(new_conv_repo)
+chmod 000 "$r/.nvmrc" || fixture_die "cannot make $r/.nvmrc unreadable"
+[ ! -r "$r/.nvmrc" ] || fixture_die "chmod 000 did not take on $r/.nvmrc (running as root?)"
+_out=$(gs "$r" doctor)
+conv_note "$_out" "node version" "cannot be read" ".nvmrc"
+r=$(new_conv_repo)
+chmod 000 "$r/.github/workflows/ci.yml" || fixture_die "cannot make $r/.github/workflows/ci.yml unreadable"
+[ ! -r "$r/.github/workflows/ci.yml" ] || fixture_die "chmod 000 did not take on $r/.github/workflows/ci.yml (running as root?)"
+_out=$(gs "$r" doctor)
+# Only the prefix and the file name are pinned here; the directory-as-workflow test below pins the whole text.
+if conv_require "$_out" "ci.yml"; then
+    _cvgot="$(conv_text "$_out" "workflow actions")"
+    case "$_cvgot" in
+        "cannot be read: "*ci.yml) : ;;
+        *) _bad="${_bad}${_bad:+; }[ci.yml] workflow actions row: wanted 'cannot be read: ...ci.yml', got '${_cvgot:-<no row>}'" ;;
+    esac
+fi
+conv_done
+
+it "doctor reports a directory named like a workflow file as cannot be read, not as a workflow with no unpinned action"
+r=$(new_conv_repo)
+rm "$r/.github/workflows/ci.yml" || fixture_die "cannot remove $r/.github/workflows/ci.yml"
+mkdir "$r/.github/workflows/dir.yml" || fixture_die "cannot create $r/.github/workflows/dir.yml"
+_out=$(gs "$r" doctor)
+_bad=""
+conv_note "$_out" "workflow actions" "cannot be read: dir.yml"
+conv_done
+
+it "doctor exits 0 when broken conventions are the only thing wrong"
+# Report-only: a convention that does not hold must not turn into a failing exit.
+r=$(new_conv_repo agents)
+rm "$r/scripts/lint.sh" || fixture_die "cannot remove $r/scripts/lint.sh"
+chmod -x "$r/.githooks/pre-push" || fixture_die "cannot strip the execute bit from $r/.githooks/pre-push"
+rm "$r/.swift-version" || fixture_die "cannot remove $r/.swift-version"
+printf '16.2\n16.3\n' >"$r/.xcode-version" || fixture_die "cannot write $r/.xcode-version"
+printf '%s\n' '--swiftversion 6.0' >>"$r/.swiftformat" || fixture_die "cannot write $r/.swiftformat"
+printf '20\n' >"$r/.nvmrc" || fixture_die "cannot write $r/.nvmrc"
+conv_unpinned_workflow "$r/.github/workflows/ci.yml"
+rm "$r/.claude/skills" || fixture_die "cannot remove $r/.claude/skills"
+mkdir "$r/.claude/skills" || fixture_die "cannot create $r/.claude/skills"
+mkdir -p "$r/.codex/agents" || fixture_die "cannot create $r/.codex/agents"
+printf 'name = "helper"\n' >"$r/.codex/agents/helper.toml" || fixture_die "cannot write $r/.codex/agents/helper.toml"
+(cd "$r" && git add -f .codex/agents/helper.toml) || fixture_die "cannot track $r/.codex/agents/helper.toml"
+_out=$(gs "$r" doctor)
+_rc=$?
+_bad=""
+[ "$_rc" -eq 0 ] || _bad="doctor exited $_rc"
+conv_note "$_out" scripts/lint.sh missing
+conv_note "$_out" .githooks/pre-push "not executable (run: chmod +x .githooks/pre-push)"
+conv_note "$_out" .swift-version missing
+conv_note "$_out" .xcode-version "must hold one version number"
+conv_note "$_out" .swiftformat "sets --swiftversion (remove it; .swift-version is the one source)"
+conv_note "$_out" "node version" ".nvmrc must hold an exact x.y.z"
+conv_note "$_out" "workflow actions" "not pinned to a commit SHA: ci.yml:8 ci.yml:10"
+conv_note "$_out" .claude/skills "not a symlink to ../.agents/skills"
+conv_note "$_out" .codex/agents "holds tracked files (run: git rm -r --cached .codex/agents)"
+conv_done
+
+it "doctor still exits non-zero for a missing pinned tool and prints the conventions section anyway"
+r=$(new_conv_repo)
+rm -r "$r/.cache/swiftlint" || fixture_die "cannot remove $r/.cache/swiftlint"
+_out=$(gs "$r" doctor)
+_rc=$?
+_bad=""
+[ "$_rc" -ne 0 ] || _bad="doctor exited 0 with swiftlint MISSING"
+if conv_require "$_out"; then
+    conv_order "$_out" "$CONV_BASE_LABELS"
+    conv_all_ok "$_out" "$CONV_BASE_LABELS"
+    conv_after "$_out" 'MISSING$'
+fi
+conv_done
+
+it "doctor omits both agent-layer rows when .agents/ is absent"
+# Each fixture keeps doctor's exit 0 and the full base section, so an early exit cannot read as "nothing printed".
+_bad=""
+r=$(new_conv_repo)
+_out=$(gs "$r" doctor)
+_rc=$?
+[ "$_rc" -eq 0 ] || _bad="[plain] doctor exited $_rc"
+conv_order "$_out" "$CONV_BASE_LABELS" plain
+case "$_out" in *.claude/skills* | *.codex/agents*) _bad="${_bad}${_bad:+; }[plain] an agent-layer label appeared without .agents/" ;; esac
+# The agent paths themselves exist, but .agents/ does not.
+r=$(new_conv_repo)
+mkdir -p "$r/.claude/skills" "$r/.codex/agents" || fixture_die "cannot create the agent paths in $r"
+printf 'name = "helper"\n' >"$r/.codex/agents/helper.toml" || fixture_die "cannot write $r/.codex/agents/helper.toml"
+(cd "$r" && git add .codex/agents/helper.toml) || fixture_die "cannot track $r/.codex/agents/helper.toml"
+_out=$(gs "$r" doctor)
+_rc=$?
+[ "$_rc" -eq 0 ] || _bad="${_bad}${_bad:+; }[paths only] doctor exited $_rc"
+conv_order "$_out" "$CONV_BASE_LABELS" "paths only"
+case "$_out" in *.claude/skills* | *.codex/agents*) _bad="${_bad}${_bad:+; }[paths only] an agent-layer label appeared without .agents/" ;; esac
+# .agents exists, but as a file.
+r=$(new_conv_repo)
+printf 'not a directory\n' >"$r/.agents" || fixture_die "cannot write $r/.agents"
+_out=$(gs "$r" doctor)
+_rc=$?
+[ "$_rc" -eq 0 ] || _bad="${_bad}${_bad:+; }[.agents file] doctor exited $_rc"
+conv_order "$_out" "$CONV_BASE_LABELS" ".agents file"
+case "$_out" in *.claude/skills* | *.codex/agents*) _bad="${_bad}${_bad:+; }[.agents file] an agent-layer label appeared though .agents is not a directory" ;; esac
+conv_done
+
+it "doctor reads conventions without writing to the repository, the .codex/agents ignore probe included"
+# The probe path under .codex/agents does not exist and must not be created to ask git about it.
+r=$(new_conv_repo agents)
+_before="$(cd "$r" && find . -path ./.git -prune -o -print | sort && find . -path ./.git -prune -o -type f -exec cksum {} + | sort && git status --porcelain -uall)"
+_out=$(gs "$r" doctor)
+_rc=$?
+_after="$(cd "$r" && find . -path ./.git -prune -o -print | sort && find . -path ./.git -prune -o -type f -exec cksum {} + | sort && git status --porcelain -uall)"
+_bad=""
+[ "$_rc" -eq 0 ] || _bad="doctor exited $_rc"
+conv_order "$_out" "$CONV_BASE_LABELS|$CONV_AGENT_LABELS"
+[ "$_before" = "$_after" ] || _bad="${_bad}${_bad:+; }doctor changed the repository: $(printf '%s\n%s\n' "$_before" "$_after" | sort | uniq -u | tr '\n' ' ')"
+conv_done
+
 # ---------------------------------------------------------------------------- development gates
 
 printf '\ndevelopment gates\n'

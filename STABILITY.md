@@ -38,7 +38,11 @@ No arguments, or `-h`/`--help`/`help`, prints usage and exits 0.
   `.githooks` is present, `core.hooksPath` cannot be read, or the cache root cannot be resolved.
   Hooks that are not wired, not grubstake's, or not graded, and a tool with no build for this
   platform, are reported without failing it. A malformed pins file, or a directory outside a git
-  repository, fails it before any row prints.
+  repository, fails it before any row prints. After those rows `doctor` also reports a conventions
+  section covering a repository's scripts, hooks, version files, lint config, workflow action pins
+  and, where `.agents/` exists, its agent-layer links. A convention that does not hold is reported
+  and does not change the exit status. Whether a broken convention fails `doctor`
+  is not yet promised, so a later minor release may make it a failure.
 - Every command exits 0 on success and non-zero on any documented failure class. The specific
   non-zero value is not part of the contract; only zero-vs-nonzero may be relied on.
 

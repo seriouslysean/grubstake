@@ -108,7 +108,7 @@ itself go in `.githooks/commit-msg.d/`, where the spine that owns each directory
 them. A gate that has lost its executable bit fails the commit rather than being skipped. Do not
 edit either spine.
 
-A pre-commit gate runs before the spine's own staged-Swift lint, so a gate that formats and
+A pre-commit gate runs before the spine's own lint, so a gate that formats and
 re-stages is linted on what it left behind rather than refused for what it was about to fix.
 
 The commit-msg spine refuses a message carrying an agent-session trailer or a transcript link on
@@ -124,12 +124,13 @@ else alone. A hook carrying edits it does not recognise is left alone with a war
 without its marker is never touched. The test is the bytes, not the intent: a hook reverted to an
 earlier published copy is recognised, and refreshed.
 
-The pre-commit lint reads the working tree rather than the staged blobs, so it checks the current
-contents of files whose paths are staged. Linting a copy would break SwiftLint's config resolution,
-and stashing the unstaged remainder is what strands work in the tools that do it, so a staged Swift
-file carrying unstaged edits is refused by name instead. Stage the rest, or stash it with
-`git stash push --keep-index` and pop it after the commit; a plain `git stash` would take the
-staged hunk with it. CI lints the committed tree.
+When Swift is staged, the pre-commit lint runs SwiftLint over the project's working tree rather
+than the staged blobs, and hands it no file names, so the SwiftLint configuration alone decides what
+is checked. A violation in any file it covers refuses the commit, staged or not. Linting a copy
+would break SwiftLint's config resolution, and stashing the unstaged remainder is what strands work
+in the tools that do it, so a staged Swift file carrying unstaged edits is refused by name instead.
+Stage the rest, or stash it with `git stash push --keep-index` and pop it after the commit; a plain
+`git stash` would take the staged hunk with it. CI lints the committed tree.
 
 ## Tools
 

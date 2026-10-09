@@ -164,7 +164,7 @@ the spine that owns each directory runs every gate in it and fails the commit if
 has lost its executable bit. A message gate is handed the message file as its argument. Never edit
 either spine.
 
-A pre-commit gate runs before the spine's own staged-Swift lint, in glob order, so a gate that
+A pre-commit gate runs before the spine's own lint, in glob order, so a gate that
 formats staged files and re-stages them is linted on what it produced rather than refused for what
 it was about to fix. The spine re-reads the staged paths once the gates are done, so Swift a gate
 staged is linted too. A gate that fails refuses the commit there and then, before any lint runs.
@@ -183,9 +183,11 @@ drop the marker line.
 
 ## What to know before you hit it
 
-The pre-commit lint reads the working tree, not the staged blobs, so it checks the current contents
-of files whose paths are staged. When the two diverge it refuses the commit and names the paths, so
-`git add -p` over a Swift file means stashing the remainder before committing. Stage the rest, or
+The pre-commit lint reads the working tree, not the staged blobs. When Swift is staged it runs
+SwiftLint over the whole project with no file names, so the SwiftLint configuration decides the
+scope, and a violation in any in-scope file refuses the commit, staged or not. When a staged file
+and the working tree diverge it refuses the commit and names the paths, so `git add -p` over a Swift
+file means stashing the remainder before committing. Stage the rest, or
 `git stash push --keep-index` and pop after the commit -- a plain `git stash` takes the staged hunk
 with it and leaves the retry committing nothing. This is deliberate and documented; do not try to
 fix it locally.

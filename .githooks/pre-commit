@@ -60,21 +60,20 @@ fi
 if [ -n "$SWIFTLINT" ]; then
     # Refuses rather than reformats-and-restages, since re-adding after a fix folds unrelated hunks in from a partial `git add -p`.
     STATUS=$(git status --porcelain -- '*.swift')
-    # Second column D means the worktree copy is gone, decided here rather than trusted to the linter's exit status, which a batched run can mask.
+    # Second column D means the worktree copy is gone, decided here because the project lint is handed no path and so cannot report it.
     GONE=$(printf '%s\n' "$STATUS" | sed -n 's/^[ACMRT]D //p')
-    # "--" ends option parsing, so a staged path starting with "-" is a path, never a linter flag.
-    OUT=$(git diff --cached --name-only -z --diff-filter=ACMRT -- '*.swift' \
-        | xargs -0 "$SWIFTLINT" lint --strict --quiet -- 2>&1) && RC=0 || RC=$?
+    # No file names, since SwiftLint lints a named path whether or not its configuration covers it; run at the root, where that configuration is found.
+    OUT=$(cd "$ROOT" && "$SWIFTLINT" lint --strict --quiet 2>&1) && RC=0 || RC=$?
     if [ -n "$GONE" ]; then
         # Printed first, so a real violation in a co-staged file is not swallowed by this refusal and only surfaces on a second retry.
         [ -n "$OUT" ] && echo "$OUT" >&2
-        echo "[pre-commit] staged Swift file(s) missing from the working tree, so nothing was linted:" >&2
+        echo "[pre-commit] staged Swift file(s) missing from the working tree, so they were not linted:" >&2
         printf '%s\n' "$GONE" | sed 's/^/[pre-commit]   /' >&2
         exit 1
     fi
     if [ "$RC" -ne 0 ]; then
         echo "$OUT" >&2
-        echo "[pre-commit] swiftlint failed on working-tree contents of staged Swift paths." >&2
+        echo "[pre-commit] swiftlint failed on the project's working tree." >&2
         echo "[pre-commit] fix, re-stage, retry." >&2
         exit 1
     fi

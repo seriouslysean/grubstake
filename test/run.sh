@@ -4820,27 +4820,67 @@ hook_commit() {
 
 commits() { (cd "$1" && git rev-list --count HEAD 2>/dev/null || echo 0); }
 
-# Write a file and stage it; the staged paths are all the pre-commit spine looks at. "--" before the
-# path so a dash-prefixed name (#29) stages instead of git parsing it as an option itself.
+# Write a file and stage it; what is staged decides whether the pre-commit spine lints at all. "--"
+# before the path so a dash-prefixed name (#29) stages instead of git parsing it as an option itself.
 stage() {
     printf '%s\n' "$3" >"$1/$2" || fixture_die "cannot write $1/$2"
     (cd "$1" && git add -- "$2") || fixture_die "cannot stage $2 in $1"
 }
 
+# The files a SwiftLint run given no paths covers, written into both stub linters: every *.swift
+# under the repo, or only under the directories listed one per line in $R/lint.scope when that file
+# exists, standing in for the configuration's `included`.
+stub_scope_fn() {
+    cat <<'SCOPE'
+lint_scope() {
+    cd "$R" || return 99
+    if [ -f lint.scope ]; then
+        while IFS= read -r d; do
+            [ -d "$d" ] && find "$d" -name '*.swift'
+        done <lint.scope
+    else
+        find . -name '*.swift' | sed 's|^\./||'
+    fi
+}
+SCOPE
+}
+
 # A stubbed swiftlint at the pinned cache path, so `grubstake path swiftlint` resolves to it. It
 # records the binary it was invoked as and every argument it received, and takes its output and
 # status from files numbered by invocation, so a test can script the first run and the second
-# differently. verify_tool only checks that the path exists, so nothing else runs this. Its callers
-# pin SHA_A in both columns, so the stub sits where either platform looks for it.
+# differently. A run nobody scripted that is given no paths lints the scope above for the marker;
+# a scripted run is always answered as scripted. verify_tool only checks that the path exists, so
+# nothing else runs this. Its callers pin SHA_A in both columns, so the stub sits where either
+# platform looks for it.
 stub_linter() {
     _sd="$1/.cache/swiftlint/$SHA_A"
     mkdir -p "$_sd" || fixture_die "cannot create $_sd"
     printf "#!/bin/sh\nR='%s'\n" "$1" >"$_sd/swiftlint" || fixture_die "cannot write the stub linter"
+    stub_scope_fn >>"$_sd/swiftlint" || fixture_die "cannot write the stub linter"
     cat >>"$_sd/swiftlint" <<'STUB'
 n=$(cat "$R/lint.runs" 2>/dev/null || echo 0)
 n=$((n + 1))
 echo "$n" > "$R/lint.runs"
 { echo "$0"; for a in "$@"; do echo "$a"; done; } > "$R/lint.argv.$n"
+if [ ! -f "$R/lint.out.$n" ] && [ ! -f "$R/lint.rc.$n" ]; then
+    paths=0
+    for a in "$@"; do
+        case "$a" in
+            lint | -*) ;;
+            *) paths=$((paths + 1)) ;;
+        esac
+    done
+    if [ "$paths" -eq 0 ]; then
+        violations=""
+        for f in $(lint_scope); do
+            if grep -q -- VIOLATION_MARKER "$R/$f" 2>/dev/null; then
+                violations="$violations$f:1:1: error: Fake Violation (fake_rule)
+"
+            fi
+        done
+        [ -n "$violations" ] && { printf '%s' "$violations"; exit 2; }
+    fi
+fi
 [ -f "$R/lint.out.$n" ] && cat "$R/lint.out.$n"
 exit "$(cat "$R/lint.rc.$n" 2>/dev/null || echo 0)"
 STUB
@@ -4863,13 +4903,15 @@ lint_run() {
 # exists and contains the marker gets a fake violation. A violation for one co-staged path is always
 # reported even when another path in the same invocation is missing -- only when nothing at all was
 # lintable does the run collapse to 0.63.2's own "No lintable files found" message alone, at exit 1.
-# Otherwise a real violation still exits 2. Callers pin SHA_A in both columns, so the stub sits where
-# either platform looks for it.
+# Otherwise a real violation still exits 2. Given no paths at all it lints the scope above instead,
+# as a bare project run does. Callers pin SHA_A in both columns, so the stub sits where either
+# platform looks for it.
 stub_linter_mechanical() {
     _sd="$1/.cache/swiftlint/$SHA_A"
     mkdir -p "$_sd" || fixture_die "cannot create $_sd"
     printf "#!/bin/sh\nR='%s'\n" "$1" >"$_sd/swiftlint" \
         || fixture_die "cannot write the mechanical stub linter"
+    stub_scope_fn >>"$_sd/swiftlint" || fixture_die "cannot write the mechanical stub linter"
     cat >>"$_sd/swiftlint" <<'STUB'
 n=$(cat "$R/lint.runs" 2>/dev/null || echo 0)
 n=$((n + 1))
@@ -4879,6 +4921,15 @@ cd "$R" || exit 99
 missing=""
 violations=""
 seen_dashdash=0
+npaths=0
+check_path() {
+    if [ ! -e "$1" ]; then
+        missing="$missing '$1'"
+    elif grep -q -- VIOLATION_MARKER "$1" 2>/dev/null; then
+        violations="$violations
+$1:1:1: error: Fake Violation (fake_rule)"
+    fi
+}
 for a in "$@"; do
     if [ "$seen_dashdash" -eq 0 ]; then
         case "$a" in
@@ -4887,13 +4938,14 @@ for a in "$@"; do
             -*) continue ;;
         esac
     fi
-    if [ ! -e "$a" ]; then
-        missing="$missing '$a'"
-    elif grep -q -- VIOLATION_MARKER "$a" 2>/dev/null; then
-        violations="$violations
-$a:1:1: error: Fake Violation (fake_rule)"
-    fi
+    npaths=$((npaths + 1))
+    check_path "$a"
 done
+if [ "$npaths" -eq 0 ]; then
+    for a in $(lint_scope); do
+        check_path "$a"
+    done
+fi
 out=""
 [ -n "$violations" ] && out="$violations"
 if [ -n "$missing" ]; then
@@ -4957,8 +5009,6 @@ if [ "$_bin" != "$r/.cache/swiftlint/$SHA_A/swiftlint" ]; then
     fail "the hook ran '$_bin', not this repo's pinned linter"
 elif ! grep -qx lint "$r/lint.argv.1"; then
     fail "the linter was not asked to lint: $(tr '\n' ' ' <"$r/lint.argv.1")"
-elif ! grep -qx A.swift "$r/lint.argv.1"; then
-    fail "the staged path never reached the linter: $(tr '\n' ' ' <"$r/lint.argv.1")"
 else
     pass
 fi
@@ -5020,27 +5070,73 @@ elif [ "$(commits "$r")" != 2 ]; then
     fail "exited 0 without committing"
 else pass; fi
 
-it "a staged path beginning with a dash is linted as a path, not consumed as a linter option"
-# #29's unqualified reproduction: a name that is simultaneously a valid staged Swift path and a
-# valid swiftlint option (no "--" separates paths from options) gets consumed as the option, and the
-# violation inside it is never seen.
+it "a staged Swift file outside the lint configuration's scope does not refuse the commit"
+# SwiftLint lints a path it is handed whether or not the configuration covers it. lint.scope stands
+# in for `included`; the clean in-scope file gives the run something to read, so a pass is not just
+# an empty scope.
 r=$(new_hook_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 stub_linter_mechanical "$r"
-stage "$r" '--config=clean.yml.swift' 'let x = 1 // VIOLATION_MARKER'
+mkdir -p "$r/Sources" || fixture_die "cannot create $r/Sources"
+printf 'Sources\n' >"$r/lint.scope" || fixture_die "cannot write the lint scope in $r"
+printf 'let a = 1\n' >"$r/Sources/Inside.swift" || fixture_die "cannot write Sources/Inside.swift in $r"
+stage "$r" Outside.swift 'let x = 1 // VIOLATION_MARKER'
 _out=$(hook_commit "$r")
 _rc=$?
 if [ ! -f "$r/lint.argv.1" ]; then
-    fail "the linter never ran, so this proves nothing about the dash: $_out"
+    fail "the linter never ran, so this proves nothing: $_out"
+elif [ "$_rc" -ne 0 ]; then
+    fail "refused over a violation the configuration leaves out of scope (rc $_rc): $_out"
+elif [ "$(commits "$r")" != 2 ]; then
+    fail "exited 0 without committing"
+else pass; fi
+
+it "a violation in an in-scope Swift file that is not staged refuses the commit"
+# The project lint covers the whole configured scope, so a commit that stages only a clean file is
+# still refused for a violation it never touched. Untracked, so neither the missing-file nor the
+# unstaged-edit refusal can be what stops it.
+r=$(new_hook_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter_mechanical "$r"
+mkdir -p "$r/Sources" || fixture_die "cannot create $r/Sources"
+printf 'Sources\n' >"$r/lint.scope" || fixture_die "cannot write the lint scope in $r"
+printf 'let x = 1 // VIOLATION_MARKER\n' >"$r/Sources/Unstaged.swift" || fixture_die "cannot write Sources/Unstaged.swift in $r"
+stage "$r" Sources/Clean.swift 'let a = 1'
+_c0=$(commits "$r")
+_out=$(hook_commit "$r")
+_rc=$?
+if [ ! -f "$r/lint.argv.1" ]; then
+    fail "the linter never ran, so this proves nothing: $_out"
 elif [ "$_rc" -eq 0 ]; then
-    fail "the commit went through with the violation hidden behind the dash-prefixed name: $_out"
-elif [ "$(commits "$r")" != 1 ]; then
+    fail "committed past a violation in an in-scope file that was not staged: $_out"
+elif [ "$(commits "$r")" != "$_c0" ]; then
     fail "refused, and committed anyway"
+elif ! printf '%s' "$_out" | grep -q "Unstaged.swift"; then
+    fail "refused without naming the unstaged file: $_out"
 else
-    case "$_out" in
-        *"Fake Violation"*) pass ;;
-        *) fail "blocked without reporting what the linter said: $_out" ;;
-    esac
+    pass
+fi
+
+it "the hook hands the linter no path arguments, since a named path is linted whatever the configuration says"
+r=$(new_hook_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+stub_linter "$r"
+lint_run "$r" 1 0 ""
+stage "$r" A.swift "struct A {}"
+hook_commit "$r" >/dev/null 2>&1
+if [ ! -f "$r/lint.argv.1" ]; then
+    fail "the linter never ran, so this proves nothing"
+else
+    # Line 1 is the binary; after it only "lint" and options may appear, and a bare "--" exists only to introduce paths.
+    _args=$(sed 1d "$r/lint.argv.1")
+    _paths=$(printf '%s\n' "$_args" | grep -v -e '^lint$' -e '^-')
+    if [ -n "$_paths" ]; then
+        fail "the linter was handed path argument(s): $(printf '%s' "$_paths" | tr '\n' ' ')"
+    elif printf '%s\n' "$_args" | grep -qx -e '--'; then
+        fail "the linter was handed a bare -- : $(printf '%s' "$_args" | tr '\n' ' ')"
+    else
+        pass
+    fi
 fi
 
 it "a staged type change (symlink replaced by a regular file) is linted, not skipped"
@@ -5056,8 +5152,6 @@ lint_run "$r" 1 0 ""
 hook_commit "$r" >/dev/null 2>&1
 if [ ! -f "$r/lint.argv.1" ]; then
     fail "the linter never ran on the staged type change"
-elif ! grep -qx A.swift "$r/lint.argv.1"; then
-    fail "the type change never reached the linter: $(tr '\n' ' ' <"$r/lint.argv.1")"
 else
     pass
 fi

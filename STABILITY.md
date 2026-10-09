@@ -90,11 +90,13 @@ every reader described here already accepts both, so that switch would not break
 The pre-commit, commit-msg, and post-commit behaviour is a contract, not the hook files' bytes:
 
 - pre-commit verifies pinned tools only when relevant files are staged, runs any repo-local gates
-  in `.githooks/pre-commit.d/` in glob order, then lints staged Swift as those gates left it, and
-  blocks the commit on failure. The order is part of the contract: a gate that formats staged Swift
-  and re-stages it is linted on what it produced. Staged Swift that diverges from the working tree
-  is refused rather than linted, since the lint reads the working tree and any verdict it returned
-  would be about bytes that are not being committed.
+  in `.githooks/pre-commit.d/` in glob order, then, when Swift is staged, runs SwiftLint over the
+  project's working tree as those gates left it, and blocks the commit on failure. It passes
+  SwiftLint no file names, so the SwiftLint configuration decides the scope, and a violation in any
+  in-scope file refuses the commit, staged or not. The order is part of the contract: a gate that
+  formats staged Swift and re-stages it is linted on what it produced. Staged Swift that diverges
+  from the working tree is refused rather than linted, since the lint reads the working tree and any
+  verdict it returned would be about bytes that are not being committed.
 - commit-msg refuses a message carrying an agent-session trailer or a transcript link, in any
   casing, on every line of the message, comment lines included, with one exception: text below
   git's own scissors line, and only when an editor actually produced it, since that is the only

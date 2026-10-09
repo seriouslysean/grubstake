@@ -5,6 +5,9 @@ set -eu
 
 ROOT="$(git rev-parse --show-toplevel)"
 
+# Exported for the whole spine, gates included, so a gate reaching for a pinned tool refuses a cold cache instead of downloading mid-commit (rule 17).
+export GRUBSTAKE_OFFLINE=1
+
 # A gate handed nothing has not passed, so an unreadable message is refused rather than skipped.
 [ "$#" -eq 1 ] || {
     echo "[commit-msg] git passed no message file, so nothing was scanned" >&2

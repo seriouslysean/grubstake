@@ -188,8 +188,8 @@ A gate:
 - exits 0 at once when nothing it covers is staged;
 - fails when the checker it calls is missing, since a check that did not run must not look like
   one that passed;
-- does not reach the network. The pre-commit hook exports `GRUBSTAKE_OFFLINE` for every gate it
-  runs. The commit-msg hook does not, so a message gate that resolves a pinned tool sets it itself.
+- does not reach the network. The pre-commit and commit-msg hooks export `GRUBSTAKE_OFFLINE` for
+  every gate they run.
 
 **The formatting gate checks and refuses.** It never rewrites a file and never runs `git add`:
 re-adding a formatted file stages all of its working-tree content, which folds an unstaged hunk

@@ -5661,6 +5661,38 @@ else
     pass
 fi
 
+it "a commit-msg.d gate's own cold-cache path call refuses offline instead of downloading mid-commit"
+# The commit-msg spine runs its gates in a process of their own, so the pre-commit hook's export
+# never reaches them: a message gate calling path on a cold cache ran curl on the commit path
+# (AGENTS rule 17). The curl shim records its own invocation, so a download is caught directly.
+r=$(new_hook_repo)
+pins "$r" "swiftformat 1.0.0 $SHA_A $SHA_A"
+extract_embedded_hook commit-msg >"$r/.githooks/commit-msg" && [ -s "$r/.githooks/commit-msg" ] \
+    || fixture_die "cannot write commit-msg into $r"
+chmod +x "$r/.githooks/commit-msg" || fixture_die "cannot make commit-msg executable in $r"
+mkdir -p "$r/.githooks/commit-msg.d" || fixture_die "cannot create $r/.githooks/commit-msg.d"
+cat >"$r/.githooks/commit-msg.d/05-cold-cache" <<'GATE' || fixture_die "cannot write the message gate in $r"
+#!/bin/sh
+ROOT="$(git rev-parse --show-toplevel)"
+"$ROOT/grubstake.sh" path swiftformat >/dev/null
+GATE
+chmod +x "$r/.githooks/commit-msg.d/05-cold-cache" || fixture_die "cannot make the message gate executable in $r"
+_marker="$r/CURL-RAN"
+_shim="$r/curl-shim"
+mkdir -p "$_shim" || fixture_die "cannot create $_shim"
+printf '#!/bin/sh\n: > "%s"\nexit 1\n' "$_marker" >"$_shim/curl" || fixture_die "cannot write the curl marker shim"
+chmod +x "$_shim/curl" || fixture_die "cannot make the curl marker shim executable"
+stage "$r" NOTES.md "notes"
+_out=$(hook_commit "$r" "$_shim")
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "the commit went through though the pinned tool was never installed: $_out"
+elif [ -f "$_marker" ]; then
+    fail "a commit-msg.d gate's cold-cache path call reached curl on the commit path: $_out"
+else
+    pass
+fi
+
 it "a pre-commit.d gate's own cold-cache ensure call refuses offline instead of downloading mid-commit"
 # cmd_ensure called install_tool with no GRUBSTAKE_OFFLINE check of its own -- only cmd_path had
 # one, so a gate calling ensure instead of path on a cold cache still ran curl on the commit path.

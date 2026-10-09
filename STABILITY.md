@@ -50,8 +50,8 @@ No arguments, or `-h`/`--help`/`help`, prints usage and exits 0.
 
 - `GRUBSTAKE_CACHE`: an absolute path; overrides the cache root.
 - `GRUBSTAKE_OFFLINE`: non-empty means no tool is downloaded -- a missing one is refused instead of
-  installed, and `add` refuses outright since it downloads by design. The shipped pre-commit hook
-  sets it for the whole spine.
+  installed, and `add` refuses outright since it downloads by design. The shipped pre-commit and
+  commit-msg hooks each set it for their whole spine.
 - `XDG_CACHE_HOME`: read on Linux only; a relative value is treated as unset.
 - `HOME`: the cache root falls back to a path under it when `GRUBSTAKE_CACHE` (and, on Linux,
   `XDG_CACHE_HOME`) is not set.

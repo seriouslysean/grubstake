@@ -108,7 +108,7 @@ cache_root() {
         warn "$_cr_var is empty, so the cache root cannot be resolved"
         return 1
     }
-    # STABILITY.md promises an absolute path, so a relative one is refused here for every command, not per caller.
+    # docs/STABILITY.md promises an absolute path, so a relative one is refused here for every command, not per caller.
     case "$_cr_root" in
         /*) : ;;
         *)
@@ -203,7 +203,7 @@ pin_field() {
 
 pin_version() { pin_field "$1" 2; }
 
-# A "=" in field 3 marks the keyed form (key=sha256; unknown keys ignored, so a later platform is additive); add writes positional today -- STABILITY.md is where a switch to keyed would be promised.
+# A "=" in field 3 marks the keyed form (key=sha256; unknown keys ignored, so a later platform is additive); add writes positional today -- docs/STABILITY.md is where a switch to keyed would be promised.
 pin_sha() {
     _ps_tool="$1"
     _ps_plat="$2"

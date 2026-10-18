@@ -175,19 +175,19 @@ naming this repo's own `.githooks`; the relative `.githooks` it writes resolves 
 
 ## Adopting it in an existing repo
 
-The migration is in [ADOPTING.md](ADOPTING.md), which is written for an agent working through it.
+The migration is in [ADOPTING.md](docs/ADOPTING.md), which is written for an agent working through it.
 
 ## Conventions
 
 How a repository lays out the scripts, hooks, CI, and lint configuration around grubstake is in
-[CONVENTIONS.md](CONVENTIONS.md). `./grubstake.sh doctor` reports install health, and then which
+[CONVENTIONS.md](docs/CONVENTIONS.md). `./grubstake.sh doctor` reports install health, and then which
 of that file's checkable rules the repository follows. It reports those without failing on them.
 
 ## Contributing
 
-The workflow is in [CONTRIBUTING.md](CONTRIBUTING.md), and the conventions the code holds itself to
+The workflow is in [CONTRIBUTING.md](docs/CONTRIBUTING.md), and the conventions the code holds itself to
 are in [AGENTS.md](AGENTS.md).
 
 ## Stability
 
-What a script or a person may rely on across releases is in [STABILITY.md](STABILITY.md).
+What a script or a person may rely on across releases is in [STABILITY.md](docs/STABILITY.md).

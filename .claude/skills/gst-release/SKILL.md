@@ -33,17 +33,17 @@ happened. The run that gates the tag is step 6, after the merge.
 
 ## 3. Bump
 
-Raise the version in all four places: `GRUBSTAKE_VERSION` in `grubstake.sh`, the install snippets in `README.md` and `ADOPTING.md`, and README's `# expect` line. Then prove they agree:
+Raise the version in all four places: `GRUBSTAKE_VERSION` in `grubstake.sh`, the install snippets in `README.md` and `docs/ADOPTING.md`, and README's `# expect` line. Then prove they agree:
 
 ```sh
-grep -n 'GRUBSTAKE_VERSION="\|grubstake/v\|# expect ' grubstake.sh README.md ADOPTING.md
+grep -n 'GRUBSTAKE_VERSION="\|grubstake/v\|# expect ' grubstake.sh README.md docs/ADOPTING.md
 ```
 
 All four must declare the target, because `fetch_release` skips a tag whose bytes disagree with its name, and the mismatched release becomes a silent dud that cost a version number.
 
 ## 4. Land it
 
-The bump goes through the normal cycle: issue, branch named after it, pull request, merge commit. Nothing about a release skips review.
+The bump goes through the normal cycle: issue, branch named after it, pull request, squash merge. Nothing about a release skips review.
 
 ## 5. Re-verify after the merge
 

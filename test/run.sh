@@ -2117,7 +2117,7 @@ else
 fi
 
 it "check is not blocked by an entry that predates receipts"
-# Per CONTRIBUTING.md's "When a fix changes behaviour on upgrade", check stays existence-only, so a receiptless legacy entry must pass it before any ensure re-touches it.
+# Per docs/CONTRIBUTING.md's "When a fix changes behaviour on upgrade", check stays existence-only, so a receiptless legacy entry must pass it before any ensure re-touches it.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 fake_install "$r" swiftlint 0.63.2 "$SHA_A" # no receipt: exactly what a pre-receipt release left behind
@@ -3476,7 +3476,7 @@ fi
 rm -rf "$_lockdir" "$_staging" 2>/dev/null
 
 it "offline receipt recording succeeds with an unwritable TMPDIR"
-# STABILITY.md scopes TMPDIR to download and extraction scratch, so with_lock's receipt write must not need it; two legacy entries prove every lock taken in the run, not just the first, stays off it.
+# docs/STABILITY.md scopes TMPDIR to download and extraction scratch, so with_lock's receipt write must not need it; two legacy entries prove every lock taken in the run, not just the first, stays off it.
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A
 swiftformat 0.61.1 $SHA_B $SHA_B"
@@ -8483,7 +8483,7 @@ doc_install_versions() {
     grep -oE 'grubstake/v[0-9]+\.[0-9]+\.[0-9]+/grubstake\.sh' "$1" | sed -E 's#.*/v##; s#/grubstake\.sh##'
 }
 
-it "GRUBSTAKE_VERSION matches every install-snippet version in README.md and ADOPTING.md"
+it "GRUBSTAKE_VERSION matches every install-snippet version in README.md and docs/ADOPTING.md"
 # fetch_release skips a tag whose bytes disagree with its name (the release skill's bump step), so
 # a doc pinning the wrong version would not fail a release; it would just ship a bad instruction.
 # Every match is walked, not just the first: a doc carrying a second, stale snippet -- a leftover
@@ -8492,7 +8492,7 @@ it "GRUBSTAKE_VERSION matches every install-snippet version in README.md and ADO
 _gv="$(sed -n 's/^GRUBSTAKE_VERSION="\(.*\)"$/\1/p' "$GS")"
 [ -n "$_gv" ] || fixture_die "cannot read GRUBSTAKE_VERSION from $GS"
 _bad=""
-for _doc in "$REPO/README.md" "$REPO/ADOPTING.md"; do
+for _doc in "$REPO/README.md" "$REPO/docs/ADOPTING.md"; do
     _dvs="$(doc_install_versions "$_doc")"
     [ -n "$_dvs" ] || fixture_die "no install snippet found in $_doc"
     for _dv in $_dvs; do

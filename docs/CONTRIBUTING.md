@@ -44,8 +44,8 @@ Open an issue before writing code, even for a one-line fix, so the reason surviv
 diff. Record what the wrong behaviour actually was, ideally as the commands that produce it.
 
 Branch from `main` and name the branch after the issue, as in `14-pins-resolve-from-cwd`. Open a
-pull request that closes it with `Closes #14`. Merge with a merge commit rather than a squash, so
-each commit on `main` stays individually revertable.
+pull request that closes it with `Closes #14`. Merge with a squash (`gh pr merge <n> --squash --delete-branch`). The pull request title becomes
+the commit subject and its description the commit message, so write both for `main`.
 
 ## Writing the test
 
@@ -89,7 +89,7 @@ for rules this repo would have to author regardless.
 
 ## Releasing
 
-The release procedure is [`.claude/skills/gst-release/SKILL.md`](.claude/skills/gst-release/SKILL.md).
+The release procedure is [`.claude/skills/gst-release/SKILL.md`](../.claude/skills/gst-release/SKILL.md).
 
 Tags are annotated, so `git clone --branch vX.Y.Z` prints `refs/tags/... is not a commit!` and
 then checks out the commit the tag points at. That is git dereferencing a tag object and is
@@ -115,4 +115,4 @@ are reviewable here and can be imported into another repository.
 
 ## Rules for the code itself
 
-See [AGENTS.md](AGENTS.md).
+See [AGENTS.md](../AGENTS.md).

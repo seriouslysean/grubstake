@@ -2,6 +2,18 @@
 
 Rules for working in this repo.
 
+## Setup and checks
+
+- Install: `./grubstake.sh install`, once per clone (`docs/CONTRIBUTING.md`).
+- Before a PR: `test/lint.sh && test/run.sh`. CI runs the same two commands as separate jobs, plus `test/run.sh --network` on tags and on pull requests that touch `grubstake.sh`.
+
+## Where things live
+
+- `grubstake.sh` is the script, `grubstake.tools` the pins, `test/` the suite and lint.
+- `docs/CONTRIBUTING.md` has the workflow, `docs/CONVENTIONS.md` the conventions, `docs/ADOPTING.md` how a repo adopts it.
+
+## Rules
+
 1. Pin every tool to an exact version, and resolve "latest" only when the user explicitly asks to update.
 2. Verify downloaded bytes against a recorded hash, because a version tag is not a checksum.
 3. Assert that a tool reports the version it was pinned to, since the hash only proves what arrived.

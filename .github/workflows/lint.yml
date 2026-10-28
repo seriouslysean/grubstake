@@ -3,10 +3,11 @@ name: lint
 # Not required: it downloads a pinned toolchain, and a fetch failing on GitHub being slow must
 # not block a merge that test.yml's offline suite already gates. See test/lint.sh for the pins.
 
+# Pull requests run it as a job of test.yml, so the Dependabot merge job can wait on it.
 on:
-  pull_request:
   push:
     branches: [main]
+  workflow_call:
 
 permissions:
   contents: read

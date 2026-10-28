@@ -38,3 +38,29 @@ jobs:
 
       - name: offline suite
         run: test/run.sh
+
+  # Runs lint.yml as a job so the merge job below can wait on it. It stays a separate,
+  # non-required check: only the merge job depends on it.
+  lint:
+    uses: ./.github/workflows/lint.yml
+
+  # Squash-merges a Dependabot PR once the jobs above pass, if every update is a
+  # patch or minor (fastify/github-action-merge-dependabot, pinned to v3.15.0).
+  # Majors and anything not Dependabot's stay open for a person. network.yml is
+  # not a dependency: it only runs on a pull request touching grubstake.sh, which
+  # Dependabot never edits.
+  automerge:
+    name: Dependabot auto-merge
+    needs: [test, lint]
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Merge minor and patch updates
+        uses: fastify/github-action-merge-dependabot@73ec4cbb5e56df5591eae286972d5b2201ffe90f # v3.15.0
+        with:
+          target: minor
+          merge-method: squash

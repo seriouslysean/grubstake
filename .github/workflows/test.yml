@@ -42,7 +42,7 @@ jobs:
   # Runs lint.yml as a job so the merge job below can wait on it. It stays a separate,
   # non-required check: only the merge job depends on it.
   lint:
-    uses: ./.github/workflows/lint.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects $/ (rhysd/actionlint#711)
+    uses: ./.github/workflows/lint.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ syntax
 
   # Squash-merges a Dependabot PR once the jobs above pass, if the update is a
   # patch or minor: GitHub's documented pattern (dependabot/fetch-metadata, then

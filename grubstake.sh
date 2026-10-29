@@ -72,8 +72,11 @@ platform() {
     case "$(uname -s)" in
         Darwin) echo darwin ;;
         Linux)
-            [ "$(uname -m)" = x86_64 ] || die "unsupported arch: $(uname -m)"
-            echo linux
+            case "$(uname -m)" in
+                x86_64) echo linux ;;
+                aarch64 | arm64) echo linux_arm64 ;;
+                *) die "unsupported arch: $(uname -m)" ;;
+            esac
             ;;
         *) die "unsupported platform: $(uname -s)" ;;
     esac
@@ -141,12 +144,23 @@ tool_url() {
     case "$1:$3" in
         swiftlint:darwin) echo "https://github.com/realm/SwiftLint/releases/download/$_v/portable_swiftlint.zip" ;;
         swiftlint:linux) echo "https://github.com/realm/SwiftLint/releases/download/$_v/swiftlint_linux_amd64.zip" ;;
+        swiftlint:linux_arm64) echo "https://github.com/realm/SwiftLint/releases/download/$_v/swiftlint_linux_arm64.zip" ;;
         swiftformat:darwin) echo "https://github.com/nicklockwood/SwiftFormat/releases/download/$_v/swiftformat.zip" ;;
         swiftformat:linux) echo "https://github.com/nicklockwood/SwiftFormat/releases/download/$_v/swiftformat_linux.zip" ;;
+        # The aarch64 asset first ships in 0.55.6; an older release has no build here, not a failed fetch.
+        swiftformat:linux_arm64)
+            if version_lt "$_v" 0.55.6; then
+                echo ""
+            else
+                echo "https://github.com/nicklockwood/SwiftFormat/releases/download/$_v/swiftformat_linux_aarch64.zip"
+            fi
+            ;;
         xcbeautify:darwin) echo "https://github.com/cpisciotta/xcbeautify/releases/download/$_v/xcbeautify-$_v-universal-apple-macosx.zip" ;;
         xcbeautify:linux) echo "https://github.com/cpisciotta/xcbeautify/releases/download/$_v/xcbeautify-$_v-x86_64-linux-static.tar.xz" ;;
+        xcbeautify:linux_arm64) echo "" ;;
         periphery:darwin) echo "https://github.com/peripheryapp/periphery/releases/download/$_v/periphery-$_v.zip" ;;
         periphery:linux) echo "" ;;
+        periphery:linux_arm64) echo "" ;;
         *) die "unknown tool: $1" ;;
     esac
 }
@@ -156,6 +170,8 @@ tool_member() {
     case "$1:$2" in
         swiftlint:linux) echo "swiftlint-static" ;;
         swiftformat:linux) echo "swiftformat_linux" ;;
+        swiftlint:linux_arm64) echo "swiftlint-static" ;;
+        swiftformat:linux_arm64) echo "swiftformat_linux_aarch64" ;;
         *) echo "$1" ;;
     esac
 }
@@ -175,7 +191,7 @@ is_known_tool() { known_tools | tr ' ' '\n' | grep -qxF -e "$1"; }
 
 # ---------------------------------------------------------------------------- pins
 # Not JSON: greppable, diffable, no parser needed.
-# Columns: name version sha256-darwin sha256-linux ("-" when absent).
+# Columns: name version, then platform=sha256 pairs (darwin, linux, linux_arm64) as add writes them, or the older positional sha256-darwin sha256-linux ("-" when absent).
 
 # Resolved from the script, never from the working directory. Reading pins from cwd is exactly
 # the failure this tool exists to prevent: the same script would serve a different repo's pins.
@@ -203,7 +219,7 @@ pin_field() {
 
 pin_version() { pin_field "$1" 2; }
 
-# A "=" in field 3 marks the keyed form (key=sha256; unknown keys ignored, so a later platform is additive); add writes positional today -- docs/STABILITY.md is where a switch to keyed would be promised.
+# A "=" in field 3 marks the keyed form (key=sha256; unknown keys ignored, so a later platform is additive); add writes this form. The positional form has no linux_arm64 column, so it reads as absent there.
 pin_sha() {
     _ps_tool="$1"
     _ps_plat="$2"
@@ -234,6 +250,7 @@ pin_sha() {
             case "$_ps_plat" in
                 darwin) printf '%s\n' "${3:-}" ;;
                 linux) printf '%s\n' "${4:-}" ;;
+                *) echo - ;;
             esac
             ;;
     esac
@@ -1082,20 +1099,17 @@ add_one() {
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/grubstake.XXXXXX")"
     arm_cleanup "rm -rf $(sq "$_tmp")"
 
-    # Hash every platform, so a macOS run still pins what Linux CI fetches.
+    # Hash every platform that publishes a build, so a macOS run still pins what Linux CI fetches.
     _hostplat="$(platform)"
     _shas=""
     _this_sha="-"
-    for _plat in darwin linux; do
+    for _plat in darwin linux linux_arm64; do
         _url="$(tool_url "$_tool" "$_ver" "$_plat")"
-        if [ -z "$_url" ]; then
-            _shas="$_shas -"
-            continue
-        fi
+        [ -n "$_url" ] || continue
         log "$_tool $_ver: hashing $_plat artifact"
         curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors --max-time 300 "$_url" -o "$_tmp/a" || die "$_tool $_ver: cannot fetch $_plat artifact"
         _h="$(sha256_file "$_tmp/a")"
-        _shas="$_shas $_h"
+        _shas="$_shas $_plat=$_h"
         [ "$_plat" != "$_hostplat" ] || _this_sha="$_h"
     done
     rm -rf "$_tmp"
@@ -1115,7 +1129,7 @@ add_one() {
     arm_cleanup "rm -rf $(sq "$_tmp") $(sq "$_pt") $(sq "$_lock")"
     # grubstake.tools is only known-good once this lock is held, even though install_tool already proved this spec's own bytes.
     validate_pins
-    [ -f "$_pins" ] || printf '# grubstake pins: name version sha256-darwin sha256-linux\n' >"$_pins"
+    [ -f "$_pins" ] || printf '# grubstake pins: name version platform=sha256 ...\n' >"$_pins"
     # grep -v exits 1 when it selects nothing, the ordinary shape of the first pin in an empty or
     # tool-only file; anything else is a real read failure and must abort before the rename below.
     # A pipeline's own exit status is its last stage's, not grep's, so neither stage can run inside
@@ -1685,7 +1699,7 @@ cmd_install() {
     fi
 
     [ -f "$(pins_file)" ] || {
-        printf '# grubstake pins: name version sha256-darwin sha256-linux\n' >"$(pins_file)"
+        printf '# grubstake pins: name version platform=sha256 ...\n' >"$(pins_file)"
         log "grubstake.tools: created (pin tools with: ./grubstake.sh add swiftlint@x.y.z)"
     }
 

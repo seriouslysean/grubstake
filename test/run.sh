@@ -202,6 +202,8 @@ fake_release() {
         Linux) _member=swiftlint-static ;;
         *) fixture_die "fake_release: no fixture member name for $(uname -s)" ;;
     esac
+    # A caller faking a different tool's archive sets FAKE_RELEASE_MEMBER to its member name first.
+    _member="${FAKE_RELEASE_MEMBER:-$_member}"
     _src="$_repo/release-src"
     mkdir -p "$_src" || fixture_die "cannot create $_src"
     printf '#!/bin/sh\necho %s\n' "$_ver" >"$_src/$_member" || fixture_die "cannot write the fixture release binary"
@@ -385,14 +387,25 @@ SHIM
     chmod +x "$_gcdir/git" || fixture_die "cannot make the git-count git shim executable"
 }
 
-# For tests that cannot pin the same hash in both columns because they read a hash `add` wrote
-# for real over the network: a hardcoded column asserts against a path only one platform installs to.
-sha_column() {
-    case "$(uname -s)" in
-        Darwin) echo 3 ;;
-        Linux) echo 4 ;;
-        *) fixture_die "sha_column: no pin column for $(uname -s)" ;;
+# For tests that cannot pin the same hash on every platform because they read a hash `add` wrote
+# for real over the network: a hardcoded key asserts against a path only one platform installs to.
+# The key names the running platform in the keyed pin form that add writes.
+host_pin_key() {
+    case "$(uname -s):$(uname -m)" in
+        Darwin:*) echo darwin ;;
+        Linux:aarch64 | Linux:arm64) echo linux_arm64 ;;
+        Linux:*) echo linux ;;
+        *) fixture_die "host_pin_key: no pin key for $(uname -s)" ;;
     esac
+}
+
+# The hash a pins file records for one tool and platform key, read from either the positional form
+# (darwin is field 3, linux is field 4) or the keyed form. $1 file, $2 tool, $3 key.
+pin_value() {
+    awk -v t="$2" -v k="$3" '
+        $1 == t && $3 ~ /=/ { for (i = 3; i <= NF; i++) { split($i, kv, "="); if (kv[1] == k) print kv[2] } }
+        $1 == t && $3 !~ /=/ { if (k == "darwin") print $3; else if (k == "linux") print $4 }
+    ' "$1"
 }
 
 # A test that fabricates an entry and then runs grubstake pins the SAME hash in both columns.
@@ -510,7 +523,7 @@ fi
 printf '\nplatform\n'
 
 it "a non-x86_64 Linux is refused by name, not silently installed as amd64"
-# rc alone does not discriminate, since a guard-stripped run still fails at the blocked curl, which also keeps it off the network; only the guard names aarch64 and never logs "downloading".
+# rc alone does not discriminate, since a guard-stripped run still fails at the blocked curl, which also keeps it off the network; only the guard names riscv64 and never logs "downloading".
 r=$(new_repo)
 pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
 _unameshim="$r/uname-shim"
@@ -519,7 +532,7 @@ cat >"$_unameshim/uname" <<'SHIM'
 #!/bin/sh
 case "$1" in
     -s) echo Linux ;;
-    -m) echo aarch64 ;;
+    -m) echo riscv64 ;;
     *)  echo Linux ;;
 esac
 SHIM
@@ -532,8 +545,8 @@ _out=$(cd "$r" && PATH="$_unameshim:$_curlshim:$PATH" GRUBSTAKE_CACHE="$r/.cache
 _rc=$?
 if [ "$_rc" -eq 0 ]; then
     fail "ensure exited 0 on a non-x86_64 Linux instead of refusing: $_out"
-elif ! printf '%s' "$_out" | grep -q "aarch64"; then
-    fail "refused, but never named the actual arch (aarch64): $_out"
+elif ! printf '%s' "$_out" | grep -q "riscv64"; then
+    fail "refused, but never named the actual arch (riscv64): $_out"
 elif printf '%s' "$_out" | grep -q "downloading"; then
     fail "attempted to download an artifact for the wrong arch instead of refusing outright: $_out"
 else
@@ -550,7 +563,7 @@ cat >"$_unameshim/uname" <<'SHIM'
 #!/bin/sh
 case "$1" in
     -s) echo Linux ;;
-    -m) echo aarch64 ;;
+    -m) echo riscv64 ;;
     *)  echo Linux ;;
 esac
 SHIM
@@ -567,17 +580,17 @@ elif printf '%s' "$_out" | grep -q "not published for"; then
     fail "install_tool ran on an empty platform and logged a misleading per-tool skip: $_out"
 elif printf '%s' "$_out" | grep -q "unknown tool"; then
     fail "the guard's failure was masked by tool_url dying on an empty platform argument: $_out"
-elif ! printf '%s' "$_out" | grep -q "unsupported arch: aarch64"; then
+elif ! printf '%s' "$_out" | grep -q "unsupported arch: riscv64"; then
     fail "refused, but not with the guard's own message: $_out"
 else
     pass
 fi
 
 # A uname stand-in reporting Linux on any real host, shared by every site test below that needs one.
-# $2, optional: the arch -m reports; aarch64 when omitted.
+# $2, optional: the arch -m reports; riscv64 (unsupported) when omitted.
 uname_arch_shim() {
     mkdir -p "$1" || fixture_die "cannot create the uname shim dir"
-    _uas_arch="${2:-aarch64}"
+    _uas_arch="${2:-riscv64}"
     cat >"$1/uname" <<SHIM
 #!/bin/sh
 case "\$1" in
@@ -639,7 +652,7 @@ if [ "$_rc" -eq 0 ]; then
     fail "path exited 0 on a non-x86_64 Linux: $_out"
 elif printf '%s' "$_out" | grep -q "unknown tool"; then
     fail "the guard's failure was masked by tool_url dying on an empty platform argument: $_out"
-elif ! printf '%s' "$_out" | grep -q "unsupported arch: aarch64"; then
+elif ! printf '%s' "$_out" | grep -q "unsupported arch: riscv64"; then
     fail "refused, but not with the guard's own message: $_out"
 elif [ -n "$_stdout" ]; then
     fail "printed something on stdout despite refusing: $_stdout"
@@ -693,7 +706,7 @@ _rc=$?
 _err=$(cd "$r" && env -u GRUBSTAKE_CACHE PATH="$_unameshim:$PATH" HOME="$_fakehome" ./grubstake.sh doctor 2>&1 1>/dev/null)
 if [ "$_rc" -eq 0 ]; then
     fail "doctor exited 0 on an unsupported arch, now a reported problem: $_out"
-elif ! printf '%s\n' "$_out" | grep -q '^platform.*unsupported arch: aarch64'; then
+elif ! printf '%s\n' "$_out" | grep -q '^platform.*unsupported arch: riscv64'; then
     fail "the platform field did not carry the guard's own message: $_out"
 elif ! printf '%s' "$_out" | grep -q "unsupported platform"; then
     fail "the per-tool row did not report an unsupported platform: $_out"
@@ -716,6 +729,114 @@ if [ "$_rc" -eq 0 ]; then
     fail "clean exited 0 on an unsupported arch instead of refusing: $_out"
 elif ! printf '%s' "$_out" | grep -q "cannot determine the cache root"; then
     fail "refused, but not with cmd_clean's own cache-root message: $_out"
+else
+    pass
+fi
+
+# ---------------------------------------------------------------------------- linux arm64
+
+it "ensure on Linux/aarch64 installs swiftlint from the arm64 asset, not the amd64 one"
+r=$(new_repo)
+FAKE_RELEASE_MEMBER=swiftlint-static
+_sha=$(fake_release "$r" 0.63.2)
+unset FAKE_RELEASE_MEMBER
+pins "$r" "swiftlint 0.63.2 darwin=$_sha linux=$_sha linux_arm64=$_sha"
+# Serves the release only for the arm64 asset's exact URL, so any other asset fails the download.
+mv "$r/curl-shim/curl" "$r/curl-shim/curl-real"
+cat >"$r/curl-shim/curl" <<SHIM
+#!/bin/sh
+for a in "\$@"; do
+    [ "\$a" = "https://github.com/realm/SwiftLint/releases/download/0.63.2/swiftlint_linux_arm64.zip" ] && exec "$r/curl-shim/curl-real" "\$@"
+done
+echo "curl: unexpected URL: \$*" >&2
+exit 22
+SHIM
+chmod +x "$r/curl-shim/curl" || fixture_die "cannot make the strict curl shim executable"
+_unameshim="$r/uname-shim"
+uname_arch_shim "$_unameshim" aarch64
+_out=$(cd "$r" && PATH="$_unameshim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
+_rc=$?
+_bin=$(cd "$r" && PATH="$_unameshim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftlint 2>/dev/null)
+if [ "$_rc" -ne 0 ]; then
+    fail "ensure exited $_rc: $_out"
+elif [ ! -x "$_bin" ]; then
+    fail "path printed no executable: '$_bin'"
+elif [ "$("$_bin" version)" != "0.63.2" ]; then
+    fail "the installed binary does not report 0.63.2"
+else
+    pass
+fi
+
+it "ensure on Linux/arm64 installs swiftformat from the aarch64 asset and extracts its aarch64 member"
+r=$(new_repo)
+FAKE_RELEASE_MEMBER=swiftformat_linux_aarch64
+_sha=$(fake_release "$r" 0.61.1)
+unset FAKE_RELEASE_MEMBER
+pins "$r" "swiftformat 0.61.1 darwin=$_sha linux=$_sha linux_arm64=$_sha"
+# Serves the release only for the arm64 asset's exact URL, so any other asset fails the download.
+mv "$r/curl-shim/curl" "$r/curl-shim/curl-real"
+cat >"$r/curl-shim/curl" <<SHIM
+#!/bin/sh
+for a in "\$@"; do
+    [ "\$a" = "https://github.com/nicklockwood/SwiftFormat/releases/download/0.61.1/swiftformat_linux_aarch64.zip" ] && exec "$r/curl-shim/curl-real" "\$@"
+done
+echo "curl: unexpected URL: \$*" >&2
+exit 22
+SHIM
+chmod +x "$r/curl-shim/curl" || fixture_die "cannot make the strict curl shim executable"
+_unameshim="$r/uname-shim"
+uname_arch_shim "$_unameshim" arm64
+_out=$(cd "$r" && PATH="$_unameshim:$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
+_rc=$?
+_bin=$(cd "$r" && PATH="$_unameshim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftformat 2>/dev/null)
+if [ "$_rc" -ne 0 ]; then
+    fail "ensure exited $_rc: $_out"
+elif [ ! -x "$_bin" ]; then
+    fail "path printed no executable: '$_bin'"
+elif [ "$("$_bin" --version)" != "0.61.1" ]; then
+    fail "the installed binary does not report 0.61.1"
+else
+    pass
+fi
+
+it "ensure and doctor on Linux/aarch64 treat xcbeautify as not published instead of failing or fetching"
+r=$(new_repo)
+pins "$r" "xcbeautify 3.2.1 darwin=$SHA_A linux=$SHA_A"
+_unameshim="$r/uname-shim"
+uname_arch_shim "$_unameshim" aarch64
+_curlguard="$r/curl-guard"
+_curlcalls="$r/curl-calls"
+curl_call_guard "$_curlguard" "$_curlcalls"
+_out=$(cd "$r" && PATH="$_unameshim:$_curlguard:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
+_rc=$?
+_doc=$(cd "$r" && PATH="$_unameshim:$_curlguard:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh doctor 2>/dev/null)
+if [ "$_rc" -ne 0 ]; then
+    fail "ensure exited $_rc for a tool with no linux_arm64 build: $_out"
+elif ! printf '%s\n' "$_doc" | grep -q '^platform   linux_arm64$'; then
+    fail "doctor did not report platform linux_arm64: $_doc"
+elif ! printf '%s\n' "$_doc" | grep -q 'xcbeautify.*n/a on linux_arm64'; then
+    fail "doctor did not report xcbeautify as n/a on linux_arm64: $_doc"
+else
+    pass
+fi
+
+it "ensure on Linux/aarch64 refuses a positional pin for lack of a linux_arm64 hash and fetches nothing"
+# A positional line has only darwin and linux columns, so it cannot carry an arm64 hash.
+r=$(new_repo)
+pins "$r" "swiftlint 0.63.2 $SHA_A $SHA_A"
+_unameshim="$r/uname-shim"
+uname_arch_shim "$_unameshim" aarch64
+_curlguard="$r/curl-guard"
+_curlcalls="$r/curl-calls"
+curl_call_guard "$_curlguard" "$_curlcalls"
+_out=$(cd "$r" && PATH="$_unameshim:$_curlguard:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh ensure 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    fail "ensure exited 0 for a pin with no linux_arm64 hash: $_out"
+elif ! printf '%s' "$_out" | grep -qF "swiftlint has no linux_arm64 hash in grubstake.tools (run: ./grubstake.sh add swiftlint@0.63.2)"; then
+    fail "refused, but not with the missing-hash message: $_out"
+elif [ -s "$_curlcalls" ]; then
+    fail "curl was called despite the missing hash: $(cat "$_curlcalls")"
 else
     pass
 fi
@@ -6552,11 +6673,11 @@ it "all specs in one add land in the pins file together, sorted"
 # #102's other half: every spec in a batched call has to be recorded, not just processed, and the
 # result has to read as one coherent file (loop-append order is not sort order). tool_member names
 # swiftlint's and swiftformat's own archive entries differently only on linux, so one zip carrying
-# all four platform-qualified names lets a single curl shim serve every hash and install call for
+# every platform-qualified name lets a single curl shim serve every hash and install call for
 # both tools without a second fixture or a real network fetch. Every pin check below matches the
-# whole line -- name, version, and both 64-hex sha columns -- so a regression that records the
-# right tool name with the wrong version, or a real version with an empty ("-") or malformed sha
-# column, cannot read as "present" the way a bare name-anchored grep would.
+# whole line -- name, version, and a 64-hex sha for each platform key -- so a regression that records the
+# right tool name with the wrong version, or a real version with a missing or malformed sha,
+# cannot read as "present" the way a bare name-anchored grep would.
 r=$(new_repo)
 _msrc="$r/multi-src"
 mkdir -p "$_msrc" || fixture_die "cannot create $_msrc"
@@ -6564,10 +6685,11 @@ printf '#!/bin/sh\necho 0.63.2\n' >"$_msrc/swiftlint" || fixture_die "cannot wri
 printf '#!/bin/sh\necho 0.63.2\n' >"$_msrc/swiftlint-static" || fixture_die "cannot write the fixture swiftlint-static member"
 printf '#!/bin/sh\necho 0.61.1\n' >"$_msrc/swiftformat" || fixture_die "cannot write the fixture swiftformat member"
 printf '#!/bin/sh\necho 0.61.1\n' >"$_msrc/swiftformat_linux" || fixture_die "cannot write the fixture swiftformat_linux member"
-chmod +x "$_msrc/swiftlint" "$_msrc/swiftlint-static" "$_msrc/swiftformat" "$_msrc/swiftformat_linux" \
+printf '#!/bin/sh\necho 0.61.1\n' >"$_msrc/swiftformat_linux_aarch64" || fixture_die "cannot write the fixture swiftformat_linux_aarch64 member"
+chmod +x "$_msrc/swiftlint" "$_msrc/swiftlint-static" "$_msrc/swiftformat" "$_msrc/swiftformat_linux" "$_msrc/swiftformat_linux_aarch64" \
     || fixture_die "cannot make the fixture archive members executable"
 _mzip="$r/multi-release.zip"
-(cd "$_msrc" && zip -q "$_mzip" swiftlint swiftlint-static swiftformat swiftformat_linux) \
+(cd "$_msrc" && zip -q "$_mzip" swiftlint swiftlint-static swiftformat swiftformat_linux swiftformat_linux_aarch64) \
     || fixture_die "cannot zip the multi-tool fixture release"
 _mshim="$r/curl-shim"
 mkdir -p "$_mshim" || fixture_die "cannot create the fixture curl shim dir"
@@ -6587,10 +6709,10 @@ _out=$(cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubst
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
     fail "add exited non-zero over two valid specs: $_out"
-elif ! grep -qE '^swiftlint[[:space:]]+0\.63\.2[[:space:]]+[0-9a-f]{64}[[:space:]]+[0-9a-f]{64}$' "$_pins_path" 2>/dev/null; then
-    fail "swiftlint's pin is not 0.63.2 with a real sha256 in both platform columns: $(grep '^swiftlint' "$_pins_path" 2>/dev/null)"
-elif ! grep -qE '^swiftformat[[:space:]]+0\.61\.1[[:space:]]+[0-9a-f]{64}[[:space:]]+[0-9a-f]{64}$' "$_pins_path" 2>/dev/null; then
-    fail "swiftformat's pin is not 0.61.1 with a real sha256 in both platform columns: $(grep '^swiftformat' "$_pins_path" 2>/dev/null)"
+elif ! grep -qE '^swiftlint[[:space:]]+0\.63\.2[[:space:]]+darwin=[0-9a-f]{64}[[:space:]]+linux=[0-9a-f]{64}[[:space:]]+linux_arm64=[0-9a-f]{64}$' "$_pins_path" 2>/dev/null; then
+    fail "swiftlint's pin is not 0.63.2 with a real sha256 for every platform key: $(grep '^swiftlint' "$_pins_path" 2>/dev/null)"
+elif ! grep -qE '^swiftformat[[:space:]]+0\.61\.1[[:space:]]+darwin=[0-9a-f]{64}[[:space:]]+linux=[0-9a-f]{64}[[:space:]]+linux_arm64=[0-9a-f]{64}$' "$_pins_path" 2>/dev/null; then
+    fail "swiftformat's pin is not 0.61.1 with a real sha256 for every platform key: $(grep '^swiftformat' "$_pins_path" 2>/dev/null)"
 elif [ "$(LC_ALL=C sort "$_pins_path")" != "$(cat "$_pins_path" 2>/dev/null)" ]; then
     fail "grubstake.tools is not sorted after a batched add:
 $(cat "$_pins_path" 2>/dev/null)"
@@ -6892,8 +7014,8 @@ elif ! grep -qE '^swiftlint[[:space:]]+1\.0\.0[[:space:]]' "$_pins_path" 2>/dev/
     fail "add exited 0 but grubstake.tools has no swiftlint pin line: $(cat "$_pins_path" 2>/dev/null)"
 else
     _line=$(grep '^swiftlint' "$_pins_path")
-    _dsha=$(printf '%s\n' "$_line" | awk '{print $3}')
-    _lsha=$(printf '%s\n' "$_line" | awk '{print $4}')
+    _dsha=$(pin_value "$_pins_path" swiftlint darwin)
+    _lsha=$(pin_value "$_pins_path" swiftlint linux)
     _bin=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftlint)
     _brc=$?
     if [ "$_brc" -ne 0 ]; then
@@ -6908,7 +7030,7 @@ else
 fi
 
 it "add pins a tool whose verified entry is already cached"
-# add's hash loop always fetches both platforms, so any third curl call is install downloading again.
+# add's hash loop always fetches all three platforms, so any fourth curl call is install downloading again.
 r=$(new_repo)
 fake_release "$r" 1.0.0 >/dev/null
 _pins_path="$r/grubstake.tools"
@@ -6933,8 +7055,8 @@ elif [ "$_rc2" -ne 0 ]; then
     fail "second add exited $_rc2 despite an already-verified cache entry: $_out2"
 elif ! grep -qE '^swiftlint[[:space:]]+1\.0\.0[[:space:]]' "$_pins_path" 2>/dev/null; then
     fail "second add exited 0 but grubstake.tools has no swiftlint pin line: $(cat "$_pins_path" 2>/dev/null)"
-elif [ "$_calls" -ne 2 ]; then
-    fail "second add invoked curl $_calls time(s), expected exactly 2 (the hash loop only): $_out2"
+elif [ "$_calls" -ne 3 ]; then
+    fail "second add invoked curl $_calls time(s), expected exactly 3 (the hash loop only): $_out2"
 else
     _bin=$(cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh path swiftlint)
     _brc=$?
@@ -6943,6 +7065,133 @@ else
     else
         pass
     fi
+fi
+
+it "add records darwin, linux and linux_arm64 hashes in the keyed form, one distinct hash per platform"
+# The shim serves different bytes per platform URL, so three equal hashes would mean a key was copied rather than hashed.
+r=$(new_repo)
+fake_release "$r" 1.0.0 >/dev/null
+case "$(host_pin_key)" in
+    darwin) _hostpat='*portable_swiftlint*' ;;
+    linux) _hostpat='*linux_amd64*' ;;
+    linux_arm64) _hostpat='*linux_arm64*' ;;
+esac
+cp "$r/release.zip" "$r/release-linux.zip" || fixture_die "cannot copy the fixture release"
+printf 'l' >>"$r/release-linux.zip" || fixture_die "cannot mutate the linux fixture release"
+cp "$r/release.zip" "$r/release-arm64.zip" || fixture_die "cannot copy the fixture release"
+printf 'a' >>"$r/release-arm64.zip" || fixture_die "cannot mutate the arm64 fixture release"
+cp "$r/release.zip" "$r/release-darwin.zip" || fixture_die "cannot copy the fixture release"
+printf 'd' >>"$r/release-darwin.zip" || fixture_die "cannot mutate the darwin fixture release"
+# The host platform's own URL gets the installable zip; the other two get mutated copies.
+cat >"$r/curl-shim/curl" <<SHIM
+#!/bin/sh
+_out=""; _prev=""; _url=""
+for a in "\$@"; do
+    [ "\$_prev" = "-o" ] && _out="\$a"
+    _prev="\$a"
+    case "\$a" in http*) _url="\$a" ;; esac
+done
+[ -n "\$_out" ] || exit 1
+case "\$_url" in
+    $_hostpat) _src="$r/release.zip" ;;
+    *linux_arm64*) _src="$r/release-arm64.zip" ;;
+    *linux*) _src="$r/release-linux.zip" ;;
+    *) _src="$r/release-darwin.zip" ;;
+esac
+cp "\$_src" "\$_out"
+SHIM
+chmod +x "$r/curl-shim/curl" || fixture_die "cannot make the fixture curl shim executable"
+_pins_path="$r/grubstake.tools"
+_out=$(cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftlint@1.0.0 2>&1)
+_rc=$?
+_line=$(grep '^swiftlint' "$_pins_path" 2>/dev/null)
+_h='[0-9a-f]\{64\}'
+if [ "$_rc" -ne 0 ]; then
+    fail "add exited $_rc: $_out"
+elif ! printf '%s\n' "$_line" | grep -q "^swiftlint 1\.0\.0 darwin=$_h linux=$_h linux_arm64=$_h\$"; then
+    fail "the pin line is not 'swiftlint 1.0.0 darwin=<sha> linux=<sha> linux_arm64=<sha>': $_line"
+else
+    _d=$(pin_value "$_pins_path" swiftlint darwin)
+    _l=$(pin_value "$_pins_path" swiftlint linux)
+    _a=$(pin_value "$_pins_path" swiftlint linux_arm64)
+    if [ "$_d" = "$_l" ] || [ "$_d" = "$_a" ] || [ "$_l" = "$_a" ]; then
+        fail "two platforms recorded the same hash, so a key was not hashed from its own artifact: $_line"
+    elif ! (cd "$r" && GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh check >/dev/null 2>&1); then
+        fail "check failed after add recorded the keyed line: $_line"
+    else
+        pass
+    fi
+fi
+
+it "add omits the linux_arm64 key for a tool that publishes no arm64 build"
+r=$(new_repo)
+_arch="$r/xcb-archive.fixture"
+_src="$r/xcb-src"
+mkdir -p "$_src" || fixture_die "cannot create $_src"
+printf '#!/bin/sh\necho 1.0.0\n' >"$_src/xcbeautify" || fixture_die "cannot write the fixture binary"
+chmod +x "$_src/xcbeautify" || fixture_die "cannot make the fixture binary executable"
+# install_tool picks the extractor by the URL's suffix, so the host's artifact must match it.
+case "$(uname -s)" in
+    Darwin) (cd "$_src" && zip -q "$_arch.zip" xcbeautify && mv "$_arch.zip" "$_arch") || fixture_die "cannot zip the fixture" ;;
+    *) tar -cJf "$_arch" -C "$_src" xcbeautify || fixture_die "cannot tar the fixture" ;;
+esac
+mkdir -p "$r/curl-shim" || fixture_die "cannot create the curl shim dir"
+cat >"$r/curl-shim/curl" <<SHIM
+#!/bin/sh
+_out=""; _prev=""
+for a in "\$@"; do
+    [ "\$_prev" = "-o" ] && _out="\$a"
+    _prev="\$a"
+done
+[ -n "\$_out" ] || exit 1
+cp "$_arch" "\$_out"
+SHIM
+chmod +x "$r/curl-shim/curl" || fixture_die "cannot make the fixture curl shim executable"
+_out=$(cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add xcbeautify@1.0.0 2>&1)
+_rc=$?
+_line=$(grep '^xcbeautify' "$r/grubstake.tools" 2>/dev/null)
+_h='[0-9a-f]\{64\}'
+if [ "$_rc" -ne 0 ]; then
+    fail "add exited $_rc: $_out"
+elif ! printf '%s\n' "$_line" | grep -q "^xcbeautify 1\.0\.0 darwin=$_h linux=$_h\$"; then
+    fail "the pin line is not 'xcbeautify 1.0.0 darwin=<sha> linux=<sha>' with no linux_arm64 key: $_line"
+else
+    pass
+fi
+
+it "add pins a swiftformat release that predates its arm64 asset instead of failing its fetch"
+# swiftformat_linux_aarch64.zip first ships in 0.55.6; an older version must be "no build" on linux_arm64, not a failed add on every host.
+r=$(new_repo)
+_src="$r/sf-src"
+mkdir -p "$_src" || fixture_die "cannot create $_src"
+printf '#!/bin/sh\necho 0.55.5\n' >"$_src/swiftformat" || fixture_die "cannot write the fixture swiftformat member"
+printf '#!/bin/sh\necho 0.55.5\n' >"$_src/swiftformat_linux" || fixture_die "cannot write the fixture swiftformat_linux member"
+chmod +x "$_src/swiftformat" "$_src/swiftformat_linux" || fixture_die "cannot make the fixture members executable"
+(cd "$_src" && zip -q "$r/sf.zip" swiftformat swiftformat_linux) || fixture_die "cannot zip the fixture"
+mkdir -p "$r/curl-shim" || fixture_die "cannot create the curl shim dir"
+# Refuses the aarch64 asset the way GitHub's 404 does for a release that never published it.
+cat >"$r/curl-shim/curl" <<SHIM
+#!/bin/sh
+_out=""; _prev=""
+for a in "\$@"; do
+    case "\$a" in *swiftformat_linux_aarch64*) exit 22 ;; esac
+    [ "\$_prev" = "-o" ] && _out="\$a"
+    _prev="\$a"
+done
+[ -n "\$_out" ] || exit 1
+cp "$r/sf.zip" "\$_out"
+SHIM
+chmod +x "$r/curl-shim/curl" || fixture_die "cannot make the fixture curl shim executable"
+_out=$(cd "$r" && PATH="$r/curl-shim:$PATH" GRUBSTAKE_CACHE="$r/.cache" ./grubstake.sh add swiftformat@0.55.5 2>&1)
+_rc=$?
+_line=$(grep '^swiftformat' "$r/grubstake.tools" 2>/dev/null)
+_h='[0-9a-f]\{64\}'
+if [ "$_rc" -ne 0 ]; then
+    fail "add exited $_rc for a version with no arm64 asset: $_out"
+elif ! printf '%s\n' "$_line" | grep -q "^swiftformat 0\.55\.5 darwin=$_h linux=$_h\$"; then
+    fail "the pin line is not 'swiftformat 0.55.5 darwin=<sha> linux=<sha>' with no linux_arm64 key: $_line"
+else
+    pass
 fi
 
 if [ "$NETWORK" = 1 ]; then
@@ -6969,8 +7218,8 @@ if [ "$NETWORK" = 1 ]; then
         if [ -z "$line" ]; then
             fail "add exited 0 but grubstake.tools has no swiftlint pin line"
         else
-            d=$(echo "$line" | awk '{print $3}')
-            l=$(echo "$line" | awk '{print $4}')
+            d=$(pin_value "$r/grubstake.tools" swiftlint darwin)
+            l=$(pin_value "$r/grubstake.tools" swiftlint linux)
             case "$d$l" in *-*) fail "a platform hash is missing: $line" ;; *) pass ;; esac
         fi
     fi
@@ -7028,19 +7277,19 @@ if [ "$NETWORK" = 1 ]; then
     # The path is the validity, so it must be the hash from grubstake.tools and nothing else.
     r=$(new_repo)
     gs_rc "$r" add swiftlint@0.63.2
-    _sha=$(awk -v c="$(sha_column)" '/^swiftlint/{print $c}' "$r/grubstake.tools")
+    _sha=$(pin_value "$r/grubstake.tools" swiftlint "$(host_pin_key)")
     _bin="$r/.cache/swiftlint/$_sha/swiftlint"
-    [ -x "$_bin" ] && pass || fail "not installed at $_bin (column $(sha_column), sha $_sha)"
+    [ -x "$_bin" ] && pass || fail "not installed at $_bin (key $(host_pin_key), sha $_sha)"
 
     it "published entries are read-only"
     r=$(new_repo)
     gs_rc "$r" add swiftlint@0.63.2
-    _sha=$(awk -v c="$(sha_column)" '/^swiftlint/{print $c}' "$r/grubstake.tools")
+    _sha=$(pin_value "$r/grubstake.tools" swiftlint "$(host_pin_key)")
     _bin="$r/.cache/swiftlint/$_sha/swiftlint"
     # An append refused because the path is wrong reads identically to one refused because the
     # file is read-only, so writability is only provable against an entry that exists.
     if [ ! -x "$_bin" ]; then
-        fail "not installed at $_bin (column $(sha_column), sha $_sha), so writability was never tested"
+        fail "not installed at $_bin (key $(host_pin_key), sha $_sha), so writability was never tested"
     elif { printf 'x' >>"$_bin"; } 2>/dev/null; then
         fail "a published binary was writable"
     else

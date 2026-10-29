@@ -78,7 +78,7 @@ in your major. It never blocks a commit and writes nothing but its own advisory 
 
 ```
 grubstake.sh      the engine, committed to the repo. Its version is the pin.
-grubstake.tools   the pinned tools, one per line: name version sha256-darwin sha256-linux
+grubstake.tools   the pinned tools, one per line: name version platform=sha256 ...
 .githooks/        the pre-commit and commit-msg spines, and the post-commit version notice
 ```
 
@@ -136,7 +136,8 @@ Stage the rest, or stash it with `git stash push --keep-index` and pop it after 
 
 grubstake knows how to install `swiftlint`, `swiftformat`, `xcbeautify`, and `periphery`.
 
-`periphery` publishes no Linux build, so grubstake skips it there rather than failing the run.
+`periphery` publishes no Linux build, `xcbeautify` none for Linux arm64, and `swiftformat` none for
+Linux arm64 before 0.55.6, so grubstake skips each there rather than failing the run.
 
 `periphery`'s upstream repository is archived, and 3.8.0 is the last release published there. The
 project continues as a commercial product, and grubstake installs only the archived open-source
@@ -151,8 +152,9 @@ grubstake's marker), then delete `grubstake.sh`, `grubstake.tools`, grubstake's 
 `.git/grubstake-latest`, and run `git config --unset core.hooksPath`, the only git config grubstake
 writes.
 
-**Platforms.** macOS on arm64 or x86_64, and Linux on x86_64. Any other platform, or any other
-Linux architecture, is refused.
+**Platforms.** macOS on arm64 or x86_64, and Linux on x86_64 or arm64 (aarch64). `xcbeautify` and
+`periphery` have no build on Linux arm64, nor `swiftformat` before 0.55.6. Any other platform, or
+any other Linux architecture, is refused.
 
 **CI.** One job: check out the repo, cache `GRUBSTAKE_CACHE` at an explicit path keyed on
 `grubstake.tools` and `grubstake.sh`, run `./grubstake.sh ensure`, then resolve each tool with

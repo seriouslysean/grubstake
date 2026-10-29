@@ -70,8 +70,8 @@ Two line grammars are accepted, and may coexist in the same file:
 
 - Positional: `name version sha256-darwin sha256-linux`, one line per tool, `-` marking a
   platform with no build.
-- Keyed: `name version key=sha256 [key=sha256 ...]`, one line per tool. `darwin` and `linux` are
-  the keys read today. Every field from the third on matches `[a-z0-9_]+=[0-9a-f]{64}` -- one
+- Keyed: `name version key=sha256 [key=sha256 ...]`, one line per tool. `darwin`, `linux` and
+  `linux_arm64` are the keys read. Every field from the third on matches `[a-z0-9_]+=[0-9a-f]{64}` -- one
   field failing that shape makes the whole file malformed, and every command that reads pins
   refuses it -- and no key repeats on a line; a key inside that
   shape but not read by name yet is accepted and ignored, so a new platform is an addition to this
@@ -82,8 +82,9 @@ Two line grammars are accepted, and may coexist in the same file:
 Coexistence is across tools, not within one: a tool is pinned by exactly one line, positional or
 keyed, and a second line for the same tool is rejected regardless of which form either line uses.
 
-`add` writes the positional form today. A future minor release may switch it to the keyed form;
-every reader described here already accepts both, so that switch would not break a consumer.
+`add` writes the keyed form, omitting the key of a platform with no build. Positional lines are
+still read, but have no `linux_arm64` hash, so on Linux arm64 a positional pin for a tool that
+publishes a build there fails and asks for `add` to be re-run.
 
 ## Hooks
 

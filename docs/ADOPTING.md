@@ -30,8 +30,10 @@ Add each tool at the version the repo already uses, taken from its existing mani
 ./grubstake.sh add swiftlint@<version-from-existing-manifest>
 ```
 
-`add` downloads the artifact for both platforms, records the hashes, and installs. A tool with no
-build for a platform records `-` for that column and is skipped there.
+`add` downloads the artifact for each platform (macOS, Linux x86_64, Linux arm64), records the
+hashes as `platform=sha256` pairs, and installs. A tool with no build for a platform has no pair for
+it and is skipped there. A positional pin written by an older release has no Linux arm64 hash, so
+on Linux arm64 it fails for a tool with a build there; run `add` again to get one.
 
 Verify before going further.
 
@@ -192,7 +194,8 @@ file means stashing the remainder before committing. Stage the rest, or
 with it and leaves the retry committing nothing. This is deliberate and documented; do not try to
 fix it locally.
 
-`periphery` publishes no Linux build, so it is skipped there rather than failing.
+`periphery` publishes no Linux build, `xcbeautify` none for Linux arm64, and `swiftformat` none for
+Linux arm64 before 0.55.6, so each is skipped there rather than failing.
 
 Updates are manual and per repo. Run `./grubstake.sh update` in a repo when you want that repo on a
 newer version, then `./grubstake.sh install` to pick up whatever hook or config change it brought,
